@@ -99,19 +99,29 @@ public sealed class DevOpsDomainTests
     }
 
     [Fact]
-    public void Preview_manifest_can_run_nginx_with_static_hello_world_page()
+    public void Preview_manifest_can_run_vite_react_tailwind_project()
     {
         var resources = PreviewResourceSet.Create(
             "TASK-4825",
             "hello world",
-            "nginxinc/nginx-unprivileged:1.27-alpine",
-            "<!doctype html><html><body><h1>Hello world</h1></body></html>");
+            "ghcr.io/carnufex/rosenvall-devops-preview-base:main",
+            sourceFiles:
+            [
+                new PreviewSourceFile("package-json", "package.json", "{\"scripts\":{\"dev\":\"vite\"}}"),
+                new PreviewSourceFile("src-app-tsx", "src/App.tsx", "export default function App() { return <h1>Hello world</h1>; }"),
+                new PreviewSourceFile("tailwind-config-ts", "tailwind.config.ts", "export default {};")
+            ]);
 
         var manifest = PreviewManifestRenderer.Render(resources);
 
         Assert.Contains("kind: ConfigMap", manifest);
-        Assert.Contains("nginxinc/nginx-unprivileged:1.27-alpine", manifest);
-        Assert.Contains("mountPath: /usr/share/nginx/html/index.html", manifest);
+        Assert.Contains("ghcr.io/carnufex/rosenvall-devops-preview-base:main", manifest);
+        Assert.Contains("initContainers:", manifest);
+        Assert.Contains("npm run dev -- --host 0.0.0.0 --port 8080", manifest);
+        Assert.Contains("/opt/rosenvall-preview/node_modules", manifest);
+        Assert.DoesNotContain("npm install", manifest);
+        Assert.Contains("path: src/App.tsx", manifest);
+        Assert.Contains("path: tailwind.config.ts", manifest);
         Assert.Contains("<h1>Hello world</h1>", manifest);
     }
 }

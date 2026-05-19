@@ -214,7 +214,7 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     }
 
     await hub.Clients.All.SendAsync("aiRunChanged", result);
-    var implementation = store.CompleteLocalNginxImplementation(result.WorkItemId);
+    var implementation = store.CompleteLocalReactImplementation(result.WorkItemId);
     if (implementation is not null)
     {
         var manifest = store.RenderPreviewManifest(result.WorkItemId);
@@ -598,6 +598,516 @@ namespace Rosenvall.DevOps.Api
             needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
     }
 
+    public static class LocalReactPreviewProject
+    {
+        public const string Image = "ghcr.io/carnufex/rosenvall-devops-preview-base:main";
+
+        public static IReadOnlyList<PreviewSourceFile> ForWorkItem(string key, string title, string description) =>
+            ForWorkItem(key, title, description, []);
+
+        public static IReadOnlyList<PreviewSourceFile> ForWorkItem(string key, string title, string description, IEnumerable<string> comments)
+        {
+            var context = string.Join("\n", new[] { title, description }.Concat(comments));
+            return
+            [
+                File("package-json", "package.json", PackageJson()),
+                File("index-html", "index.html", IndexHtml(title)),
+                File("vite-config-ts", "vite.config.ts", ViteConfig()),
+                File("tsconfig-json", "tsconfig.json", TsConfig()),
+                File("tsconfig-app-json", "tsconfig.app.json", TsConfigApp()),
+                File("tsconfig-node-json", "tsconfig.node.json", TsConfigNode()),
+                File("postcss-config-js", "postcss.config.js", PostCssConfig()),
+                File("tailwind-config-ts", "tailwind.config.ts", TailwindConfig()),
+                File("components-json", "components.json", ComponentsJson()),
+                File("src-index-css", "src/index.css", IndexCss()),
+                File("src-main-tsx", "src/main.tsx", MainTsx()),
+                File("src-app-tsx", "src/App.tsx", AppTsx(key, title, description, context)),
+                File("src-lib-utils-ts", "src/lib/utils.ts", UtilsTs()),
+                File("src-components-ui-button-tsx", "src/components/ui/button.tsx", ButtonTsx()),
+                File("src-components-ui-card-tsx", "src/components/ui/card.tsx", CardTsx())
+            ];
+        }
+
+        private static PreviewSourceFile File(string key, string path, string content) =>
+            new(key, path, content.Trim());
+
+        private static string PackageJson() =>
+            """
+            {
+              "name": "rosenvall-ticket-preview",
+              "private": true,
+              "version": "0.0.0",
+              "type": "module",
+              "scripts": {
+                "dev": "vite",
+                "build": "tsc -b && vite build",
+                "preview": "vite preview"
+              },
+              "dependencies": {
+                "@radix-ui/react-slot": "^1.1.0",
+                "class-variance-authority": "^0.7.1",
+                "clsx": "^2.1.1",
+                "lucide-react": "^0.462.0",
+                "react": "^18.3.1",
+                "react-dom": "^18.3.1",
+                "tailwind-merge": "^2.5.2",
+                "tailwindcss-animate": "^1.0.7"
+              },
+              "devDependencies": {
+                "@types/node": "^22.5.5",
+                "@types/react": "^18.3.3",
+                "@types/react-dom": "^18.3.0",
+                "@vitejs/plugin-react": "^5.0.0",
+                "autoprefixer": "^10.4.20",
+                "postcss": "^8.4.47",
+                "tailwindcss": "^3.4.11",
+                "typescript": "^5.5.3",
+                "vite": "^5.4.1"
+              }
+            }
+            """;
+
+        private static string IndexHtml(string title) =>
+            $$"""
+            <!doctype html>
+            <html lang="en">
+              <head>
+                <meta charset="UTF-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+                <title>{{WebUtility.HtmlEncode(title)}}</title>
+              </head>
+              <body>
+                <div id="root"></div>
+                <script type="module" src="/src/main.tsx"></script>
+              </body>
+            </html>
+            """;
+
+        private static string ViteConfig() =>
+            """
+            import { defineConfig } from "vite";
+            import react from "@vitejs/plugin-react";
+            import path from "path";
+
+            export default defineConfig({
+              server: {
+                host: "0.0.0.0",
+                port: 8080
+              },
+              resolve: {
+                alias: {
+                  "@": path.resolve(__dirname, "./src")
+                }
+              },
+              plugins: [react()]
+            });
+            """;
+
+        private static string TsConfig() =>
+            """
+            {
+              "files": [],
+              "references": [
+                { "path": "./tsconfig.app.json" },
+                { "path": "./tsconfig.node.json" }
+              ],
+              "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                  "@/*": ["./src/*"]
+                }
+              }
+            }
+            """;
+
+        private static string TsConfigApp() =>
+            """
+            {
+              "compilerOptions": {
+                "target": "ES2020",
+                "useDefineForClassFields": true,
+                "lib": ["ES2020", "DOM", "DOM.Iterable"],
+                "allowJs": false,
+                "skipLibCheck": true,
+                "esModuleInterop": true,
+                "allowSyntheticDefaultImports": true,
+                "strict": true,
+                "forceConsistentCasingInFileNames": true,
+                "module": "ESNext",
+                "moduleResolution": "Node",
+                "resolveJsonModule": true,
+                "isolatedModules": true,
+                "noEmit": true,
+                "jsx": "react-jsx"
+              },
+              "include": ["src"]
+            }
+            """;
+
+        private static string TsConfigNode() =>
+            """
+            {
+              "compilerOptions": {
+                "composite": true,
+                "skipLibCheck": true,
+                "module": "ESNext",
+                "moduleResolution": "Node",
+                "allowSyntheticDefaultImports": true
+              },
+              "include": ["vite.config.ts"]
+            }
+            """;
+
+        private static string PostCssConfig() =>
+            """
+            export default {
+              plugins: {
+                tailwindcss: {},
+                autoprefixer: {}
+              }
+            };
+            """;
+
+        private static string TailwindConfig() =>
+            """
+            import type { Config } from "tailwindcss";
+
+            export default {
+              darkMode: ["class"],
+              content: ["./index.html", "./src/**/*.{ts,tsx}"],
+              prefix: "",
+              theme: {
+                container: {
+                  center: true,
+                  padding: "2rem",
+                  screens: {
+                    "2xl": "1400px"
+                  }
+                },
+                extend: {
+                  colors: {
+                    border: "hsl(var(--border))",
+                    input: "hsl(var(--input))",
+                    ring: "hsl(var(--ring))",
+                    background: "hsl(var(--background))",
+                    foreground: "hsl(var(--foreground))",
+                    primary: {
+                      DEFAULT: "hsl(var(--primary))",
+                      foreground: "hsl(var(--primary-foreground))"
+                    },
+                    secondary: {
+                      DEFAULT: "hsl(var(--secondary))",
+                      foreground: "hsl(var(--secondary-foreground))"
+                    },
+                    muted: {
+                      DEFAULT: "hsl(var(--muted))",
+                      foreground: "hsl(var(--muted-foreground))"
+                    },
+                    accent: {
+                      DEFAULT: "hsl(var(--accent))",
+                      foreground: "hsl(var(--accent-foreground))"
+                    },
+                    card: {
+                      DEFAULT: "hsl(var(--card))",
+                      foreground: "hsl(var(--card-foreground))"
+                    }
+                  },
+                  borderRadius: {
+                    lg: "var(--radius)",
+                    md: "calc(var(--radius) - 2px)",
+                    sm: "calc(var(--radius) - 4px)"
+                  }
+                }
+              },
+              plugins: [require("tailwindcss-animate")]
+            } satisfies Config;
+            """;
+
+        private static string ComponentsJson() =>
+            """
+            {
+              "$schema": "https://ui.shadcn.com/schema.json",
+              "style": "default",
+              "rsc": false,
+              "tsx": true,
+              "tailwind": {
+                "config": "tailwind.config.ts",
+                "css": "src/index.css",
+                "baseColor": "slate",
+                "cssVariables": true,
+                "prefix": ""
+              },
+              "aliases": {
+                "components": "@/components",
+                "utils": "@/lib/utils",
+                "ui": "@/components/ui",
+                "lib": "@/lib",
+                "hooks": "@/hooks"
+              }
+            }
+            """;
+
+        private static string IndexCss() =>
+            """
+            @tailwind base;
+            @tailwind components;
+            @tailwind utilities;
+
+            @layer base {
+              :root {
+                --background: 222.2 84% 4.9%;
+                --foreground: 210 40% 98%;
+                --card: 222.2 84% 4.9%;
+                --card-foreground: 210 40% 98%;
+                --primary: 210 40% 98%;
+                --primary-foreground: 222.2 47.4% 11.2%;
+                --secondary: 217.2 32.6% 17.5%;
+                --secondary-foreground: 210 40% 98%;
+                --muted: 217.2 32.6% 17.5%;
+                --muted-foreground: 215 20.2% 65.1%;
+                --accent: 217.2 32.6% 17.5%;
+                --accent-foreground: 210 40% 98%;
+                --border: 217.2 32.6% 17.5%;
+                --input: 217.2 32.6% 17.5%;
+                --ring: 212.7 26.8% 83.9%;
+                --radius: 0.5rem;
+              }
+
+              * {
+                @apply border-border;
+              }
+
+              body {
+                @apply bg-background text-foreground;
+              }
+            }
+            """;
+
+        private static string MainTsx() =>
+            """
+            import React from "react";
+            import ReactDOM from "react-dom/client";
+            import App from "./App";
+            import "./index.css";
+
+            document.documentElement.classList.add("dark");
+
+            ReactDOM.createRoot(document.getElementById("root")!).render(
+              <React.StrictMode>
+                <App />
+              </React.StrictMode>
+            );
+            """;
+
+        private static string AppTsx(string key, string title, string description, string context)
+        {
+            var isBurger = ContainsAny(context, "hamburg", "burgare", "cheeseburgare", "fiskburgare", "burger");
+            var textClass = ContainsAny(context, "orange", "orange text", "orangefärgad", "orangefargad", "orangefÃ¤rgad") ? "text-[#ff8a00]" : "text-foreground";
+            var backgroundClass = ContainsAny(context, "gul bakgrund", "yellow background", "gul") ? "bg-[#ffd84d]" : "bg-background";
+            var panelClass = ContainsAny(context, "gul bakgrund", "yellow background", "gul") ? "bg-[#fff3a6] text-slate-950" : "bg-card";
+            var mode = isBurger ? "burger" : "default";
+            return $$"""
+            import { Sparkles, ShoppingCart } from "lucide-react";
+            import { Button } from "@/components/ui/button";
+            import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+            import { useMemo, useState } from "react";
+
+            const workItem = {
+              key: {{Json(key)}},
+              title: {{Json(title)}},
+              description: {{Json(description)}},
+              mode: {{Json(mode)}},
+              textClass: {{Json(textClass)}},
+              backgroundClass: {{Json(backgroundClass)}},
+              panelClass: {{Json(panelClass)}}
+            };
+
+            const burgers = [
+              { id: "cheese", name: "Cheeseburgare", description: "Ost, dressing, sallad och rostat bröd.", price: 89 },
+              { id: "fish", name: "Fiskburgare", description: "Panerad fisk, citronkräm och krispig sallad.", price: 99 }
+            ];
+
+            export default function App() {
+              const [quantities, setQuantities] = useState<Record<string, number>>({ cheese: 0, fish: 0 });
+              const total = useMemo(
+                () => burgers.reduce((sum, burger) => sum + burger.price * (quantities[burger.id] ?? 0), 0),
+                [quantities]
+              );
+              const count = useMemo(
+                () => burgers.reduce((sum, burger) => sum + (quantities[burger.id] ?? 0), 0),
+                [quantities]
+              );
+
+              return (
+                <main className={`min-h-screen ${workItem.backgroundClass} ${workItem.textClass}`}>
+                  <section className="container grid min-h-screen content-center gap-8 py-10">
+                    <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                      <Sparkles className="h-4 w-4" />
+                      {workItem.key} React/Tailwind preview
+                    </div>
+                    <Card className={`${workItem.panelClass} border-border/80`}>
+                      <CardHeader>
+                        <CardTitle className="text-4xl">{workItem.title}</CardTitle>
+                        <p className="max-w-3xl text-base leading-7 text-muted-foreground">{workItem.description}</p>
+                      </CardHeader>
+                      <CardContent>
+                        {workItem.mode === "burger" ? (
+                          <div className="grid gap-4 md:grid-cols-[1fr_320px]">
+                            <div className="grid gap-4 md:grid-cols-2">
+                              {burgers.map((burger) => (
+                                <Card key={burger.id} className="bg-background/60">
+                                  <CardHeader>
+                                    <CardTitle className="text-xl">{burger.name}</CardTitle>
+                                    <p className="text-sm text-muted-foreground">{burger.description}</p>
+                                  </CardHeader>
+                                  <CardContent className="grid gap-3">
+                                    <strong className="text-amber-300">{burger.price} kr</strong>
+                                    <label className="grid gap-2 text-sm font-medium">
+                                      Antal {burger.name.toLowerCase()}
+                                      <input
+                                        className="h-10 rounded-md border border-input bg-background px-3"
+                                        min={0}
+                                        type="number"
+                                        value={quantities[burger.id] ?? 0}
+                                        onChange={(event) =>
+                                          setQuantities((current) => ({ ...current, [burger.id]: Number(event.target.value || 0) }))
+                                        }
+                                      />
+                                    </label>
+                                  </CardContent>
+                                </Card>
+                              ))}
+                            </div>
+                            <Card className="bg-background/60">
+                              <CardHeader>
+                                <CardTitle className="flex items-center gap-2 text-xl">
+                                  <ShoppingCart className="h-5 w-5" />
+                                  Beställning
+                                </CardTitle>
+                              </CardHeader>
+                              <CardContent className="grid gap-4">
+                                <p className="text-sm text-muted-foreground">
+                                  {count > 0
+                                    ? `${count} hamburgare valda. Totalt ${total} kr.`
+                                    : "Välj antal och klicka på Beställ."}
+                                </p>
+                                <Button>Beställ</Button>
+                              </CardContent>
+                            </Card>
+                          </div>
+                        ) : (
+                          <div className="grid gap-4 md:grid-cols-3">
+                            {["Plan", "Build", "Preview"].map((step) => (
+                              <Card key={step} className="bg-background/60">
+                                <CardHeader>
+                                  <CardTitle className="text-xl">{step}</CardTitle>
+                                </CardHeader>
+                                <CardContent className="text-sm text-muted-foreground">
+                                  React, TypeScript and Tailwind are ready for this ticket slice.
+                                </CardContent>
+                              </Card>
+                            ))}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </section>
+                </main>
+              );
+            }
+            """;
+        }
+
+        private static string UtilsTs() =>
+            """
+            import { type ClassValue, clsx } from "clsx";
+            import { twMerge } from "tailwind-merge";
+
+            export function cn(...inputs: ClassValue[]) {
+              return twMerge(clsx(inputs));
+            }
+            """;
+
+        private static string ButtonTsx() =>
+            """
+            import * as React from "react";
+            import { Slot } from "@radix-ui/react-slot";
+            import { cva, type VariantProps } from "class-variance-authority";
+            import { cn } from "@/lib/utils";
+
+            const buttonVariants = cva(
+              "inline-flex h-10 items-center justify-center gap-2 rounded-md px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+              {
+                variants: {
+                  variant: {
+                    default: "bg-primary text-primary-foreground hover:bg-primary/90",
+                    secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+                    outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground"
+                  }
+                },
+                defaultVariants: {
+                  variant: "default"
+                }
+              }
+            );
+
+            export interface ButtonProps
+              extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+                VariantProps<typeof buttonVariants> {
+              asChild?: boolean;
+            }
+
+            const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+              ({ className, variant, asChild = false, ...props }, ref) => {
+                const Comp = asChild ? Slot : "button";
+                return <Comp className={cn(buttonVariants({ variant, className }))} ref={ref} {...props} />;
+              }
+            );
+            Button.displayName = "Button";
+
+            export { Button, buttonVariants };
+            """;
+
+        private static string CardTsx() =>
+            """
+            import * as React from "react";
+            import { cn } from "@/lib/utils";
+
+            const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+              ({ className, ...props }, ref) => (
+                <div ref={ref} className={cn("rounded-lg border bg-card text-card-foreground shadow-sm", className)} {...props} />
+              )
+            );
+            Card.displayName = "Card";
+
+            const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+              ({ className, ...props }, ref) => (
+                <div ref={ref} className={cn("flex flex-col space-y-1.5 p-6", className)} {...props} />
+              )
+            );
+            CardHeader.displayName = "CardHeader";
+
+            const CardTitle = React.forwardRef<HTMLHeadingElement, React.HTMLAttributes<HTMLHeadingElement>>(
+              ({ className, ...props }, ref) => (
+                <h3 ref={ref} className={cn("font-semibold leading-none tracking-normal", className)} {...props} />
+              )
+            );
+            CardTitle.displayName = "CardTitle";
+
+            const CardContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+              ({ className, ...props }, ref) => <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+            );
+            CardContent.displayName = "CardContent";
+
+            export { Card, CardHeader, CardTitle, CardContent };
+            """;
+
+        private static string Json(string value) => JsonSerializer.Serialize(value);
+
+        private static bool ContainsAny(string value, params string[] needles) =>
+            needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
+    }
+
     public sealed class OllamaPlanProvider(HttpClient httpClient, IConfiguration configuration)
     {
         public async Task<string> GeneratePlanAsync(string provider, string model, WorkItemDetailDto context, CancellationToken cancellationToken)
@@ -694,7 +1204,8 @@ namespace Rosenvall.DevOps.Api
               Required output:
               - A concrete plan.
               - Include tests.
-              - If the task asks for hello world, target an nginx static preview page.
+              - Target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
+              - The preview should be containerized and exposed through the existing Kubernetes preview route.
               - Preserve every concrete visual/content requirement from the title, description, and comments.
               - If colors, language, exact text, layout, or behavior are specified, repeat them explicitly in the plan.
               """;
@@ -1015,13 +1526,13 @@ namespace Rosenvall.DevOps.Api
                 var item = _items.Single(i => i.Id == run.WorkItemId);
                 item.Status = "Review";
                 item.AiStatus = "ImplementationRunning";
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", "Implementation approved. Local nginx implementation runner has started.", DateTimeOffset.UtcNow));
+                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", "Implementation approved. Local React/Tailwind implementation runner has started.", DateTimeOffset.UtcNow));
                 Persist();
                 return run;
             }
         }
 
-        public WorkItemDetailDto? CompleteLocalNginxImplementation(Guid workItemId)
+        public WorkItemDetailDto? CompleteLocalReactImplementation(Guid workItemId)
         {
             lock (_lock)
             {
@@ -1035,19 +1546,19 @@ namespace Rosenvall.DevOps.Api
                     .Where(comment => comment.WorkItemId == item.Id && !string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase))
                     .OrderBy(comment => comment.CreatedAt)
                     .Select(comment => comment.Body);
-                var html = LocalNginxPreviewHtml.ForWorkItem(item.Key, item.Title, item.Description, humanComments);
-                var resources = PreviewResourceSet.Create(item.Key, item.Title, LocalNginxPreviewHtml.Image, html);
+                var sourceFiles = LocalReactPreviewProject.ForWorkItem(item.Key, item.Title, item.Description, humanComments);
+                var resources = PreviewResourceSet.Create(item.Key, item.Title, LocalReactPreviewProject.Image, sourceFiles: sourceFiles);
                 item.PullRequestUrl = null;
                 item.AiStatus = "Completed";
                 item.Status = "Review";
 
-                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Running", DateTimeOffset.UtcNow.AddDays(7), html, resources.Namespace, resources.Name);
+                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Running", DateTimeOffset.UtcNow.AddDays(7), null, resources.Namespace, resources.Name);
                 _previews.RemoveAll(p => p.WorkItemId == item.Id);
                 _previews.Add(preview);
                 AddPreviewEvent(item, preview, "Created", "system", $"Preview created for {item.Key}.");
                 _development.RemoveAll(d => d.WorkItemId == item.Id);
-                _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto("local/hello-world-nginx", $"local/{resources.Name}", null, "Local nginx preview ready")));
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Local nginx implementation completed. Demo is available at {preview.Url}.", DateTimeOffset.UtcNow));
+                _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto("local/vite-react-tailwind", $"local/{resources.Name}", null, "Local React/Tailwind preview ready")));
+                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Local React/Tailwind implementation completed. Demo is available at {preview.Url}.", DateTimeOffset.UtcNow));
                 Persist();
                 return GetWorkItemDetail(item.Id);
             }
@@ -1246,13 +1757,24 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
+                var sourceFiles = string.Equals(preview.Image, LocalReactPreviewProject.Image, StringComparison.OrdinalIgnoreCase)
+                    ? LocalReactPreviewProject.ForWorkItem(
+                        item.Key,
+                        item.Title,
+                        item.Description,
+                        _comments
+                            .Where(comment => comment.WorkItemId == item.Id && !string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase))
+                            .OrderBy(comment => comment.CreatedAt)
+                            .Select(comment => comment.Body))
+                    : Array.Empty<PreviewSourceFile>();
                 var resources = PreviewResourceSet.Create(
                     item.Key,
                     item.Title,
                     preview.Image,
                     preview.StaticHtml,
                     preview.Namespace ?? "devops-previews",
-                    includeNamespace: preview.Namespace is not null);
+                    includeNamespace: preview.Namespace is not null,
+                    sourceFiles: sourceFiles);
                 return PreviewManifestRenderer.Render(resources);
             }
         }

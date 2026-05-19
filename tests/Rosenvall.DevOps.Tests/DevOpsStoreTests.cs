@@ -110,49 +110,54 @@ public sealed class DevOpsStoreTests
         var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
         var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "hello world", "Create a page.", "Todo", "Medium", null));
 
-        var run = store.StartAiPlan(item.Id, "ollama", "llama3:8b", "Provider generated hello-world nginx plan.");
+        var run = store.StartAiPlan(item.Id, "ollama", "llama3:8b", "Provider generated React/Tailwind plan.");
 
         Assert.NotNull(run);
-        Assert.Equal("Provider generated hello-world nginx plan.", run.Plan);
-        Assert.Contains(store.GetWorkItemDetail(item.Id)!.Comments, comment => comment.Kind == "Plan" && comment.Body == "Provider generated hello-world nginx plan.");
+        Assert.Equal("Provider generated React/Tailwind plan.", run.Plan);
+        Assert.Contains(store.GetWorkItemDetail(item.Id)!.Comments, comment => comment.Kind == "Plan" && comment.Body == "Provider generated React/Tailwind plan.");
     }
 
     [Fact]
-    public void Local_nginx_implementation_completes_approved_hello_world_with_preview()
+    public void Local_react_implementation_completes_approved_hello_world_with_preview()
     {
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
         var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
-        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "hello world", "Create a tiny hello-world page served by nginx.", "Todo", "Medium", null));
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "hello world", "Create a tiny hello-world page as a React/Tailwind preview.", "Todo", "Medium", null));
         var run = store.StartAiPlan(item.Id, "ollama", "llama3:8b")!;
         store.ApproveAiRun(run.Id, "crille");
 
-        var detail = store.CompleteLocalNginxImplementation(run.WorkItemId);
+        var detail = store.CompleteLocalReactImplementation(run.WorkItemId);
         var manifest = store.RenderPreviewManifest(run.WorkItemId);
 
         Assert.NotNull(detail);
         Assert.NotNull(detail.Preview);
         Assert.Equal("Completed", detail.Item.AiStatus);
-        Assert.Equal("nginxinc/nginx-unprivileged:1.27-alpine", detail.Preview.Image);
+        Assert.Equal("ghcr.io/carnufex/rosenvall-devops-preview-base:main", detail.Preview.Image);
         Assert.Contains("hello-world", detail.Preview.Url);
         Assert.StartsWith("devops-preview-task-", detail.Preview.Namespace);
         Assert.Contains("hello-world", detail.Preview.Namespace);
-        Assert.Contains("Local nginx implementation completed", detail.Comments.Last().Body);
+        Assert.Contains("Local React/Tailwind implementation completed", detail.Comments.Last().Body);
         Assert.Contains("kind: ConfigMap", manifest);
-        Assert.Contains("<h1>Hello world</h1>", manifest);
+        Assert.Contains("tailwind.config.ts", manifest);
+        Assert.Contains("components.json", manifest);
+        Assert.Contains("npm run dev -- --host 0.0.0.0 --port 8080", manifest);
+        Assert.DoesNotContain("npm install", manifest);
+        Assert.Contains("React/Tailwind preview", manifest);
     }
 
     [Fact]
-    public void Local_nginx_html_preserves_simple_color_requirements()
+    public void Local_react_project_preserves_simple_color_requirements()
     {
-        var html = LocalNginxPreviewHtml.ForWorkItem("TASK-1", "test sida", "gor en hello-world hemsida med orange text och gul bakgrund");
+        var files = LocalReactPreviewProject.ForWorkItem("TASK-1", "test sida", "gor en hello-world hemsida med orange text och gul bakgrund");
+        var app = files.Single(file => file.Path == "src/App.tsx").Content;
 
-        Assert.Contains("#ff8a00", html);
-        Assert.Contains("#ffd84d", html);
+        Assert.Contains("text-[#ff8a00]", app);
+        Assert.Contains("bg-[#ffd84d]", app);
     }
 
     [Fact]
-    public void Local_nginx_implementation_uses_human_comments_for_richer_preview()
+    public void Local_react_implementation_uses_human_comments_for_richer_preview()
     {
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
@@ -162,13 +167,15 @@ public sealed class DevOpsStoreTests
         var run = store.StartAiPlan(item.Id, "ollama", "qwen3.5:latest", "Plan with burger quantities and order button.")!;
         store.ApproveAiRun(run.Id, "crille");
 
-        var detail = store.CompleteLocalNginxImplementation(item.Id);
+        var detail = store.CompleteLocalReactImplementation(item.Id);
+        var manifest = store.RenderPreviewManifest(item.Id);
 
-        Assert.NotNull(detail?.Preview?.StaticHtml);
-        Assert.Contains("Antal cheeseburgare", detail.Preview.StaticHtml);
-        Assert.Contains("Antal fiskburgare", detail.Preview.StaticHtml);
-        Assert.Contains("Beställ", detail.Preview.StaticHtml);
-        Assert.Contains("addEventListener", detail.Preview.StaticHtml);
+        Assert.NotNull(detail?.Preview);
+        Assert.Null(detail.Preview.StaticHtml);
+        Assert.Contains("Cheeseburgare", manifest);
+        Assert.Contains("Fiskburgare", manifest);
+        Assert.Contains("Beställ", manifest);
+        Assert.Contains("useState", manifest);
     }
 
     [Fact]
@@ -237,10 +244,10 @@ public sealed class DevOpsStoreTests
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
         var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
-        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Restart preview", "Create nginx preview.", "Todo", "Medium", null));
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Restart preview", "Create React preview.", "Todo", "Medium", null));
         var run = store.StartAiPlan(item.Id, "ollama", "llama3:8b")!;
         store.ApproveAiRun(run.Id, "crille");
-        store.CompleteLocalNginxImplementation(item.Id);
+        store.CompleteLocalReactImplementation(item.Id);
 
         var stopped = store.StopPreview(item.Id, "crille", "Manual stop")!;
         var restarted = store.MarkPreviewRunning(item.Id, "crille", "Manual start")!;

@@ -56,3 +56,13 @@ jobs:
           tags: |
             ${{ env.IMAGE_PREFIX }}-frontend:main
             ${{ env.IMAGE_PREFIX }}-frontend:${{ github.sha }}
+
+      - name: Build and push preview base
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: preview-base/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-preview-base:main
+            ${{ env.IMAGE_PREFIX }}-preview-base:${{ github.sha }}

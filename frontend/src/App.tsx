@@ -198,6 +198,12 @@ type WorkItemForm = {
   assignee: string;
 };
 
+type AssigneeOption = {
+  value: string;
+  label: string;
+  hint?: string;
+};
+
 const emptyForm: WorkItemForm = {
   title: '',
   description: '',
@@ -270,6 +276,11 @@ function App() {
   const [error, setError] = React.useState<string | null>(null);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
   const [selectedAiModel, setSelectedAiModel] = React.useState<string | null>(null);
+  const actor = auth.status === 'ready' ? auth.userName : 'Christopher Rosenvall';
+  const assigneeOptions = React.useMemo(
+    () => buildAssigneeOptions(shell.status === 'ready' ? shell.board : null, auth),
+    [shell, auth]
+  );
 
   React.useEffect(() => {
     setAccessTokenProvider(() => auth.status === 'ready' ? auth.accessToken : null);
@@ -389,44 +400,44 @@ function App() {
     },
     approvePlan: async (runId, workItemId) => {
       await runAction('Approving plan and starting preview', async () => {
-        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: 'crille' });
+        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
       });
     },
     discardPlan: async (runId, workItemId) => {
       await runAction('Discarding plan', async () => {
-        await api.post<AiRun>(`/api/ai-runs/${runId}/discard`, { discardedBy: 'crille' });
+        await api.post<AiRun>(`/api/ai-runs/${runId}/discard`, { discardedBy: actor });
         await refreshAfterChange(workItemId);
       });
     },
     approvePullRequest: async (workItemId) => {
       await runAction('Approving PR and stopping preview', async () => {
-        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: 'crille' });
+        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
       });
     },
     startPreview: async (workItemId) => {
       await runAction('Starting preview', async () => {
-        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/start`, { actor: 'crille' });
+        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/start`, { actor });
         await refreshAfterChange(workItemId);
       });
     },
     stopPreview: async (workItemId) => {
       await runAction('Stopping preview', async () => {
-        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/stop`, { actor: 'crille' });
+        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/stop`, { actor });
         await refreshAfterChange(workItemId);
       });
     },
     addComment: async (id, body) => {
       await runAction('Posting comment', async () => {
-        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: 'crille', kind: 'Comment', body });
+        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
         await refreshAfterChange(id);
       });
     },
     addCommentAndAskAi: async (id, body) => {
       await runAction('Posting comment and asking AI', async () => {
         if (shell.status !== 'ready') return;
-        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: 'crille', kind: 'Comment', body });
+        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: shell.settings.ai.provider,
           model: resolveActiveAiModel(shell.settings, selectedAiModel)
@@ -477,6 +488,7 @@ function App() {
           busy={selected.busy || busyAction !== null}
           board={shell.status === 'ready' ? shell.board : null}
           aiModel={shell.status === 'ready' ? resolveActiveAiModel(shell.settings, selectedAiModel) : null}
+          assigneeOptions={assigneeOptions}
           actions={actions}
           onClose={() => setSelected({ status: 'closed' })}
         />
@@ -485,6 +497,7 @@ function App() {
         <CreateWorkItemModal
           board={shell.board}
           initialStatus={createStatus}
+          assigneeOptions={assigneeOptions}
           onCreate={actions.createCard}
           onClose={() => setCreateStatus(null)}
         />
@@ -496,7 +509,7 @@ function App() {
 type AuthState =
   | { status: 'checking' }
   | { status: 'disabled' }
-  | { status: 'ready'; accessToken: string; userName: string }
+  | { status: 'ready'; accessToken: string; userName: string; userEmail?: string }
   | { status: 'error'; message: string };
 
 function useAuth(): AuthState {
@@ -508,7 +521,15 @@ function useAuth(): AuthState {
 
     initializeAuth()
       .then((user) => {
-        if (!cancelled) setAuth({ status: 'ready', accessToken: user.access_token, userName: user.profile.name || user.profile.preferred_username || user.profile.email || 'Authenticated' });
+        if (!cancelled) {
+          const userEmail = typeof user.profile.email === 'string' ? user.profile.email : undefined;
+          setAuth({
+            status: 'ready',
+            accessToken: user.access_token,
+            userName: user.profile.name || user.profile.preferred_username || userEmail || 'Authenticated',
+            userEmail
+          });
+        }
       })
       .catch((error) => {
         if (!cancelled) setAuth({ status: 'error', message: error instanceof Error ? error.message : 'Authentication failed' });
@@ -842,12 +863,13 @@ function WorkItemCardPreview({ item }: { item: WorkItemSummary }) {
   );
 }
 
-function WorkItemModal({ detail, aiRuns, busy, board, aiModel, actions, onClose }: {
+function WorkItemModal({ detail, aiRuns, busy, board, aiModel, assigneeOptions, actions, onClose }: {
   detail: WorkItemDetail;
   aiRuns: AiRun[];
   busy: boolean;
   board: Board | null;
   aiModel: string | null;
+  assigneeOptions: AssigneeOption[];
   actions: BoardActions;
   onClose: () => void;
 }) {
@@ -870,7 +892,7 @@ function WorkItemModal({ detail, aiRuns, busy, board, aiModel, actions, onClose 
             <label>Type<select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value })}><option>Feature</option><option>Bug</option><option>Task</option><option>Epic</option></select></label>
             <label>Status<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{board?.columns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>
             <label>Priority<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
-            <label>Assignee<input value={form.assignee} onChange={(event) => setForm({ ...form, assignee: event.target.value })} placeholder="Unassigned" /></label>
+            <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
           </div>
           <div className="modal-actions">
             <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
@@ -956,9 +978,10 @@ function AiPlanPanel({ detail, aiRuns, latestPlan, latestActive, busy, aiModel, 
   );
 }
 
-function CreateWorkItemModal({ board, initialStatus, onCreate, onClose }: {
+function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, onClose }: {
   board: Board;
   initialStatus: string;
+  assigneeOptions: AssigneeOption[];
   onCreate: (form: WorkItemForm) => Promise<void>;
   onClose: () => void;
 }) {
@@ -976,7 +999,7 @@ function CreateWorkItemModal({ board, initialStatus, onCreate, onClose }: {
           <label>Type<select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value })}><option>Feature</option><option>Bug</option><option>Task</option><option>Epic</option></select></label>
           <label>Status<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{board.columns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>
           <label>Priority<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
-          <label>Assignee<input value={form.assignee} onChange={(event) => setForm({ ...form, assignee: event.target.value })} /></label>
+          <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
         </div>
         <div className="modal-actions">
           <button className="primary-action" disabled={!form.title.trim()}><Plus size={16} />Create card</button>
@@ -984,6 +1007,26 @@ function CreateWorkItemModal({ board, initialStatus, onCreate, onClose }: {
         </div>
       </form>
     </ModalFrame>
+  );
+}
+
+function AssigneeSelect({ value, options, onChange }: {
+  value: string;
+  options: AssigneeOption[];
+  onChange: (value: string) => void;
+}) {
+  const normalizedOptions = options.some((option) => option.value === value)
+    ? options
+    : [...options, { value, label: value, hint: 'Existing card' }];
+
+  return (
+    <select value={value} onChange={(event) => onChange(event.target.value)}>
+      {normalizedOptions.map((option) => (
+        <option value={option.value} key={option.value}>
+          {option.hint ? `${option.label} - ${option.hint}` : option.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -1141,6 +1184,33 @@ function formFromDetail(detail: WorkItemDetail): WorkItemForm {
     priority: detail.item.priority,
     assignee: detail.item.assignee ?? ''
   };
+}
+
+function buildAssigneeOptions(board: Board | null, auth: AuthState): AssigneeOption[] {
+  const options = new Map<string, AssigneeOption>();
+  options.set('', { value: '', label: 'Unassigned' });
+
+  if (auth.status === 'ready') {
+    options.set(auth.userName, { value: auth.userName, label: auth.userName, hint: 'Signed in' });
+    if (auth.userEmail && auth.userEmail !== auth.userName) {
+      options.set(auth.userEmail, { value: auth.userEmail, label: auth.userEmail, hint: 'Email' });
+    }
+  } else {
+    options.set('Christopher Rosenvall', {
+      value: 'Christopher Rosenvall',
+      label: 'Christopher Rosenvall',
+      hint: 'Local dev'
+    });
+  }
+
+  for (const item of board?.columns.flatMap((column) => column.items) ?? []) {
+    const assignee = item.assignee?.trim();
+    if (assignee && !options.has(assignee)) {
+      options.set(assignee, { value: assignee, label: assignee });
+    }
+  }
+
+  return [...options.values()];
 }
 
 function initials(value: string) {

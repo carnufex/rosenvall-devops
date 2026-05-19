@@ -17,7 +17,8 @@ RDO is a vertical MVP for an AI-assisted DevOps workspace:
 - SQLite for local state when no PostgreSQL connection string is configured.
 - Workspaces, boards, work items, comments, AI runs, approvals, preview lifecycle, preview history, and internal pipeline status.
 - Local Ollama planning provider.
-- Controlled local nginx implementation runner for preview demos.
+- Controlled local Vite React/Tailwind implementation runner for preview demos.
+- Preview pods use `ghcr.io/carnufex/rosenvall-devops-preview-base:main`, a prewarmed image with shared npm dependencies installed.
 - Preview manifests target Kubernetes namespaces with Deployment, Service, ConfigMap, and HTTPRoute.
 
 The app currently runs locally as:
@@ -45,7 +46,8 @@ Comment iteration:
 Implementation/preview:
 
 - V1 does not yet let Ollama freely implement arbitrary code.
-- V1 uses a controlled nginx static-preview generator.
+- V1 uses a controlled Vite React/Tailwind preview generator inspired by Lovable/shadcn project structure.
+- Per-ticket preview source is mounted from a ConfigMap; the prewarmed preview-base image supplies `node_modules` so startup runs Vite directly instead of `npm install`.
 - The generator reads title, description, and human comments.
 - Burger-related requests generate an interactive burger ordering page with quantities and a `Beställ` button.
 - Approving a plan creates/updates the preview and applies Kubernetes resources through `kubectl`.
@@ -115,7 +117,7 @@ Last known verification before handoff:
 
 Highest-value next slices:
 
-1. Replace the controlled nginx generator with a real implementation agent contract.
+1. Replace the controlled React/Tailwind generator with a real implementation agent contract.
 2. Decide whether implementation runs in GitHub Actions, a local runner, or a Kubernetes job.
 3. Replace `kubectl` process execution with a Kubernetes .NET client or make the API image explicitly include `kubectl` for in-cluster service-account use.
 4. Add a model picker in UI instead of only reading the default from settings.

@@ -202,9 +202,17 @@ public sealed record PreviewResourceSet(
     string Image,
     string ParentGateway,
     string? StaticHtml,
+    IReadOnlyList<PreviewSourceFile> SourceFiles,
     bool IncludeNamespace)
 {
-    public static PreviewResourceSet Create(string key, string title, string image, string? staticHtml = null, string? namespaceOverride = null, bool includeNamespace = true)
+    public static PreviewResourceSet Create(
+        string key,
+        string title,
+        string image,
+        string? staticHtml = null,
+        string? namespaceOverride = null,
+        bool includeNamespace = true,
+        IReadOnlyList<PreviewSourceFile>? sourceFiles = null)
     {
         if (string.IsNullOrWhiteSpace(image))
         {
@@ -214,9 +222,19 @@ public sealed record PreviewResourceSet(
         var hostname = PreviewHostnames.ForWorkItem(key, title);
         var name = hostname.Split('.')[0];
         var @namespace = string.IsNullOrWhiteSpace(namespaceOverride) ? $"devops-preview-{name}" : namespaceOverride.Trim();
-        return new PreviewResourceSet(@namespace, name, hostname, image.Trim(), "gateway/external", string.IsNullOrWhiteSpace(staticHtml) ? null : staticHtml.Trim(), includeNamespace);
+        return new PreviewResourceSet(
+            @namespace,
+            name,
+            hostname,
+            image.Trim(),
+            "gateway/external",
+            string.IsNullOrWhiteSpace(staticHtml) ? null : staticHtml.Trim(),
+            sourceFiles ?? [],
+            includeNamespace);
     }
 }
+
+public sealed record PreviewSourceFile(string Key, string Path, string Content);
 
 public static class PreviewManifestRenderer
 {
@@ -245,6 +263,21 @@ public static class PreviewManifestRenderer
             builder.AppendLine(IndentBlock(resources.StaticHtml, 4));
             builder.AppendLine("---");
         }
+        if (resources.SourceFiles.Count > 0)
+        {
+            builder.AppendLine("apiVersion: v1");
+            builder.AppendLine("kind: ConfigMap");
+            builder.AppendLine("metadata:");
+            builder.AppendLine($"  name: {resources.Name}-source");
+            builder.AppendLine($"  namespace: {resources.Namespace}");
+            builder.AppendLine("data:");
+            foreach (var file in resources.SourceFiles)
+            {
+                builder.AppendLine($"  {file.Key}: |");
+                builder.AppendLine(IndentBlock(file.Content, 4));
+            }
+            builder.AppendLine("---");
+        }
 
         builder.AppendLine("apiVersion: apps/v1");
         builder.AppendLine("kind: Deployment");
@@ -269,11 +302,41 @@ public static class PreviewManifestRenderer
         builder.AppendLine("        runAsNonRoot: true");
         builder.AppendLine("        runAsUser: 101");
         builder.AppendLine("        runAsGroup: 101");
+        builder.AppendLine("        fsGroup: 101");
         builder.AppendLine("        seccompProfile:");
         builder.AppendLine("          type: RuntimeDefault");
+        if (resources.SourceFiles.Count > 0)
+        {
+            builder.AppendLine("      initContainers:");
+            builder.AppendLine("        - name: prepare-source");
+            builder.AppendLine($"          image: {resources.Image}");
+            builder.AppendLine("          command:");
+            builder.AppendLine("            - sh");
+            builder.AppendLine("            - -c");
+            builder.AppendLine("            - cp -R /source/. /workspace && cp -R /opt/rosenvall-preview/node_modules /workspace/node_modules && chmod -R u+rwX,g+rwX /workspace");
+            builder.AppendLine("          securityContext:");
+            builder.AppendLine("            allowPrivilegeEscalation: false");
+            builder.AppendLine("            capabilities:");
+            builder.AppendLine("              drop:");
+            builder.AppendLine("                - ALL");
+            builder.AppendLine("          volumeMounts:");
+            builder.AppendLine("            - name: app-source");
+            builder.AppendLine("              mountPath: /source");
+            builder.AppendLine("              readOnly: true");
+            builder.AppendLine("            - name: app-workspace");
+            builder.AppendLine("              mountPath: /workspace");
+        }
         builder.AppendLine("      containers:");
         builder.AppendLine("        - name: app");
         builder.AppendLine($"          image: {resources.Image}");
+        if (resources.SourceFiles.Count > 0)
+        {
+            builder.AppendLine("          workingDir: /workspace");
+            builder.AppendLine("          command:");
+            builder.AppendLine("            - sh");
+            builder.AppendLine("            - -c");
+            builder.AppendLine("            - npm run dev -- --host 0.0.0.0 --port 8080");
+        }
         builder.AppendLine("          securityContext:");
         builder.AppendLine("            allowPrivilegeEscalation: false");
         builder.AppendLine("            capabilities:");
@@ -288,10 +351,36 @@ public static class PreviewManifestRenderer
             builder.AppendLine("            - name: static-content");
             builder.AppendLine("              mountPath: /usr/share/nginx/html/index.html");
             builder.AppendLine("              subPath: index.html");
+        }
+        if (resources.SourceFiles.Count > 0)
+        {
+            builder.AppendLine("          volumeMounts:");
+            builder.AppendLine("            - name: app-workspace");
+            builder.AppendLine("              mountPath: /workspace");
+        }
+        if (resources.StaticHtml is not null || resources.SourceFiles.Count > 0)
+        {
             builder.AppendLine("      volumes:");
+        }
+        if (resources.StaticHtml is not null)
+        {
             builder.AppendLine("        - name: static-content");
             builder.AppendLine("          configMap:");
             builder.AppendLine($"            name: {resources.Name}-content");
+        }
+        if (resources.SourceFiles.Count > 0)
+        {
+            builder.AppendLine("        - name: app-source");
+            builder.AppendLine("          configMap:");
+            builder.AppendLine($"            name: {resources.Name}-source");
+            builder.AppendLine("            items:");
+            foreach (var file in resources.SourceFiles)
+            {
+                builder.AppendLine($"              - key: {file.Key}");
+                builder.AppendLine($"                path: {file.Path}");
+            }
+            builder.AppendLine("        - name: app-workspace");
+            builder.AppendLine("          emptyDir: {}");
         }
 
         builder.AppendLine("---");

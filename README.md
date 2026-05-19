@@ -43,17 +43,17 @@ npm run dev
 
 Open `http://localhost:5173`.
 
-## Hello-World Nginx Example
+## React/Tailwind Preview Example
 
 The v1 implementation example is now end-to-end inside the app:
 
 1. Create a work item named `hello world`.
 2. Click `Generate AI plan`.
 3. Approve the plan.
-4. The API runs the local nginx implementation runner, creates a preview record, and returns a demo URL like `https://task-4825-hello-world.rosenvall.se`.
+4. The API runs the local React/Tailwind implementation runner, creates a preview record, and returns a demo URL like `https://task-4825-hello-world.rosenvall.se`.
 5. Fetch the Kubernetes manifest from `GET /api/previews/{workItemId}/manifest`.
 
-The manifest runs `nginxinc/nginx-unprivileged:1.27-alpine` with a ConfigMap-mounted `index.html`.
+The manifest runs `ghcr.io/carnufex/rosenvall-devops-preview-base:main` with per-ticket Vite/React/Tailwind source mounted from a ConfigMap. The base image is prewarmed with shared npm dependencies so preview pods do not run `npm install` at startup.
 
 To apply a generated preview to the cluster:
 
