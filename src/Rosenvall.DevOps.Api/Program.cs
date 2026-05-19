@@ -1898,11 +1898,22 @@ namespace Rosenvall.DevOps.Api
                     throw new AiPlanProviderUnavailableException("Codex provider could not start; no plan was created.");
                 }
 
-                await process.StandardInput.WriteAsync(BuildPrompt(context).AsMemory(), cancellationToken);
-                process.StandardInput.Close();
-
                 var stdOut = process.StandardOutput.ReadToEndAsync(cancellationToken);
                 var stdErr = process.StandardError.ReadToEndAsync(cancellationToken);
+                try
+                {
+                    await process.StandardInput.WriteAsync(BuildPrompt(context).AsMemory(), cancellationToken);
+                    process.StandardInput.Close();
+                }
+                catch (IOException ex)
+                {
+                    logger.LogDebug(ex, "Codex provider closed stdin before the prompt was fully written.");
+                }
+                catch (InvalidOperationException ex)
+                {
+                    logger.LogDebug(ex, "Codex provider stdin was unavailable before the prompt was written.");
+                }
+
                 using var timeoutCancellation = new CancellationTokenSource(timeout);
                 using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
                 try
