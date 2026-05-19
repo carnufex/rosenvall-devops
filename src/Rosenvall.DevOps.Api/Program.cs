@@ -1927,6 +1927,7 @@ namespace Rosenvall.DevOps.Api
             startInfo.ArgumentList.Add("--ephemeral");
             startInfo.ArgumentList.Add("--ignore-user-config");
             startInfo.ArgumentList.Add("--ignore-rules");
+            startInfo.ArgumentList.Add("--skip-git-repo-check");
             startInfo.ArgumentList.Add("--sandbox");
             startInfo.ArgumentList.Add("read-only");
             startInfo.ArgumentList.Add("--output-last-message");

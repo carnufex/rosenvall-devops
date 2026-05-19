@@ -682,6 +682,28 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Codex_cli_provider_skips_git_repo_check_for_server_workspace()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+        var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Codex plan", "Use server-side Codex outside git.", "Todo", "Medium", null));
+        var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+        var fakeCodex = CreateFakeCodexScript(exitCode: 0, plan: "Plan from non-git workspace.", requireSkipGitRepoCheck: true);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:Path"] = fakeCodex,
+                ["Ai:Codex:Home"] = Path.Combine(Path.GetTempPath(), $"codex-home-{Guid.NewGuid():N}")
+            })
+            .Build();
+        var provider = new CodexCliPlanProvider(configuration, NullLogger<CodexCliPlanProvider>.Instance);
+
+        var plan = await provider.GeneratePlanAsync("gpt-5.4", context, CancellationToken.None);
+
+        Assert.Equal("Plan from non-git workspace.", plan);
+    }
+
+    [Fact]
     public void Codex_executable_resolver_prefers_windows_cmd_shim_over_extensionless_file()
     {
         if (!OperatingSystem.IsWindows())
@@ -895,16 +917,21 @@ public sealed class DevOpsStoreTests
         }
     }
 
-    private static string CreateFakeCodexScript(int exitCode, string plan)
+    private static string CreateFakeCodexScript(int exitCode, string plan, bool requireSkipGitRepoCheck = false)
     {
         if (!OperatingSystem.IsWindows())
         {
             var unixScriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-{Guid.NewGuid():N}.sh");
             var escapedPlan = plan.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+            var requiredSkipCheck = requireSkipGitRepoCheck ? "1" : "0";
             File.WriteAllText(unixScriptPath, $$"""
 #!/usr/bin/env sh
 last=""
+has_skip=0
 while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--skip-git-repo-check" ]; then
+    has_skip=1
+  fi
   if [ "$1" = "--output-last-message" ]; then
     shift
     last="$1"
@@ -912,6 +939,10 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
+if [ "{{requiredSkipCheck}}" = "1" ] && [ "$has_skip" != "1" ]; then
+  printf '%s\n' 'Not inside a trusted directory and --skip-git-repo-check was not specified.' >&2
+  exit 1
+fi
 if [ -n "$last" ]; then printf '%s\n' '{{escapedPlan}}' > "$last"; fi
 exit {{exitCode}}
 """);
@@ -920,11 +951,14 @@ exit {{exitCode}}
         }
 
         var scriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-{Guid.NewGuid():N}.cmd");
+        var requiredSkipCheckWindows = requireSkipGitRepoCheck ? "1" : "0";
         File.WriteAllText(scriptPath, $"""
 @echo off
 set last=
+set hasSkip=0
 :loop
 if "%~1"=="" goto done
+if "%~1"=="--skip-git-repo-check" set hasSkip=1
 if "%~1"=="--output-last-message" goto found
 shift
 goto loop
@@ -932,6 +966,10 @@ goto loop
 shift
 set "last=%~1"
 :done
+if "{requiredSkipCheckWindows}"=="1" if not "%hasSkip%"=="1" (
+  echo Not inside a trusted directory and --skip-git-repo-check was not specified. 1>&2
+  exit /b 1
+)
 if defined last echo {plan}> "%last%"
 exit /b {exitCode}
 """);
