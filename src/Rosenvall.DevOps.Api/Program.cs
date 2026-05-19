@@ -6,6 +6,7 @@ using Rosenvall.DevOps.Core;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -15,6 +16,10 @@ builder.Services.AddProblemDetails();
 builder.Services.AddHealthChecks();
 builder.Services.AddSignalR();
 builder.Services.AddHttpClient<OllamaPlanProvider>();
+builder.Services.AddTransient<IAiPlanProvider>(services => services.GetRequiredService<OllamaPlanProvider>());
+builder.Services.AddSingleton<IAiPlanProvider, CodexCliPlanProvider>();
+builder.Services.AddSingleton<AiPlanProviderRouter>();
+builder.Services.AddSingleton<CodexCliPreviewSourceProvider>();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
@@ -34,6 +39,8 @@ builder.Services.AddDbContextFactory<DevOpsStateDbContext>(options =>
 });
 builder.Services.AddSingleton<DevOpsStore>();
 builder.Services.AddSingleton<PreviewEnvironmentOrchestrator>();
+builder.Services.AddSingleton<PipelineJobOrchestrator>();
+builder.Services.AddHostedService<PreviewHealthMonitor>();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("frontend", policy =>
@@ -102,8 +109,22 @@ api.MapPost("/workspaces", async (CreateWorkspaceRequest request, DevOpsStore st
 api.MapGet("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, DevOpsStore store) =>
     store.GetBoards(workspaceId) is { Count: > 0 } boards ? Results.Ok(boards) : Results.NotFound());
 
+api.MapPost("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, CreateBoardRequest request, DevOpsStore store) =>
+    store.CreateBoard(workspaceId, request) is { } board ? Results.Created($"/api/boards/{board.Id}", board) : Results.NotFound());
+
 api.MapGet("/boards/{boardId:guid}", (Guid boardId, DevOpsStore store) =>
     store.GetBoard(boardId) is { } board ? Results.Ok(board) : Results.NotFound());
+
+api.MapGet("/boards/{boardId:guid}/timeline", (Guid boardId, DevOpsStore store) =>
+    store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetTimeline(boardId)));
+
+api.MapGet("/repositories", (DevOpsStore store) => store.GetRepositories());
+
+api.MapPost("/repositories", (CreateRepositoryRequest request, DevOpsStore store) =>
+{
+    var repository = store.CreateRepository(request);
+    return Results.Created($"/api/repositories/{repository.Id}", repository);
+});
 
 api.MapGet("/work-items", (DevOpsStore store) => store.GetWorkItems());
 api.MapPost("/work-items", async (CreateWorkItemRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
@@ -134,7 +155,6 @@ api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, DevOpsSto
         if (!cleanup.Succeeded)
         {
             store.RecordPreviewFailure(workItemId, "CleanupFailed", "crille", cleanup.Message);
-            return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
         }
     }
 
@@ -177,7 +197,49 @@ api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, Ad
     return Results.Created($"/api/work-items/{workItemId}", comment);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, DevOpsStore store, OllamaPlanProvider planner, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    try
+    {
+        var comment = store.UpdateComment(commentId, request.Actor, request.Body);
+        if (comment is null)
+        {
+            return Results.NotFound();
+        }
+
+        await hub.Clients.All.SendAsync("commentChanged", comment);
+        return Results.Ok(comment);
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status403Forbidden);
+    }
+});
+
+api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, string actor, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    try
+    {
+        var deleted = store.DeleteComment(commentId, actor);
+        if (!deleted)
+        {
+            return Results.NotFound();
+        }
+
+        await hub.Clients.All.SendAsync("commentDeleted", commentId);
+        return Results.NoContent();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status403Forbidden);
+    }
+});
+
+api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, DevOpsStore store, AiPlanProviderRouter planner, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
     var context = store.GetWorkItemDetail(workItemId);
     if (context is null)
@@ -190,7 +252,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     {
         plan = await planner.GeneratePlanAsync(request.Provider, request.Model, context, cancellationToken);
     }
-    catch (OllamaUnavailableException ex)
+    catch (AiPlanProviderUnavailableException ex)
     {
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
@@ -205,16 +267,43 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     return Results.Accepted($"/api/ai-runs/{run.Id}", run);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, DevOpsStore store, CodexCliPreviewSourceProvider previewSourceProvider, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
-    var result = store.ApproveAiRun(aiRunId, request.ApprovedBy);
+    AiRun? result;
+    try
+    {
+        result = store.ApproveAiRun(aiRunId, request.ApprovedBy);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+    }
+
     if (result is null)
     {
         return Results.NotFound();
     }
 
     await hub.Clients.All.SendAsync("aiRunChanged", result);
-    var implementation = store.CompleteLocalReactImplementation(result.WorkItemId);
+    var context = store.GetWorkItemDetail(result.WorkItemId);
+    if (context is null)
+    {
+        return Results.NotFound();
+    }
+
+    IReadOnlyList<PreviewSourceFile> sourceFiles;
+    try
+    {
+        var implementationModel = configuration["Ai:Codex:Model"] ?? "gpt-5.4";
+        sourceFiles = await previewSourceProvider.GenerateSourceAsync(implementationModel, result, context, cancellationToken);
+    }
+    catch (AiPlanProviderUnavailableException ex)
+    {
+        store.RecordImplementationFailure(result.WorkItemId, request.ApprovedBy, ex.Message);
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var implementation = store.CompletePreviewImplementation(result.WorkItemId, sourceFiles, "codex");
     if (implementation is not null)
     {
         var manifest = store.RenderPreviewManifest(result.WorkItemId);
@@ -227,7 +316,7 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
                 return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
             }
 
-            store.MarkPreviewRunning(result.WorkItemId, request.ApprovedBy, apply.Message);
+            store.MarkPreviewProvisioning(result.WorkItemId, apply.Message);
             implementation = store.GetWorkItemDetail(result.WorkItemId);
         }
 
@@ -299,7 +388,7 @@ api.MapPost("/work-items/{workItemId:guid}/preview/start", async (Guid workItemI
         return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
     }
 
-    var detail = store.MarkPreviewRunning(workItemId, request.Actor, apply.Message);
+    var detail = store.MarkPreviewProvisioning(workItemId, apply.Message);
     await hub.Clients.All.SendAsync("previewChanged", detail?.Preview);
     return detail is null ? Results.NotFound() : Results.Ok(detail);
 });
@@ -327,6 +416,33 @@ api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId
 api.MapGet("/preview-environments", (DevOpsStore store) => store.GetPreviewEnvironments());
 api.MapGet("/preview-events", (DevOpsStore store) => store.GetPreviewEvents());
 api.MapGet("/pipelines", (DevOpsStore store) => store.GetPipelineStatuses());
+api.MapGet("/metrics", (Guid? boardId, DevOpsStore store) => store.GetMetrics(boardId));
+api.MapGet("/assignees", (Guid? boardId, DevOpsStore store, IConfiguration configuration) => store.GetAssignees(boardId, configuration));
+
+api.MapPost("/pipeline-runs", (RecordPipelineRunRequest request, DevOpsStore store) =>
+    store.RecordPipelineRun(request) is { } run ? Results.Created($"/api/pipeline-runs/{run.Id}", run) : Results.NotFound());
+
+api.MapPost("/pipeline-runs/{pipelineRunId:guid}/execute", async (Guid pipelineRunId, ExecutePipelineRunRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, CancellationToken cancellationToken) =>
+{
+    var manifest = store.RenderPipelineJobManifest(pipelineRunId);
+    if (manifest is null)
+    {
+        return Results.NotFound();
+    }
+
+    var apply = await jobs.ApplyAsync(manifest, cancellationToken);
+    if (!apply.Succeeded)
+    {
+        var failed = store.MarkPipelineRunFailed(pipelineRunId, request.Actor, apply.Message);
+        return failed is null ? Results.NotFound() : Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var executing = store.MarkPipelineRunExecuting(pipelineRunId, request.Actor);
+    return executing is null ? Results.NotFound() : Results.Accepted($"/api/pipeline-runs/{pipelineRunId}", executing);
+});
+
+api.MapGet("/pipeline-runs/{pipelineRunId:guid}/manifest", (Guid pipelineRunId, DevOpsStore store) =>
+    store.RenderPipelineJobManifest(pipelineRunId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
 
 api.MapGet("/previews/{workItemId:guid}/manifest", (Guid workItemId, DevOpsStore store) =>
     store.RenderPreviewManifest(workItemId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
@@ -340,39 +456,132 @@ namespace Rosenvall.DevOps.Api
     public sealed class DevOpsHub : Hub;
 
     public sealed record WorkspaceDto(Guid Id, string Name, string EnvironmentName, string Region, int ActiveProjects, int OpenPullRequests, int SuccessfulAiImplementations, int ComputeUsagePercent);
-    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns);
+    public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt);
+    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
     public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
-    public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null);
-    public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt);
+    public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null);
+    public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
     public sealed record PreviewEventDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string EventType, string? Namespace, string? Url, string Actor, string Message, DateTimeOffset CreatedAt);
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
+    public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
+    public sealed record TimelineEventDto(Guid Id, Guid? BoardId, Guid? RepositoryId, Guid? WorkItemId, string Kind, string Title, string Message, string Actor, string? Url, DateTimeOffset CreatedAt);
     public sealed record DevelopmentDto(string Repository, string Branch, string? PullRequestUrl, string ChecksStatus, string? PullRequestApprovedBy = null, DateTimeOffset? PullRequestApprovedAt = null);
-    public sealed record SettingsDto(GitHubSettingsDto GitHub, AiSettingsDto Ai, PreviewSettingsDto Preview);
+    public sealed record SettingsDto(GitHubSettingsDto GitHub, AiSettingsDto Ai, PreviewSettingsDto Preview, RepositoryHostingSettingsDto Repositories, AuthentikSettingsDto Authentik);
     public sealed record GitHubSettingsDto(string Account, string TargetRepository, string BranchWatchPatterns, bool Connected);
-    public sealed record AiSettingsDto(string Provider, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels, bool AutoReviewPullRequests);
+    public sealed record AiSettingsDto(string Provider, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels, bool AutoReviewPullRequests, IReadOnlyList<AiProviderSettingsDto> AvailableProviders);
+    public sealed record AiProviderSettingsDto(string Provider, string DisplayName, string Status, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels);
     public sealed record PreviewSettingsDto(string Domain, int DefaultTtlDays, string Namespace);
+    public sealed record RepositoryHostingSettingsDto(string Provider, string Mode, string ApiBaseUrl, bool CanCreateRepositories);
+    public sealed record AuthentikSettingsDto(bool Enabled, string Authority, string UsersEndpoint);
+    public sealed record MetricsDto(Guid? BoardId, int TokensUsed, int CodeAdded, int CodeDeleted, int PipelineRuns);
+    public sealed record AssigneeDto(string Id, string DisplayName, string Email, string Source);
 
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
+    public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null);
+    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch);
     public sealed record CreateWorkItemRequest(Guid BoardId, string Type, string Title, string Description, string Status, string Priority, string? Assignee);
     public sealed record UpdateWorkItemRequest(string Title, string Description, string Type, string Status, string Priority, string? Assignee);
     public sealed record MoveWorkItemRequest(string Status, int SortOrder);
     public sealed record AddCommentRequest(string Author, string Kind, string Body);
+    public sealed record UpdateCommentRequest(string Actor, string Body);
     public sealed record StartAiPlanRequest(string Provider, string Model);
     public sealed record ApproveAiRunRequest(string ApprovedBy);
     public sealed record DiscardAiRunRequest(string DiscardedBy);
     public sealed record ApprovePullRequestRequest(string ApprovedBy);
     public sealed record PreviewActionRequest(string Actor);
+    public sealed record RecordPipelineRunRequest(Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
+    public sealed record ExecutePipelineRunRequest(string Actor);
     public sealed record GitHubCallbackRequest(Guid WorkItemId, string Repository, string Branch, string? PullRequestUrl, string Image, string ChecksStatus, string? StaticHtml = null);
 
-    public sealed class OllamaUnavailableException(string message) : InvalidOperationException(message);
+    public class AiPlanProviderUnavailableException(string message) : InvalidOperationException(message);
+    public sealed class OllamaUnavailableException(string message) : AiPlanProviderUnavailableException(message);
+
+    public static class PipelineJobManifestRenderer
+    {
+        public static string Render(PipelineRunDto run, RepositoryDto repository)
+        {
+            var name = SafeName($"pipeline-{run.Stage}-{repository.Name}-{run.Id:N}");
+            return $$"""
+                   apiVersion: batch/v1
+                   kind: Job
+                   metadata:
+                     name: {{name}}
+                     namespace: rosenvall-devops-pipelines
+                     labels:
+                       app.kubernetes.io/part-of: rosenvall-devops-pipeline
+                       rosenvall.devops/repository: {{SafeName(repository.Name)}}
+                   spec:
+                     backoffLimit: 0
+                     template:
+                       metadata:
+                         labels:
+                           app.kubernetes.io/name: {{name}}
+                       spec:
+                         restartPolicy: Never
+                         securityContext:
+                           runAsNonRoot: true
+                           runAsUser: 1000
+                           runAsGroup: 1000
+                           seccompProfile:
+                             type: RuntimeDefault
+                         containers:
+                           - name: runner
+                             image: alpine/git:2.47.2
+                             securityContext:
+                               allowPrivilegeEscalation: false
+                               capabilities:
+                                 drop:
+                                   - ALL
+                             env:
+                               - name: ROSENVALL_PIPELINE_RUN_ID
+                                 value: "{{run.Id}}"
+                               - name: ROSENVALL_REPOSITORY_PROVIDER
+                                 value: "{{repository.Provider}}"
+                               - name: ROSENVALL_REPOSITORY_URL
+                                 value: "{{repository.RemoteUrl}}"
+                               - name: ROSENVALL_DEFAULT_BRANCH
+                                 value: "{{repository.DefaultBranch}}"
+                             command:
+                               - sh
+                               - -c
+                               - git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$ROSENVALL_REPOSITORY_URL" /workspace/repo && git -C /workspace/repo log --oneline -5
+                   """;
+        }
+
+        private static string SafeName(string value)
+        {
+            var chars = value.ToLowerInvariant()
+                .Select(character => char.IsLetterOrDigit(character) ? character : '-')
+                .ToArray();
+            var safe = new string(chars).Trim('-');
+            while (safe.Contains("--", StringComparison.Ordinal))
+            {
+                safe = safe.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return safe.Length <= 52 ? safe : safe[..52].Trim('-');
+        }
+    }
 
     public sealed record PreviewCleanupResult(bool Succeeded, string Message)
     {
         public static PreviewCleanupResult Ok(string message) => new(true, message);
         public static PreviewCleanupResult Failed(string message) => new(false, message);
+    }
+
+    public sealed record PreviewHealthCheckResult(string Status, string Phase, string Message, string? PodName = null, string? FailureReason = null, string? FailureLog = null)
+    {
+        public static PreviewHealthCheckResult Provisioning(string phase, string message, string? podName = null) =>
+            new("Provisioning", phase, message, podName);
+
+        public static PreviewHealthCheckResult Running(string? podName, string message) =>
+            new("Running", "Ready", message, podName);
+
+        public static PreviewHealthCheckResult Failed(string reason, string message, string? failureLog = null, string? podName = null) =>
+            new("Failed", "Failed", message, podName, reason, failureLog);
     }
 
     public sealed class PreviewEnvironmentOrchestrator(IConfiguration configuration, ILogger<PreviewEnvironmentOrchestrator> logger)
@@ -385,10 +594,37 @@ namespace Rosenvall.DevOps.Api
             return await RunKubectlAsync("delete -f - --ignore-not-found=true", manifest, cancellationToken);
         }
 
+        public async Task<PreviewHealthCheckResult> CheckHealthAsync(PreviewDto preview, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(preview.Namespace) || string.IsNullOrWhiteSpace(preview.ResourceName))
+            {
+                return PreviewHealthCheckResult.Failed("MissingPreviewMetadata", "Preview namespace or resource name is missing.");
+            }
+
+            var deployment = await RunKubectlOutputAsync($"get deployment {preview.ResourceName} -n {preview.Namespace} -o json", cancellationToken);
+            if (!deployment.Succeeded)
+            {
+                return PreviewHealthCheckResult.Provisioning("Waiting for deployment.", deployment.Message);
+            }
+
+            var pods = await RunKubectlOutputAsync($"get pods -n {preview.Namespace} -l app.kubernetes.io/name={preview.ResourceName} -o json", cancellationToken);
+            if (!pods.Succeeded)
+            {
+                return PreviewHealthCheckResult.Provisioning("Waiting for pod.", pods.Message);
+            }
+
+            return await AnalyzeHealthAsync(preview, deployment.Message, pods.Message, cancellationToken);
+        }
+
         private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Preview:KubectlPath"] ?? "kubectl";
             var kubeconfigPath = ResolveKubeconfigPath(configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
+            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            {
+                return PreviewCleanupResult.Failed($"Preview orchestration failed: Configured kubeconfig was not found: {kubeconfigPath}");
+            }
+
             var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
                 ? command
                 : $"--kubeconfig \"{kubeconfigPath}\" {command}";
@@ -410,10 +646,25 @@ namespace Rosenvall.DevOps.Api
                 };
 
                 process.Start();
-                await process.StandardInput.WriteAsync(manifest);
-                process.StandardInput.Close();
                 var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
                 var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+                try
+                {
+                    await process.StandardInput.WriteAsync(manifest);
+                    process.StandardInput.Close();
+                }
+                catch (IOException ex)
+                {
+                    logger.LogWarning(ex, "Preview orchestration stdin closed before manifest was written.");
+                    var earlyExit = await ReadKubectlExitAsync(process, outputTask, errorTask, cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(earlyExit))
+                    {
+                        return PreviewCleanupResult.Failed($"Preview orchestration failed: {earlyExit}");
+                    }
+
+                    throw;
+                }
+
                 await process.WaitForExitAsync(cancellationToken);
 
                 var output = (await outputTask).Trim();
@@ -426,11 +677,305 @@ namespace Rosenvall.DevOps.Api
                 var message = string.IsNullOrWhiteSpace(error) ? output : error;
                 return PreviewCleanupResult.Failed($"Preview orchestration failed: {message}");
             }
-            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or OperationCanceledException)
+            catch (Exception ex) when (IsRecoverableKubectlException(ex))
             {
                 logger.LogWarning(ex, "Preview orchestration failed.");
                 return PreviewCleanupResult.Failed($"Preview orchestration failed: {ex.Message}");
             }
+        }
+
+        private async Task<PreviewCleanupResult> RunKubectlOutputAsync(string command, CancellationToken cancellationToken)
+        {
+            var kubectlPath = configuration["Preview:KubectlPath"] ?? "kubectl";
+            var kubeconfigPath = ResolveKubeconfigPath(configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
+            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            {
+                return PreviewCleanupResult.Failed($"Configured kubeconfig was not found: {kubeconfigPath}");
+            }
+
+            var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
+                ? command
+                : $"--kubeconfig \"{kubeconfigPath}\" {command}";
+
+            try
+            {
+                using var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = kubectlPath,
+                        Arguments = arguments,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+
+                process.Start();
+                var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+                await process.WaitForExitAsync(cancellationToken);
+                var output = (await outputTask).Trim();
+                var error = (await errorTask).Trim();
+                var message = string.IsNullOrWhiteSpace(error) ? output : error;
+                return process.ExitCode == 0
+                    ? PreviewCleanupResult.Ok(output)
+                    : PreviewCleanupResult.Failed(message);
+            }
+            catch (Exception ex) when (IsRecoverableKubectlException(ex))
+            {
+                logger.LogWarning(ex, "Preview health check failed.");
+                return PreviewCleanupResult.Failed(ex.Message);
+            }
+        }
+
+        private async Task<PreviewHealthCheckResult> AnalyzeHealthAsync(PreviewDto preview, string deploymentJson, string podsJson, CancellationToken cancellationToken)
+        {
+            using var deploymentDocument = JsonDocument.Parse(deploymentJson);
+            using var podsDocument = JsonDocument.Parse(podsJson);
+            var availableReplicas = GetInt(deploymentDocument.RootElement, "status", "availableReplicas");
+            var desiredReplicas = GetInt(deploymentDocument.RootElement, "spec", "replicas");
+            var items = podsDocument.RootElement.TryGetProperty("items", out var podItems) && podItems.ValueKind == JsonValueKind.Array
+                ? podItems.EnumerateArray().ToArray()
+                : [];
+
+            foreach (var pod in items)
+            {
+                var podName = GetString(pod, "metadata", "name");
+                var ready = IsPodReady(pod);
+                var waiting = FindBadContainerState(pod);
+                if (waiting is not null)
+                {
+                    var log = await TryReadContainerLogAsync(preview.Namespace!, podName, waiting.Value.ContainerName, cancellationToken);
+                    return PreviewHealthCheckResult.Failed(waiting.Value.Reason, $"{waiting.Value.ContainerName} is {waiting.Value.Reason}.", log, podName);
+                }
+
+                if (availableReplicas >= Math.Max(1, desiredReplicas) && ready)
+                {
+                    return PreviewHealthCheckResult.Running(podName, "Deployment is available and at least one preview pod is ready.");
+                }
+            }
+
+            var podSummary = items.Length == 0 ? "No preview pod has been created yet." : $"Deployment has {availableReplicas}/{Math.Max(1, desiredReplicas)} available replicas.";
+            return PreviewHealthCheckResult.Provisioning("Waiting for pod readiness.", podSummary, items.Select(pod => GetString(pod, "metadata", "name")).FirstOrDefault(name => !string.IsNullOrWhiteSpace(name)));
+        }
+
+        private async Task<string?> TryReadContainerLogAsync(string @namespace, string? podName, string containerName, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(podName))
+            {
+                return null;
+            }
+
+            var previous = await RunKubectlOutputAsync($"logs -n {@namespace} {podName} -c {containerName} --tail=40 --previous", cancellationToken);
+            if (previous.Succeeded && !string.IsNullOrWhiteSpace(previous.Message))
+            {
+                return previous.Message;
+            }
+
+            var current = await RunKubectlOutputAsync($"logs -n {@namespace} {podName} -c {containerName} --tail=40", cancellationToken);
+            return current.Succeeded && !string.IsNullOrWhiteSpace(current.Message) ? current.Message : previous.Message;
+        }
+
+        private static (string ContainerName, string Reason)? FindBadContainerState(JsonElement pod)
+        {
+            foreach (var statusProperty in new[] { "initContainerStatuses", "containerStatuses" })
+            {
+                if (!pod.TryGetProperty("status", out var status) ||
+                    !status.TryGetProperty(statusProperty, out var statuses) ||
+                    statuses.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var container in statuses.EnumerateArray())
+                {
+                    if (!container.TryGetProperty("state", out var state) ||
+                        !state.TryGetProperty("waiting", out var waiting) ||
+                        !waiting.TryGetProperty("reason", out var reasonElement))
+                    {
+                        continue;
+                    }
+
+                    var reason = reasonElement.GetString() ?? "";
+                    if (IsFailureReason(reason))
+                    {
+                        return (container.GetProperty("name").GetString() ?? "container", reason);
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static bool IsFailureReason(string reason) =>
+            new[] { "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError", "RunContainerError", "Error" }
+                .Contains(reason, StringComparer.OrdinalIgnoreCase);
+
+        private static bool IsPodReady(JsonElement pod)
+        {
+            if (!pod.TryGetProperty("status", out var status) ||
+                !status.TryGetProperty("conditions", out var conditions) ||
+                conditions.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            return conditions.EnumerateArray().Any(condition =>
+                GetString(condition, "type") == "Ready" &&
+                GetString(condition, "status") == "True");
+        }
+
+        private static int GetInt(JsonElement root, params string[] path)
+        {
+            var current = root;
+            foreach (var segment in path)
+            {
+                if (!current.TryGetProperty(segment, out current))
+                {
+                    return 0;
+                }
+            }
+
+            return current.ValueKind == JsonValueKind.Number && current.TryGetInt32(out var value) ? value : 0;
+        }
+
+        private static string? GetString(JsonElement root, params string[] path)
+        {
+            var current = root;
+            foreach (var segment in path)
+            {
+                if (!current.TryGetProperty(segment, out current))
+                {
+                    return null;
+                }
+            }
+
+            return current.ValueKind == JsonValueKind.String ? current.GetString() : null;
+        }
+
+        private static async Task<string> ReadKubectlExitAsync(Process process, Task<string> outputTask, Task<string> errorTask, CancellationToken cancellationToken)
+        {
+            await process.WaitForExitAsync(cancellationToken);
+            var output = (await outputTask).Trim();
+            var error = (await errorTask).Trim();
+            return string.IsNullOrWhiteSpace(error) ? output : error;
+        }
+
+        public static bool IsRecoverableKubectlException(Exception ex) =>
+            ex is InvalidOperationException or System.ComponentModel.Win32Exception or OperationCanceledException or IOException;
+
+        private static string? ResolveKubeconfigPath(string? configuredPath)
+        {
+            if (string.IsNullOrWhiteSpace(configuredPath))
+            {
+                return null;
+            }
+
+            if (Path.IsPathRooted(configuredPath))
+            {
+                return configuredPath;
+            }
+
+            foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+            {
+                var directory = new DirectoryInfo(start);
+                while (directory is not null)
+                {
+                    var candidate = Path.Combine(directory.FullName, configuredPath);
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+
+                    directory = directory.Parent;
+                }
+            }
+
+            return configuredPath;
+        }
+    }
+
+    public sealed class PipelineJobOrchestrator(IConfiguration configuration, ILogger<PipelineJobOrchestrator> logger)
+    {
+        public Task<PreviewCleanupResult> ApplyAsync(string manifest, CancellationToken cancellationToken) =>
+            RunKubectlAsync("apply -f -", manifest, cancellationToken);
+
+        private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
+        {
+            var kubectlPath = configuration["Pipelines:KubectlPath"] ?? configuration["Preview:KubectlPath"] ?? "kubectl";
+            var kubeconfigPath = ResolveKubeconfigPath(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
+            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            {
+                return PreviewCleanupResult.Failed($"Pipeline job submission failed: Configured kubeconfig was not found: {kubeconfigPath}");
+            }
+
+            var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
+                ? command
+                : $"--kubeconfig \"{kubeconfigPath}\" {command}";
+
+            try
+            {
+                using var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = kubectlPath,
+                        Arguments = arguments,
+                        RedirectStandardInput = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+
+                process.Start();
+                var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+                try
+                {
+                    await process.StandardInput.WriteAsync(manifest);
+                    process.StandardInput.Close();
+                }
+                catch (IOException ex)
+                {
+                    logger.LogWarning(ex, "Pipeline job submission stdin closed before manifest was written.");
+                    var earlyExit = await ReadKubectlExitAsync(process, outputTask, errorTask, cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(earlyExit))
+                    {
+                        return PreviewCleanupResult.Failed($"Pipeline job submission failed: {earlyExit}");
+                    }
+
+                    throw;
+                }
+
+                await process.WaitForExitAsync(cancellationToken);
+
+                var output = (await outputTask).Trim();
+                var error = (await errorTask).Trim();
+                if (process.ExitCode == 0)
+                {
+                    return PreviewCleanupResult.Ok(string.IsNullOrWhiteSpace(output) ? "Pipeline job submitted." : output);
+                }
+
+                var message = string.IsNullOrWhiteSpace(error) ? output : error;
+                return PreviewCleanupResult.Failed($"Pipeline job submission failed: {message}");
+            }
+            catch (Exception ex) when (PreviewEnvironmentOrchestrator.IsRecoverableKubectlException(ex))
+            {
+                logger.LogWarning(ex, "Pipeline job submission failed.");
+                return PreviewCleanupResult.Failed($"Pipeline job submission failed: {ex.Message}");
+            }
+        }
+
+        private static async Task<string> ReadKubectlExitAsync(Process process, Task<string> outputTask, Task<string> errorTask, CancellationToken cancellationToken)
+        {
+            await process.WaitForExitAsync(cancellationToken);
+            var output = (await outputTask).Trim();
+            var error = (await errorTask).Trim();
+            return string.IsNullOrWhiteSpace(error) ? output : error;
         }
 
         private static string? ResolveKubeconfigPath(string? configuredPath)
@@ -461,6 +1006,55 @@ namespace Rosenvall.DevOps.Api
             }
 
             return configuredPath;
+        }
+    }
+
+    public sealed class PreviewHealthMonitor(DevOpsStore store, PreviewEnvironmentOrchestrator previews, ILogger<PreviewHealthMonitor> logger) : BackgroundService
+    {
+        private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan PreviewTimeout = TimeSpan.FromMinutes(3);
+        private readonly Dictionary<Guid, DateTimeOffset> _startedAt = [];
+
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await CheckPendingPreviewsAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Preview health monitor failed.");
+                }
+
+                await Task.Delay(PollInterval, stoppingToken);
+            }
+        }
+
+        private async Task CheckPendingPreviewsAsync(CancellationToken cancellationToken)
+        {
+            foreach (var preview in store.GetPreviewsAwaitingHealthCheck())
+            {
+                if (!_startedAt.ContainsKey(preview.Id))
+                {
+                    _startedAt[preview.Id] = preview.LastCheckedAt ?? DateTimeOffset.UtcNow;
+                }
+
+                if (DateTimeOffset.UtcNow - _startedAt[preview.Id] > PreviewTimeout)
+                {
+                    store.UpdatePreviewHealth(preview.WorkItemId, PreviewHealthCheckResult.Failed("Timeout", "Preview did not become healthy within 3 minutes.", null, preview.PodName));
+                    _startedAt.Remove(preview.Id);
+                    continue;
+                }
+
+                var health = await previews.CheckHealthAsync(preview, cancellationToken);
+                store.UpdatePreviewHealth(preview.WorkItemId, health);
+                if (!string.Equals(health.Status, "Provisioning", StringComparison.OrdinalIgnoreCase))
+                {
+                    _startedAt.Remove(preview.Id);
+                }
+            }
         }
     }
 
@@ -692,7 +1286,8 @@ namespace Rosenvall.DevOps.Api
             export default defineConfig({
               server: {
                 host: "0.0.0.0",
-                port: 8080
+                port: 8080,
+                allowedHosts: [".rosenvall.se"]
               },
               resolve: {
                 alias: {
@@ -1108,16 +1703,37 @@ namespace Rosenvall.DevOps.Api
             needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
     }
 
-    public sealed class OllamaPlanProvider(HttpClient httpClient, IConfiguration configuration)
+    public interface IAiPlanProvider
     {
-        public async Task<string> GeneratePlanAsync(string provider, string model, WorkItemDetailDto context, CancellationToken cancellationToken)
+        string ProviderName { get; }
+
+        Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken);
+    }
+
+    public sealed class AiPlanProviderRouter(IEnumerable<IAiPlanProvider> providers)
+    {
+        private readonly IReadOnlyDictionary<string, IAiPlanProvider> _providers = providers
+            .GroupBy(provider => provider.ProviderName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+        public Task<string> GeneratePlanAsync(string provider, string model, WorkItemDetailDto context, CancellationToken cancellationToken)
         {
-            httpClient.Timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:RequestTimeoutSeconds", 120));
-            if (!string.Equals(provider, "ollama", StringComparison.OrdinalIgnoreCase))
+            if (!_providers.TryGetValue(provider, out var planner))
             {
-                throw new OllamaUnavailableException($"Provider '{provider}' is not configured for planning yet; no plan was created.");
+                throw new AiPlanProviderUnavailableException($"Provider '{provider}' is not configured for planning yet; no plan was created.");
             }
 
+            return planner.GeneratePlanAsync(model, context, cancellationToken);
+        }
+    }
+
+    public sealed class OllamaPlanProvider(HttpClient httpClient, IConfiguration configuration) : IAiPlanProvider
+    {
+        public string ProviderName => "ollama";
+
+        public async Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken)
+        {
+            httpClient.Timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:RequestTimeoutSeconds", 120));
             var endpoint = configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api";
             try
             {
@@ -1213,6 +1829,450 @@ namespace Rosenvall.DevOps.Api
         private sealed record OllamaGenerateResponse([property: JsonPropertyName("response")] string? Response);
     }
 
+    public sealed class CodexCliPlanProvider(IConfiguration configuration, ILogger<CodexCliPlanProvider> logger) : IAiPlanProvider
+    {
+        public string ProviderName => "codex";
+
+        public async Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken)
+        {
+            var codexPath = CodexExecutableResolver.Resolve(configuration["Ai:Codex:Path"] ?? "codex");
+            var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:RequestTimeoutSeconds", configuration.GetValue("Ai:RequestTimeoutSeconds", 120)));
+            var outputPath = Path.Combine(Path.GetTempPath(), $"rosenvall-codex-plan-{Guid.NewGuid():N}.md");
+            try
+            {
+                using var process = new Process
+                {
+                    StartInfo = BuildStartInfo(codexPath, model, outputPath),
+                    EnableRaisingEvents = true
+                };
+
+                var started = process.Start();
+                if (!started)
+                {
+                    throw new AiPlanProviderUnavailableException("Codex provider could not start; no plan was created.");
+                }
+
+                await process.StandardInput.WriteAsync(BuildPrompt(context).AsMemory(), cancellationToken);
+                process.StandardInput.Close();
+
+                var stdOut = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var stdErr = process.StandardError.ReadToEndAsync(cancellationToken);
+                using var timeoutCancellation = new CancellationTokenSource(timeout);
+                using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
+                try
+                {
+                    await process.WaitForExitAsync(linkedCancellation.Token);
+                }
+                catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    TryKill(process);
+                    throw new AiPlanProviderUnavailableException($"Codex provider timed out after {timeout.TotalSeconds:0} seconds; no plan was created.");
+                }
+
+                var output = await stdOut;
+                var error = await stdErr;
+                if (process.ExitCode != 0)
+                {
+                    var detail = FirstUsefulLine(error, output);
+                    logger.LogWarning("Codex provider failed with exit code {ExitCode}: {Detail}", process.ExitCode, detail);
+                    throw new AiPlanProviderUnavailableException($"Codex provider is not logged in on the server or failed to run: {detail} No plan was created.");
+                }
+
+                if (!File.Exists(outputPath))
+                {
+                    throw new AiPlanProviderUnavailableException("Codex provider did not return a plan; no plan was created.");
+                }
+
+                var plan = (await File.ReadAllTextAsync(outputPath, cancellationToken)).Trim();
+                if (string.IsNullOrWhiteSpace(plan))
+                {
+                    throw new AiPlanProviderUnavailableException("Codex provider returned an empty plan; no plan was created.");
+                }
+
+                return plan;
+            }
+            catch (Exception ex) when (ex is not AiPlanProviderUnavailableException && (ex is System.ComponentModel.Win32Exception or InvalidOperationException))
+            {
+                throw new AiPlanProviderUnavailableException($"Codex provider is unavailable at '{codexPath}': {ex.Message} No plan was created.");
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(outputPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup for transient Codex output.
+                }
+            }
+        }
+
+        private ProcessStartInfo BuildStartInfo(string codexPath, string model, string outputPath)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = codexPath
+            };
+            startInfo.RedirectStandardInput = true;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardInputEncoding = Encoding.UTF8;
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+
+            startInfo.ArgumentList.Add("exec");
+            startInfo.ArgumentList.Add("--ephemeral");
+            startInfo.ArgumentList.Add("--ignore-user-config");
+            startInfo.ArgumentList.Add("--ignore-rules");
+            startInfo.ArgumentList.Add("--sandbox");
+            startInfo.ArgumentList.Add("read-only");
+            startInfo.ArgumentList.Add("--output-last-message");
+            startInfo.ArgumentList.Add(outputPath);
+            startInfo.ArgumentList.Add("-m");
+            startInfo.ArgumentList.Add(model);
+            startInfo.ArgumentList.Add("-");
+
+            var codexHome = configuration["Ai:Codex:Home"];
+            if (!string.IsNullOrWhiteSpace(codexHome))
+            {
+                startInfo.Environment["CODEX_HOME"] = codexHome.Trim();
+            }
+
+            return startInfo;
+        }
+
+        private static void TryKill(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // Best-effort timeout cleanup.
+            }
+        }
+
+        private static string FirstUsefulLine(string error, string output)
+        {
+            var line = (error + "\n" + output)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault();
+            return string.IsNullOrWhiteSpace(line) ? "unknown Codex CLI error." : line;
+        }
+
+        private static string BuildPrompt(WorkItemDetailDto context) =>
+            $$"""
+              You are Rosenvall DevOps AI. Produce a concise implementation plan for this work item.
+
+              Work item: {{context.Item.Key}} {{context.Item.Title}}
+              Type: {{context.Item.Type}}
+              Status: {{context.Item.Status}}
+              Priority: {{context.Item.Priority}}
+              Description: {{context.Description}}
+              Comments:
+              {{string.Join("\n", context.Comments.Select(comment => $"- {comment.Author} ({comment.Kind}): {comment.Body}"))}}
+
+              Required output:
+              - A concrete plan.
+              - Include tests.
+              - Target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
+              - The preview should be containerized and exposed through the existing Kubernetes preview route.
+              - Preserve every concrete visual/content requirement from the title, description, and comments.
+              - If colors, language, exact text, layout, or behavior are specified, repeat them explicitly in the plan.
+              """;
+    }
+
+    public static class CodexExecutableResolver
+    {
+        private static readonly string[] PreferredWindowsExtensions = [".exe", ".cmd", ".bat", ".com"];
+
+        public static string Resolve(string configuredPath)
+        {
+            var candidate = string.IsNullOrWhiteSpace(configuredPath) ? "codex" : configuredPath.Trim();
+            if (Path.IsPathRooted(candidate) || candidate.Contains(Path.DirectorySeparatorChar) || candidate.Contains(Path.AltDirectorySeparatorChar))
+            {
+                return PreferExecutableSibling(candidate);
+            }
+
+            var pathEntries = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var directory in pathEntries)
+            {
+                var resolved = PreferExecutableSibling(Path.Combine(directory, candidate));
+                if (File.Exists(resolved))
+                {
+                    return resolved;
+                }
+            }
+
+            return candidate;
+        }
+
+        private static string PreferExecutableSibling(string candidate)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return candidate;
+            }
+
+            if (!string.IsNullOrWhiteSpace(Path.GetExtension(candidate)))
+            {
+                return candidate;
+            }
+
+            foreach (var extension in PreferredWindowsExtensions)
+            {
+                var withExtension = candidate + extension;
+                if (File.Exists(withExtension))
+                {
+                    return withExtension;
+                }
+            }
+
+            return candidate;
+        }
+    }
+
+    public interface IPreviewSourceProvider
+    {
+        Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, CancellationToken cancellationToken);
+    }
+
+    public sealed class CodexCliPreviewSourceProvider(IConfiguration configuration, ILogger<CodexCliPreviewSourceProvider> logger) : IPreviewSourceProvider
+    {
+        private static readonly string[] SkippedDirectories = ["node_modules", "dist", ".git", ".codex"];
+
+        public async Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, CancellationToken cancellationToken)
+        {
+            var codexPath = CodexExecutableResolver.Resolve(configuration["Ai:Codex:Path"] ?? "codex");
+            var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:ImplementationTimeoutSeconds", configuration.GetValue("Ai:Codex:RequestTimeoutSeconds", configuration.GetValue("Ai:RequestTimeoutSeconds", 180))));
+            var workspacePath = Path.Combine(Path.GetTempPath(), $"rosenvall-preview-source-{Guid.NewGuid():N}");
+            var outputPath = Path.Combine(Path.GetTempPath(), $"rosenvall-codex-preview-{Guid.NewGuid():N}.md");
+            try
+            {
+                Directory.CreateDirectory(workspacePath);
+                await SeedWorkspaceAsync(workspacePath, context, cancellationToken);
+
+                using var process = new Process
+                {
+                    StartInfo = BuildStartInfo(codexPath, model, workspacePath, outputPath),
+                    EnableRaisingEvents = true
+                };
+
+                var started = process.Start();
+                if (!started)
+                {
+                    throw new AiPlanProviderUnavailableException("Codex preview source provider could not start; preview source was not generated.");
+                }
+
+                await process.StandardInput.WriteAsync(BuildImplementationPrompt(run, context).AsMemory(), cancellationToken);
+                process.StandardInput.Close();
+
+                var stdOut = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var stdErr = process.StandardError.ReadToEndAsync(cancellationToken);
+                using var timeoutCancellation = new CancellationTokenSource(timeout);
+                using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
+                try
+                {
+                    await process.WaitForExitAsync(linkedCancellation.Token);
+                }
+                catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    TryKill(process);
+                    throw new AiPlanProviderUnavailableException($"Codex preview source generation timed out after {timeout.TotalSeconds:0} seconds; no preview was deployed.");
+                }
+
+                var output = await stdOut;
+                var error = await stdErr;
+                if (process.ExitCode != 0)
+                {
+                    var detail = FirstUsefulLine(error, output);
+                    logger.LogWarning("Codex preview source provider failed with exit code {ExitCode}: {Detail}", process.ExitCode, detail);
+                    throw new AiPlanProviderUnavailableException($"Codex preview source provider is not logged in on the server or failed to run: {detail} No preview was deployed.");
+                }
+
+                var sourceFiles = await CollectWorkspaceSourceFilesAsync(workspacePath, cancellationToken);
+                if (sourceFiles.All(file => !string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new AiPlanProviderUnavailableException("Codex preview source generation did not produce src/App.tsx; no preview was deployed.");
+                }
+
+                return sourceFiles;
+            }
+            catch (Exception ex) when (ex is not AiPlanProviderUnavailableException && (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException))
+            {
+                throw new AiPlanProviderUnavailableException($"Codex preview source provider is unavailable at '{codexPath}': {ex.Message} No preview was deployed.");
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(outputPath);
+                    if (Directory.Exists(workspacePath))
+                    {
+                        Directory.Delete(workspacePath, recursive: true);
+                    }
+                }
+                catch
+                {
+                    // Best-effort cleanup for transient Codex preview workspace.
+                }
+            }
+        }
+
+        private ProcessStartInfo BuildStartInfo(string codexPath, string model, string workspacePath, string outputPath)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = codexPath,
+                WorkingDirectory = workspacePath,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardInputEncoding = Encoding.UTF8,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            startInfo.ArgumentList.Add("exec");
+            startInfo.ArgumentList.Add("--ephemeral");
+            startInfo.ArgumentList.Add("--ignore-user-config");
+            startInfo.ArgumentList.Add("--ignore-rules");
+            startInfo.ArgumentList.Add("--skip-git-repo-check");
+            startInfo.ArgumentList.Add("-C");
+            startInfo.ArgumentList.Add(workspacePath);
+            if (configuration.GetValue("Ai:Codex:ImplementationBypassSandbox", OperatingSystem.IsWindows()))
+            {
+                startInfo.ArgumentList.Add("--dangerously-bypass-approvals-and-sandbox");
+            }
+            else
+            {
+                startInfo.ArgumentList.Add("--sandbox");
+                startInfo.ArgumentList.Add("workspace-write");
+            }
+            startInfo.ArgumentList.Add("--output-last-message");
+            startInfo.ArgumentList.Add(outputPath);
+            startInfo.ArgumentList.Add("-m");
+            startInfo.ArgumentList.Add(model);
+            startInfo.ArgumentList.Add("-");
+
+            var codexHome = configuration["Ai:Codex:Home"];
+            if (!string.IsNullOrWhiteSpace(codexHome))
+            {
+                startInfo.Environment["CODEX_HOME"] = codexHome.Trim();
+            }
+
+            return startInfo;
+        }
+
+        private static async Task SeedWorkspaceAsync(string workspacePath, WorkItemDetailDto context, CancellationToken cancellationToken)
+        {
+            var humanComments = context.Comments
+                .Where(comment => !string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(comment => comment.CreatedAt)
+                .Select(comment => comment.Body);
+            foreach (var file in LocalReactPreviewProject.ForWorkItem(context.Item.Key, context.Item.Title, context.Description, humanComments))
+            {
+                var targetPath = Path.Combine(workspacePath, file.Path.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                await File.WriteAllTextAsync(targetPath, file.Content, cancellationToken);
+            }
+        }
+
+        private static async Task<IReadOnlyList<PreviewSourceFile>> CollectWorkspaceSourceFilesAsync(string workspacePath, CancellationToken cancellationToken)
+        {
+            var files = new List<PreviewSourceFile>();
+            foreach (var path in Directory.EnumerateFiles(workspacePath, "*", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+            {
+                var relativePath = Path.GetRelativePath(workspacePath, path).Replace('\\', '/');
+                if (ShouldSkip(relativePath))
+                {
+                    continue;
+                }
+
+                var content = await File.ReadAllTextAsync(path, cancellationToken);
+                files.Add(new PreviewSourceFile(SourceKeyForPath(relativePath), relativePath, content.TrimEnd()));
+            }
+
+            return files;
+        }
+
+        private static bool ShouldSkip(string relativePath) =>
+            relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Any(part => SkippedDirectories.Contains(part, StringComparer.OrdinalIgnoreCase));
+
+        private static string SourceKeyForPath(string path)
+        {
+            var key = new string(path.Select(character => char.IsLetterOrDigit(character) ? char.ToLowerInvariant(character) : '-').ToArray()).Trim('-');
+            while (key.Contains("--", StringComparison.Ordinal))
+            {
+                key = key.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return string.IsNullOrWhiteSpace(key) ? "source-file" : key;
+        }
+
+        private static void TryKill(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // Best-effort timeout cleanup.
+            }
+        }
+
+        private static string FirstUsefulLine(string error, string output)
+        {
+            var line = (error + "\n" + output)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault();
+            return string.IsNullOrWhiteSpace(line) ? "unknown Codex CLI error." : line;
+        }
+
+        private static string BuildImplementationPrompt(AiRun run, WorkItemDetailDto context) =>
+            $$"""
+              You are implementing a Rosenvall DevOps preview source workspace.
+
+              Modify the existing Vite + React + TypeScript + Tailwind files in this current working directory.
+              Do not install packages, do not run external services, and do not remove the Vite allowedHosts configuration for .rosenvall.se.
+              Keep dependencies limited to the packages already present in package.json.
+              Implement the approved AI plan as actual interactive React source, not a placeholder summary.
+              Preserve concrete language, visual, behavior, and content requirements from the work item and comments.
+
+              Work item: {{context.Item.Key}} {{context.Item.Title}}
+              Type: {{context.Item.Type}}
+              Priority: {{context.Item.Priority}}
+              Description:
+              {{context.Description}}
+
+              Approved plan #{{run.SequenceNumber}}:
+              {{run.Plan}}
+
+              Activity context:
+              {{string.Join("\n", context.Comments.Select(comment => $"- {comment.Author} ({comment.Kind}): {comment.Body}"))}}
+
+              Required result:
+              - Update source files in this workspace.
+              - The app must compile with the seeded Vite React TypeScript project.
+              - Return only a short implementation summary in your final message; the server reads source files from disk.
+              """;
+    }
+
     public sealed class DevOpsStore
     {
         private const string DocumentId = "default";
@@ -1224,6 +2284,7 @@ namespace Rosenvall.DevOps.Api
         private readonly IDbContextFactory<DevOpsStateDbContext> _dbFactory;
         private readonly object _lock = new();
         private readonly List<WorkspaceDto> _workspaces = [];
+        private readonly List<RepositoryDto> _repositories = [];
         private readonly List<BoardRecord> _boards = [];
         private readonly List<WorkItemRecord> _items = [];
         private readonly List<CommentDto> _comments = [];
@@ -1231,6 +2292,8 @@ namespace Rosenvall.DevOps.Api
         private readonly List<PreviewDto> _previews = [];
         private readonly List<DevelopmentDtoRecord> _development = [];
         private readonly List<PreviewEventDto> _previewEvents = [];
+        private readonly List<PipelineRunDto> _pipelineRuns = [];
+        private readonly List<TimelineEventDto> _timelineEvents = [];
         private int _nextTaskNumber = 4821;
 
         public DevOpsStore(IDbContextFactory<DevOpsStateDbContext> dbFactory)
@@ -1276,6 +2339,58 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public IReadOnlyList<RepositoryDto> GetRepositories()
+        {
+            lock (_lock)
+            {
+                return _repositories
+                    .OrderBy(repository => repository.Provider)
+                    .ThenBy(repository => repository.Name)
+                    .ToArray();
+            }
+        }
+
+        public RepositoryDto CreateRepository(CreateRepositoryRequest request)
+        {
+            lock (_lock)
+            {
+                var repository = new RepositoryDto(
+                    Guid.NewGuid(),
+                    NormalizeText(request.Provider, "Forgejo"),
+                    NormalizeText(request.Name, "repository"),
+                    NormalizeText(request.RemoteUrl, "ssh://git.rosenvall.se/repository.git"),
+                    string.IsNullOrWhiteSpace(request.WebUrl) ? null : request.WebUrl.Trim(),
+                    NormalizeText(request.DefaultBranch, "main"),
+                    DateTimeOffset.UtcNow);
+                _repositories.Add(repository);
+                Persist();
+                return repository;
+            }
+        }
+
+        public BoardDto? CreateBoard(Guid workspaceId, CreateBoardRequest request)
+        {
+            lock (_lock)
+            {
+                if (_workspaces.All(workspace => workspace.Id != workspaceId))
+                {
+                    return null;
+                }
+
+                var repository = ResolveBoardRepository(request);
+                var board = new BoardRecord(
+                    Guid.NewGuid(),
+                    workspaceId,
+                    NormalizeText(request.Name, repository?.Name ?? "Delivery Board"),
+                    ["Todo", "In Progress", "AI Planning", "Review", "Done"],
+                    repository?.Id);
+                _boards.Add(board);
+                AddTimelineEvent(board.Id, repository?.Id, null, "BoardCreated", board.Name, repository is null ? "Board created." : $"Board created for {repository.Name}.", "system", repository?.WebUrl);
+                Persist();
+                return ToBoardDto(board);
+            }
+        }
+
         public IReadOnlyList<BoardDto> GetBoards(Guid workspaceId)
         {
             lock (_lock)
@@ -1311,6 +2426,7 @@ namespace Rosenvall.DevOps.Api
                     .Max() + 1;
                 var item = new WorkItemRecord(Guid.NewGuid(), request.BoardId, $"TASK-{index}", request.Type, request.Title, request.Description, request.Status, request.Priority, request.Assignee, sortOrder);
                 _items.Add(item);
+                AddTimelineForItem(item, "CardCreated", item.Key, $"Created {item.Title}.", "system");
                 Persist();
                 return ToSummary(item);
             }
@@ -1336,6 +2452,7 @@ namespace Rosenvall.DevOps.Api
                     PlaceItem(item, request.Status, int.MaxValue);
                 }
 
+                AddTimelineForItem(item, "CardUpdated", item.Key, $"Updated {item.Title}.", "system");
                 Persist();
                 return ToSummary(item);
             }
@@ -1352,6 +2469,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 PlaceItem(item, request.Status, request.SortOrder);
+                AddTimelineForItem(item, "CardMoved", item.Key, $"Moved {item.Title} to {item.Status}.", "system");
                 Persist();
                 return ToSummary(item);
             }
@@ -1379,6 +2497,7 @@ namespace Rosenvall.DevOps.Api
                 _aiRuns.RemoveAll(r => r.WorkItemId == workItemId);
                 _previews.RemoveAll(p => p.WorkItemId == workItemId);
                 _development.RemoveAll(d => d.WorkItemId == workItemId);
+                AddTimelineForItem(item, "CardDeleted", item.Key, $"Deleted {item.Title}.", actor);
                 NormalizeBoard(boardId);
                 Persist();
                 return true;
@@ -1408,7 +2527,11 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
-                return _aiRuns.Where(run => run.WorkItemId == workItemId).ToArray();
+                return _aiRuns
+                    .Where(run => run.WorkItemId == workItemId)
+                    .OrderBy(run => run.SequenceNumber)
+                    .ThenBy(run => run.CreatedAt)
+                    .ToArray();
             }
         }
 
@@ -1430,7 +2553,13 @@ namespace Rosenvall.DevOps.Api
                             preview.ResourceName ?? "",
                             preview.Image,
                             NormalizePreviewStatus(preview.Status),
-                            preview.ExpiresAt);
+                            preview.ExpiresAt,
+                            preview.Phase,
+                            preview.Message,
+                            preview.LastCheckedAt,
+                            preview.PodName,
+                            preview.FailureReason,
+                            preview.FailureLog);
                     })
                     .OrderBy(environment => environment.WorkItemKey)
                     .ToArray();
@@ -1442,6 +2571,144 @@ namespace Rosenvall.DevOps.Api
             lock (_lock)
             {
                 return _previewEvents.OrderByDescending(e => e.CreatedAt).Take(50).ToArray();
+            }
+        }
+
+        public IReadOnlyList<TimelineEventDto> GetTimeline(Guid? boardId = null)
+        {
+            lock (_lock)
+            {
+                return _timelineEvents
+                    .Where(entry => boardId is null || entry.BoardId == boardId)
+                    .OrderByDescending(entry => entry.CreatedAt)
+                    .Take(100)
+                    .ToArray();
+            }
+        }
+
+        public PipelineRunDto? RecordPipelineRun(RecordPipelineRunRequest request)
+        {
+            lock (_lock)
+            {
+                if (_repositories.All(repository => repository.Id != request.RepositoryId))
+                {
+                    return null;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var run = new PipelineRunDto(
+                    Guid.NewGuid(),
+                    request.RepositoryId,
+                    request.BoardId,
+                    request.WorkItemId,
+                    NormalizeText(request.Stage, "Pipeline"),
+                    NormalizeText(request.Status, "Running"),
+                    NormalizeText(request.Message, "Pipeline run recorded."),
+                    string.IsNullOrWhiteSpace(request.Url) ? null : request.Url.Trim(),
+                    now,
+                    IsTerminalPipelineStatus(request.Status) ? now : null,
+                    Math.Max(0, request.TokensUsed),
+                    Math.Max(0, request.CodeAdded),
+                    Math.Max(0, request.CodeDeleted));
+                _pipelineRuns.Add(run);
+                AddTimelineEvent(run.BoardId, run.RepositoryId, run.WorkItemId, "Pipeline", run.Stage, run.Message, "system", run.Url, now);
+                Persist();
+                return run;
+            }
+        }
+
+        public PipelineRunDto? MarkPipelineRunExecuting(Guid pipelineRunId, string actor)
+        {
+            lock (_lock)
+            {
+                var index = _pipelineRuns.FindIndex(run => run.Id == pipelineRunId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _pipelineRuns[index];
+                var updated = existing with
+                {
+                    Status = "Running",
+                    Message = $"Kubernetes Job submitted by {NormalizeText(actor, "system")}.",
+                    CompletedAt = null
+                };
+                _pipelineRuns[index] = updated;
+                AddTimelineEvent(updated.BoardId, updated.RepositoryId, updated.WorkItemId, "Pipeline", updated.Stage, updated.Message, NormalizeText(actor, "system"), updated.Url);
+                Persist();
+                return updated;
+            }
+        }
+
+        public PipelineRunDto? MarkPipelineRunFailed(Guid pipelineRunId, string actor, string message)
+        {
+            lock (_lock)
+            {
+                var index = _pipelineRuns.FindIndex(run => run.Id == pipelineRunId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _pipelineRuns[index];
+                var updated = existing with
+                {
+                    Status = "Failed",
+                    Message = NormalizeText(message, "Pipeline job failed."),
+                    CompletedAt = DateTimeOffset.UtcNow
+                };
+                _pipelineRuns[index] = updated;
+                AddTimelineEvent(updated.BoardId, updated.RepositoryId, updated.WorkItemId, "Pipeline", updated.Stage, updated.Message, NormalizeText(actor, "system"), updated.Url);
+                Persist();
+                return updated;
+            }
+        }
+
+        public MetricsDto GetMetrics(Guid? boardId = null)
+        {
+            lock (_lock)
+            {
+                var runs = _pipelineRuns
+                    .Where(run => boardId is null || run.BoardId == boardId)
+                    .ToArray();
+                return new MetricsDto(
+                    boardId,
+                    runs.Sum(run => run.TokensUsed),
+                    runs.Sum(run => run.CodeAdded),
+                    runs.Sum(run => run.CodeDeleted),
+                    runs.Length);
+            }
+        }
+
+        public IReadOnlyList<AssigneeDto> GetAssignees(Guid? boardId, IConfiguration configuration)
+        {
+            lock (_lock)
+            {
+                var assignees = new Dictionary<string, AssigneeDto>(StringComparer.OrdinalIgnoreCase);
+                foreach (var configured in configuration.GetSection("Authentik:Users").Get<ConfiguredAuthentikUser[]>() ?? [])
+                {
+                    var displayName = NormalizeText(configured.DisplayName ?? configured.Name ?? configured.Username, configured.Email ?? "Authentik user");
+                    var email = NormalizeText(configured.Email, displayName);
+                    assignees[email] = new AssigneeDto(NormalizeText(configured.Id, email), displayName, email, "Authentik");
+                }
+
+                foreach (var assignee in _items
+                    .Where(item => boardId is null || item.BoardId == boardId)
+                    .Select(item => item.Assignee)
+                    .Where(assignee => !string.IsNullOrWhiteSpace(assignee))
+                    .Select(assignee => assignee!.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!assignees.ContainsKey(assignee))
+                    {
+                        assignees[assignee] = new AssigneeDto(assignee, assignee, assignee, "Board");
+                    }
+                }
+
+                return assignees.Values
+                    .OrderBy(assignee => assignee.DisplayName)
+                    .ToArray();
             }
         }
 
@@ -1470,6 +2737,20 @@ namespace Rosenvall.DevOps.Api
                     }
                 }
 
+                foreach (var run in _pipelineRuns.OrderByDescending(run => run.StartedAt))
+                {
+                    var item = run.WorkItemId is null ? null : _items.SingleOrDefault(i => i.Id == run.WorkItemId.Value);
+                    pipelines.Add(new PipelineStatusDto(
+                        run.Id,
+                        run.WorkItemId,
+                        item?.Key ?? "repo",
+                        item?.Title ?? RepositoryName(run.RepositoryId),
+                        run.Stage,
+                        run.Status,
+                        run.Message,
+                        run.CompletedAt ?? run.StartedAt));
+                }
+
                 return pipelines.ToArray();
             }
         }
@@ -1490,6 +2771,47 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public CommentDto? UpdateComment(Guid commentId, string actor, string body)
+        {
+            lock (_lock)
+            {
+                var index = _comments.FindIndex(comment => comment.Id == commentId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _comments[index];
+                EnsureEditableHumanComment(existing, actor);
+                if (string.IsNullOrWhiteSpace(body))
+                {
+                    throw new ArgumentException("Comment body is required.", nameof(body));
+                }
+
+                var updated = existing with { Body = body.Trim() };
+                _comments[index] = updated;
+                Persist();
+                return updated;
+            }
+        }
+
+        public bool DeleteComment(Guid commentId, string actor)
+        {
+            lock (_lock)
+            {
+                var index = _comments.FindIndex(comment => comment.Id == commentId);
+                if (index < 0)
+                {
+                    return false;
+                }
+
+                EnsureEditableHumanComment(_comments[index], actor);
+                _comments.RemoveAt(index);
+                Persist();
+                return true;
+            }
+        }
+
         public AiRun? StartAiPlan(Guid workItemId, string provider, string model, string? plan = null)
         {
             lock (_lock)
@@ -1502,11 +2824,17 @@ namespace Rosenvall.DevOps.Api
 
                 item.Status = "AI Planning";
                 item.AiStatus = "Planning";
-                var run = AiRun.Start(workItemId, provider, model);
+                var sequenceNumber = _aiRuns
+                    .Where(existing => existing.WorkItemId == workItemId)
+                    .Select(existing => existing.SequenceNumber)
+                    .DefaultIfEmpty(0)
+                    .Max() + 1;
+                var run = AiRun.Start(workItemId, provider, model, sequenceNumber, DateTimeOffset.UtcNow);
                 run.PostPlan(string.IsNullOrWhiteSpace(plan) ? BuildPlan(item) : plan);
                 _aiRuns.Add(run);
-                _comments.Add(new CommentDto(Guid.NewGuid(), workItemId, "Rosenvall AI", "Plan", run.Plan!, DateTimeOffset.UtcNow));
+                _comments.Add(new CommentDto(Guid.NewGuid(), workItemId, "Rosenvall AI", "Result", $"Created plan #{run.SequenceNumber}: {item.Title}.", run.CreatedAt));
                 item.AiStatus = "PlanReady";
+                AddTimelineForItem(item, "AiPlanReady", item.Key, $"AI plan ready for {item.Title}.", "Rosenvall AI");
                 Persist();
                 return run;
             }
@@ -1522,11 +2850,20 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                run.Approve(approvedBy);
+                if (run.Status == AiRunStatus.PlanReady)
+                {
+                    run.Approve(approvedBy);
+                }
+                else if (run.Status != AiRunStatus.Approved)
+                {
+                    throw new InvalidOperationException("Only ready or approved AI plans can be implemented.");
+                }
+
                 var item = _items.Single(i => i.Id == run.WorkItemId);
                 item.Status = "Review";
                 item.AiStatus = "ImplementationRunning";
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", "Implementation approved. Local React/Tailwind implementation runner has started.", DateTimeOffset.UtcNow));
+                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Implementing plan #{run.SequenceNumber} with Codex preview source generation.", DateTimeOffset.UtcNow));
+                AddTimelineForItem(item, "AiPlanApproved", item.Key, $"AI plan approved by {approvedBy}.", approvedBy);
                 Persist();
                 return run;
             }
@@ -1552,15 +2889,79 @@ namespace Rosenvall.DevOps.Api
                 item.AiStatus = "Completed";
                 item.Status = "Review";
 
-                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Running", DateTimeOffset.UtcNow.AddDays(7), null, resources.Namespace, resources.Name);
+                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Implementing", DateTimeOffset.UtcNow.AddDays(7), null, resources.Namespace, resources.Name, "Implementing preview source", "Generating local React/Tailwind source from the card context.", SourceFiles: sourceFiles);
                 _previews.RemoveAll(p => p.WorkItemId == item.Id);
                 _previews.Add(preview);
                 AddPreviewEvent(item, preview, "Created", "system", $"Preview created for {item.Key}.");
                 _development.RemoveAll(d => d.WorkItemId == item.Id);
-                _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto("local/vite-react-tailwind", $"local/{resources.Name}", null, "Local React/Tailwind preview ready")));
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Local React/Tailwind implementation completed. Demo is available at {preview.Url}.", DateTimeOffset.UtcNow));
+                _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto("local/vite-react-tailwind", $"local/{resources.Name}", null, "Local React/Tailwind source generated")));
+                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Local React/Tailwind implementation completed. Preview provisioning started for {preview.Url}.", DateTimeOffset.UtcNow));
+                RecordPipelineRunWithoutLock(new RecordPipelineRunRequest(RepositoryIdForBoard(item.BoardId) ?? EnsureLocalRepository().Id, item.BoardId, item.Id, "Preview", "Succeeded", "Kubernetes preview job completed", preview.Url));
                 Persist();
                 return GetWorkItemDetail(item.Id);
+            }
+        }
+
+        public WorkItemDetailDto? CompletePreviewImplementation(Guid workItemId, IReadOnlyList<PreviewSourceFile> sourceFiles, string implementationProvider)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                if (sourceFiles.Count == 0)
+                {
+                    throw new ArgumentException("Preview source files are required.", nameof(sourceFiles));
+                }
+
+                var resources = PreviewResourceSet.Create(item.Key, item.Title, LocalReactPreviewProject.Image, sourceFiles: sourceFiles);
+                item.PullRequestUrl = null;
+                item.AiStatus = "Completed";
+                item.Status = "Review";
+
+                var providerName = NormalizeText(implementationProvider, "codex");
+                var preview = new PreviewDto(
+                    Guid.NewGuid(),
+                    item.Id,
+                    $"https://{resources.Hostname}",
+                    resources.Image,
+                    "Implementing",
+                    DateTimeOffset.UtcNow.AddDays(7),
+                    null,
+                    resources.Namespace,
+                    resources.Name,
+                    "Implementing preview source",
+                    $"{providerName} generated React/Tailwind preview source from the approved plan.",
+                    SourceFiles: sourceFiles);
+                _previews.RemoveAll(p => p.WorkItemId == item.Id);
+                _previews.Add(preview);
+                AddPreviewEvent(item, preview, "Created", providerName, $"Preview source generated for {item.Key}.");
+                _development.RemoveAll(d => d.WorkItemId == item.Id);
+                _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto($"local/{providerName}-preview-source", $"local/{resources.Name}", null, "Codex preview source generated")));
+                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Codex preview source generated from the approved plan. Preview provisioning started for {preview.Url}.", DateTimeOffset.UtcNow));
+                RecordPipelineRunWithoutLock(new RecordPipelineRunRequest(RepositoryIdForBoard(item.BoardId) ?? EnsureLocalRepository().Id, item.BoardId, item.Id, "Preview", "Succeeded", "Kubernetes preview job completed", preview.Url));
+                Persist();
+                return GetWorkItemDetail(item.Id);
+            }
+        }
+
+        public void RecordImplementationFailure(Guid workItemId, string actor, string message)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                if (item is null)
+                {
+                    return;
+                }
+
+                item.AiStatus = "ImplementationFailed";
+                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Preview source implementation failed: {message}", DateTimeOffset.UtcNow));
+                AddTimelineForItem(item, "AiImplementationFailed", item.Key, message, actor);
+                Persist();
             }
         }
 
@@ -1589,6 +2990,7 @@ namespace Rosenvall.DevOps.Api
 
                     item.AiStatus = null;
                     _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"AI plan discarded by {discardedBy}.", DateTimeOffset.UtcNow));
+                    AddTimelineForItem(item, "AiPlanDiscarded", item.Key, $"AI plan discarded by {discardedBy}.", discardedBy);
                     NormalizeBoard(item.BoardId);
                 }
 
@@ -1620,6 +3022,9 @@ namespace Rosenvall.DevOps.Api
                     ? $"Feature implemented by {request.Repository}. Demo is available at {preview.Url}."
                     : $"Feature implemented in {request.PullRequestUrl}. Demo is available at {preview.Url}.";
                 _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", resultMessage, DateTimeOffset.UtcNow));
+                var repositoryId = ResolveRepositoryForDevelopment(item.BoardId, request.Repository);
+                AddTimelineEvent(item.BoardId, repositoryId, item.Id, "PullRequest", item.Key, string.IsNullOrWhiteSpace(request.PullRequestUrl) ? $"Implementation callback from {request.Repository}." : $"Pull request opened for {item.Key}.", request.Repository, request.PullRequestUrl);
+                RecordPipelineRunWithoutLock(new RecordPipelineRunRequest(repositoryId ?? EnsureLocalRepository().Id, item.BoardId, item.Id, "Checks", request.ChecksStatus, request.ChecksStatus, request.PullRequestUrl));
                 Persist();
                 return GetWorkItemDetail(item.Id);
             }
@@ -1658,6 +3063,7 @@ namespace Rosenvall.DevOps.Api
                     }));
                 item.Status = "Done";
                 _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, approvedBy, "Result", $"Pull request approved by {approvedBy}.", approvedAt));
+                AddTimelineForItem(item, "CardClosed", item.Key, $"Closed {item.Title}.", approvedBy, currentDevelopment.Development.PullRequestUrl, approvedAt);
                 NormalizeBoard(item.BoardId);
                 Persist();
                 return GetWorkItemDetail(workItemId);
@@ -1676,11 +3082,89 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _previews.Remove(preview);
-                var running = preview with { Status = "Running", ExpiresAt = DateTimeOffset.UtcNow.AddDays(7) };
+                var running = preview with { Status = "Running", Phase = "Ready", Message = message, LastCheckedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddDays(7), FailureReason = null, FailureLog = null };
                 _previews.Add(running);
                 AddPreviewEvent(item, running, "Started", actor, message);
                 Persist();
                 return GetWorkItemDetail(workItemId);
+            }
+        }
+
+        public WorkItemDetailDto? MarkPreviewProvisioning(Guid workItemId, string message)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
+                if (item is null || preview is null)
+                {
+                    return null;
+                }
+
+                _previews.Remove(preview);
+                var provisioning = preview with
+                {
+                    Status = "Provisioning",
+                    Phase = "Waiting for pod readiness.",
+                    Message = NormalizeText(message, "Kubernetes resources applied. Waiting for preview pod to become ready."),
+                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    FailureReason = null,
+                    FailureLog = null
+                };
+                _previews.Add(provisioning);
+                AddPreviewEvent(item, provisioning, "Provisioning", "system", provisioning.Message ?? "Waiting for preview pod readiness.");
+                Persist();
+                return GetWorkItemDetail(workItemId);
+            }
+        }
+
+        public WorkItemDetailDto? UpdatePreviewHealth(Guid workItemId, PreviewHealthCheckResult health)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
+                if (item is null || preview is null)
+                {
+                    return null;
+                }
+
+                _previews.Remove(preview);
+                var updated = preview with
+                {
+                    Status = health.Status,
+                    Phase = health.Phase,
+                    Message = health.Message,
+                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    PodName = health.PodName,
+                    FailureReason = health.FailureReason,
+                    FailureLog = health.FailureLog,
+                    ExpiresAt = string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase) ? DateTimeOffset.UtcNow.AddDays(7) : preview.ExpiresAt
+                };
+                _previews.Add(updated);
+                if (string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddPreviewEvent(item, updated, "Started", "health-check", health.Message);
+                }
+                else if (string.Equals(health.Status, "Failed", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddPreviewEvent(item, updated, "HealthFailed", "health-check", health.Message);
+                }
+                Persist();
+                return GetWorkItemDetail(workItemId);
+            }
+        }
+
+        public IReadOnlyList<PreviewDto> GetPreviewsAwaitingHealthCheck()
+        {
+            lock (_lock)
+            {
+                return _previews
+                    .Where(preview => preview.WorkItemId != Guid.Empty &&
+                        (string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase)))
+                    .ToArray();
             }
         }
 
@@ -1716,7 +3200,15 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _previews.Remove(preview);
-                var failed = preview with { Status = "Failed" };
+                var failed = preview with
+                {
+                    Status = "Failed",
+                    Phase = "Failed",
+                    Message = message,
+                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    FailureReason = eventType,
+                    FailureLog = null
+                };
                 _previews.Add(failed);
                 AddPreviewEvent(item, failed, eventType, actor, message);
                 Persist();
@@ -1734,6 +3226,36 @@ namespace Rosenvall.DevOps.Api
                 .Select(model => model.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+            var codexActiveModel = NormalizeText(configuration["Ai:Codex:Model"], "gpt-5.4");
+            var codexModels = new[] { codexActiveModel }
+                .Concat(configuration.GetSection("Ai:Codex:AvailableModels").Get<string[]>() ?? [])
+                .Where(model => !string.IsNullOrWhiteSpace(model))
+                .Select(model => model.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var codexPath = configuration["Ai:Codex:Path"] ?? "codex";
+            var configuredCodexHome = configuration["Ai:Codex:Home"];
+            var codexHome = !string.IsNullOrWhiteSpace(configuredCodexHome)
+                ? configuredCodexHome
+                : Environment.GetEnvironmentVariable("CODEX_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+            var codexStatus = ResolveCodexStatus(codexPath, codexHome);
+            var providers = new[]
+            {
+                new AiProviderSettingsDto(
+                    "ollama",
+                    "Ollama",
+                    "Ready",
+                    configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api",
+                    activeModel,
+                    availableModels),
+                new AiProviderSettingsDto(
+                    "codex",
+                    "Codex",
+                    codexStatus,
+                    codexPath,
+                    codexActiveModel,
+                    codexModels)
+            };
 
             return new(
                 new GitHubSettingsDto("rosenvall-corp / core-infrastructure", "rosenvall-corp/core-infrastructure", "main, release/*, feat/*", true),
@@ -1742,8 +3264,34 @@ namespace Rosenvall.DevOps.Api
                     configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api",
                     activeModel,
                     availableModels,
-                    true),
-                new PreviewSettingsDto("rosenvall.se", 7, "per-preview namespace"));
+                    true,
+                    providers),
+                new PreviewSettingsDto("rosenvall.se", 7, "per-preview namespace"),
+                new RepositoryHostingSettingsDto(
+                    configuration["Repositories:Provider"] ?? "Forgejo",
+                    configuration["Repositories:Mode"] ?? "LinkExistingFirst",
+                    configuration["Repositories:Forgejo:ApiBaseUrl"] ?? "https://git.rosenvall.se/api/v1",
+                    configuration.GetValue("Repositories:Forgejo:CanCreateRepositories", false)),
+                new AuthentikSettingsDto(
+                    !string.IsNullOrWhiteSpace(configuration["Authentik:Authority"]) || !string.IsNullOrWhiteSpace(configuration["Authentik:UsersEndpoint"]),
+                    configuration["Authentik:Authority"] ?? configuration["Authentication:Authority"] ?? "https://authentik.rosenvall.se",
+                    configuration["Authentik:UsersEndpoint"] ?? "https://authentik.rosenvall.se/api/v3/core/users/"));
+        }
+
+        private static string ResolveCodexStatus(string codexPath, string? codexHome)
+        {
+            if (Path.IsPathRooted(codexPath) && !File.Exists(codexPath))
+            {
+                return "Unavailable";
+            }
+
+            if (string.IsNullOrWhiteSpace(codexHome))
+            {
+                return "LoginRequired";
+            }
+
+            var authPath = Path.Combine(codexHome, "auth.json");
+            return File.Exists(authPath) ? "Ready" : "LoginRequired";
         }
 
         public string? RenderPreviewManifest(Guid workItemId)
@@ -1757,16 +3305,18 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                var sourceFiles = string.Equals(preview.Image, LocalReactPreviewProject.Image, StringComparison.OrdinalIgnoreCase)
-                    ? LocalReactPreviewProject.ForWorkItem(
-                        item.Key,
-                        item.Title,
-                        item.Description,
-                        _comments
-                            .Where(comment => comment.WorkItemId == item.Id && !string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase))
-                            .OrderBy(comment => comment.CreatedAt)
-                            .Select(comment => comment.Body))
-                    : Array.Empty<PreviewSourceFile>();
+                var sourceFiles = preview.SourceFiles is { Count: > 0 }
+                    ? preview.SourceFiles
+                    : string.Equals(preview.Image, LocalReactPreviewProject.Image, StringComparison.OrdinalIgnoreCase)
+                        ? LocalReactPreviewProject.ForWorkItem(
+                            item.Key,
+                            item.Title,
+                            item.Description,
+                            _comments
+                                .Where(comment => comment.WorkItemId == item.Id && !string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase))
+                                .OrderBy(comment => comment.CreatedAt)
+                                .Select(comment => comment.Body))
+                        : Array.Empty<PreviewSourceFile>();
                 var resources = PreviewResourceSet.Create(
                     item.Key,
                     item.Title,
@@ -1779,17 +3329,169 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public string? RenderPipelineJobManifest(Guid pipelineRunId)
+        {
+            lock (_lock)
+            {
+                var run = _pipelineRuns.SingleOrDefault(entry => entry.Id == pipelineRunId);
+                if (run is null)
+                {
+                    return null;
+                }
+
+                var repository = _repositories.SingleOrDefault(entry => entry.Id == run.RepositoryId);
+                if (repository is null)
+                {
+                    return null;
+                }
+
+                return PipelineJobManifestRenderer.Render(run, repository);
+            }
+        }
+
         private BoardDto ToBoardDto(BoardRecord board) =>
             new(board.Id, board.WorkspaceId, board.Name,
-                board.Columns.Select(column => new BoardColumnDto(column, _items.Where(i => i.BoardId == board.Id && i.Status == column).OrderBy(i => i.SortOrder).ThenBy(i => i.Key).Select(ToSummary).ToArray())).ToArray());
+                board.Columns.Select(column => new BoardColumnDto(column, _items.Where(i => i.BoardId == board.Id && i.Status == column).OrderBy(i => i.SortOrder).ThenBy(i => i.Key).Select(ToSummary).ToArray())).ToArray(),
+                board.RepositoryId is null ? null : _repositories.SingleOrDefault(repository => repository.Id == board.RepositoryId.Value));
 
-        private WorkItemSummaryDto ToSummary(WorkItemRecord item) =>
-            new(item.Id, item.Key, item.Type, item.Title, item.Status, item.Assignee, item.Priority, _comments.Count(c => c.WorkItemId == item.Id), item.AiStatus, item.PullRequestUrl, item.SortOrder, _previews.SingleOrDefault(p => p.WorkItemId == item.Id)?.Url);
+        private WorkItemSummaryDto ToSummary(WorkItemRecord item)
+        {
+            var runningPreview = _previews.SingleOrDefault(preview =>
+                preview.WorkItemId == item.Id &&
+                string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase));
+            return new(item.Id, item.Key, item.Type, item.Title, item.Status, item.Assignee, item.Priority, _comments.Count(c => c.WorkItemId == item.Id), item.AiStatus, item.PullRequestUrl, item.SortOrder, runningPreview?.Url);
+        }
 
         private void AddPreviewEvent(WorkItemRecord item, PreviewDto preview, string eventType, string actor, string message)
         {
             _previewEvents.Add(new PreviewEventDto(Guid.NewGuid(), item.Id, item.Key, item.Title, eventType, preview.Namespace, preview.Url, actor, message, DateTimeOffset.UtcNow));
+            AddTimelineForItem(item, eventType == "Created" ? "PreviewCreated" : $"Preview{eventType}", item.Key, message, actor, preview.Url);
         }
+
+        private RepositoryDto? ResolveBoardRepository(CreateBoardRequest request)
+        {
+            if (request.RepositoryId is { } repositoryId)
+            {
+                return _repositories.SingleOrDefault(repository => repository.Id == repositoryId);
+            }
+
+            if (string.IsNullOrWhiteSpace(request.RepositoryRemoteUrl) && string.IsNullOrWhiteSpace(request.RepositoryName))
+            {
+                return null;
+            }
+
+            var repository = new RepositoryDto(
+                Guid.NewGuid(),
+                NormalizeText(request.RepositoryProvider, "Forgejo"),
+                NormalizeText(request.RepositoryName, NormalizeText(request.Name, "repository")),
+                NormalizeText(request.RepositoryRemoteUrl, $"ssh://git.rosenvall.se/{SlugifyRepositoryName(request.RepositoryName ?? request.Name)}.git"),
+                string.IsNullOrWhiteSpace(request.RepositoryWebUrl) ? null : request.RepositoryWebUrl.Trim(),
+                NormalizeText(request.RepositoryDefaultBranch, "main"),
+                DateTimeOffset.UtcNow);
+            _repositories.Add(repository);
+            return repository;
+        }
+
+        private RepositoryDto EnsureLocalRepository()
+        {
+            var existing = _repositories.FirstOrDefault(repository => repository.Provider == "Forgejo" && repository.Name == "local/vite-react-tailwind");
+            if (existing is not null)
+            {
+                return existing;
+            }
+
+            var repository = new RepositoryDto(
+                Guid.NewGuid(),
+                "Forgejo",
+                "local/vite-react-tailwind",
+                "ssh://git.rosenvall.se/local/vite-react-tailwind.git",
+                "https://git.rosenvall.se/local/vite-react-tailwind",
+                "main",
+                DateTimeOffset.UtcNow);
+            _repositories.Add(repository);
+            return repository;
+        }
+
+        private Guid? RepositoryIdForBoard(Guid boardId) =>
+            _boards.SingleOrDefault(board => board.Id == boardId)?.RepositoryId;
+
+        private Guid? ResolveRepositoryForDevelopment(Guid boardId, string repositoryName)
+        {
+            var boardRepositoryId = RepositoryIdForBoard(boardId);
+            if (boardRepositoryId is not null)
+            {
+                return boardRepositoryId;
+            }
+
+            return _repositories.FirstOrDefault(repository =>
+                repository.Name.Equals(repositoryName, StringComparison.OrdinalIgnoreCase) ||
+                repository.RemoteUrl.Contains(repositoryName, StringComparison.OrdinalIgnoreCase))?.Id;
+        }
+
+        private void RecordPipelineRunWithoutLock(RecordPipelineRunRequest request)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var run = new PipelineRunDto(
+                Guid.NewGuid(),
+                request.RepositoryId,
+                request.BoardId,
+                request.WorkItemId,
+                NormalizeText(request.Stage, "Pipeline"),
+                    NormalizeText(request.Status, "Running"),
+                    NormalizeText(request.Message, "Pipeline run recorded."),
+                    string.IsNullOrWhiteSpace(request.Url) ? null : request.Url.Trim(),
+                    now,
+                    IsTerminalPipelineStatus(request.Status) ? now : null,
+                    Math.Max(0, request.TokensUsed),
+                    Math.Max(0, request.CodeAdded),
+                    Math.Max(0, request.CodeDeleted));
+            _pipelineRuns.Add(run);
+            AddTimelineEvent(run.BoardId, run.RepositoryId, run.WorkItemId, "Pipeline", run.Stage, run.Message, "system", run.Url, now);
+        }
+
+        private void AddTimelineForItem(WorkItemRecord item, string kind, string title, string message, string actor, string? url = null, DateTimeOffset? createdAt = null) =>
+            AddTimelineEvent(item.BoardId, RepositoryIdForBoard(item.BoardId), item.Id, kind, title, message, actor, url, createdAt);
+
+        private void AddTimelineEvent(Guid? boardId, Guid? repositoryId, Guid? workItemId, string kind, string title, string message, string actor, string? url = null, DateTimeOffset? createdAt = null)
+        {
+            _timelineEvents.Add(new TimelineEventDto(
+                Guid.NewGuid(),
+                boardId,
+                repositoryId,
+                workItemId,
+                NormalizeText(kind, "Event"),
+                NormalizeText(title, "Event"),
+                NormalizeText(message, "Event recorded."),
+                NormalizeText(actor, "system"),
+                string.IsNullOrWhiteSpace(url) ? null : url.Trim(),
+                createdAt ?? DateTimeOffset.UtcNow));
+        }
+
+        private string RepositoryName(Guid repositoryId) =>
+            _repositories.SingleOrDefault(repository => repository.Id == repositoryId)?.Name ?? "Repository";
+
+        private static bool IsTerminalPipelineStatus(string status) =>
+            status.Contains("succeed", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("complete", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("fail", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("cancel", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("approved", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("passed", StringComparison.OrdinalIgnoreCase);
+
+        private static string NormalizeText(string? value, string fallback) =>
+            string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+        private static void EnsureEditableHumanComment(CommentDto comment, string actor)
+        {
+            if (!string.Equals(comment.Kind, "Comment", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(comment.Author, NormalizeText(actor, ""), StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Only your own comments can be edited or deleted.");
+            }
+        }
+
+        private static string SlugifyRepositoryName(string value) =>
+            string.Join('-', NormalizeText(value, "repository").Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
 
         private static string NormalizePreviewStatus(string status) =>
             string.Equals(status, "Healthy", StringComparison.OrdinalIgnoreCase) ? "Running" : status;
@@ -1861,7 +3563,8 @@ namespace Rosenvall.DevOps.Api
         private void Seed()
         {
             var workspace = new WorkspaceDto(Guid.Parse("3a469909-9487-4bf5-9fd4-5bd2e4d59fb5"), "Frontend Re-architecture", "Production Environment", "us-east-1", 14, 32, 847, 64);
-            var board = new BoardRecord(Guid.Parse("6942aca6-5c36-4498-aeaa-c3a2ebe4e8db"), workspace.Id, "Sprint 42", ["Todo", "In Progress", "AI Planning", "Review", "Done"]);
+            var repository = new RepositoryDto(Guid.Parse("8a5bca6d-69d1-4a58-bb4f-a629243a9337"), "GitHub", "rosenvall/auth-service", "https://github.com/rosenvall/auth-service.git", "https://github.com/rosenvall/auth-service", "main", DateTimeOffset.UtcNow.AddDays(-7));
+            var board = new BoardRecord(Guid.Parse("6942aca6-5c36-4498-aeaa-c3a2ebe4e8db"), workspace.Id, "Sprint 42", ["Todo", "In Progress", "AI Planning", "Review", "Done"], repository.Id);
             var task = new WorkItemRecord(Guid.Parse("4f55f9a2-3f05-4ff5-bfd8-a43740bebccb"), board.Id, "TASK-4821", "Feature", "Implement OAuth2 Flow for Partner API Integrations", "Upgrade the current API authentication to support full OAuth2 authorization code flow for third-party partner integrations.", "In Progress", "High", "Sarah J.", 0);
             var aiTask = new WorkItemRecord(Guid.Parse("9d81428e-f407-4689-a0c8-20e6e48175bb"), board.Id, "FE-901", "Feature", "Generate Unit Tests for Auth Module", "Generate a focused suite for authentication edge cases.", "AI Planning", "Medium", null, 0)
             {
@@ -1869,6 +3572,7 @@ namespace Rosenvall.DevOps.Api
             };
 
             _workspaces.Add(workspace);
+            _repositories.Add(repository);
             _boards.Add(board);
             _items.AddRange([
                 task,
@@ -1886,6 +3590,7 @@ namespace Rosenvall.DevOps.Api
             var seededPreview = new PreviewDto(Guid.NewGuid(), task.Id, "https://feat-auth.rosenvall.se", "ghcr.io/rosenvall/auth-service@sha256:demo", "Running", DateTimeOffset.UtcNow.AddDays(7), null, seededResources.Namespace, seededResources.Name);
             _previews.Add(seededPreview);
             AddPreviewEvent(task, seededPreview, "Created", "seed", "Seed preview created.");
+            AddTimelineEvent(board.Id, repository.Id, task.Id, "Commit", task.Key, "Initial auth-service history imported.", "seed", "https://github.com/rosenvall/auth-service/commit/demo", DateTimeOffset.UtcNow.AddHours(-3));
         }
 
         private bool TryLoad()
@@ -1904,17 +3609,32 @@ namespace Rosenvall.DevOps.Api
             }
 
             _workspaces.AddRange(snapshot.Workspaces);
-            _boards.AddRange(snapshot.Boards.Select(board => new BoardRecord(board.Id, board.WorkspaceId, board.Name, board.Columns)));
+            _repositories.AddRange(snapshot.Repositories ?? []);
+            _boards.AddRange(snapshot.Boards.Select(board => new BoardRecord(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId)));
             _items.AddRange(snapshot.Items.Select(item => new WorkItemRecord(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.SortOrder)
             {
                 AiStatus = item.AiStatus,
                 PullRequestUrl = item.PullRequestUrl
             }));
             _comments.AddRange(snapshot.Comments);
-            _aiRuns.AddRange(snapshot.AiRuns.Select(run => AiRun.Restore(run.Id, run.WorkItemId, run.Provider, run.Model, run.Status, run.Plan, run.ApprovedBy)));
+            _aiRuns.AddRange(snapshot.AiRuns
+                .GroupBy(run => run.WorkItemId)
+                .SelectMany(group => group.Select((run, index) =>
+                    AiRun.Restore(
+                        run.Id,
+                        run.WorkItemId,
+                        run.Provider,
+                        run.Model,
+                        run.Status,
+                        run.Plan,
+                        run.ApprovedBy,
+                        run.SequenceNumber > 0 ? run.SequenceNumber : index + 1,
+                        run.CreatedAt ?? DateTimeOffset.UtcNow.AddTicks(index)))));
             _previews.AddRange(snapshot.Previews.Select(preview => preview with { Status = NormalizePreviewStatus(preview.Status) }));
             _development.AddRange(snapshot.Development.Select(development => new DevelopmentDtoRecord(development.WorkItemId, development.Development)));
             _previewEvents.AddRange(snapshot.PreviewEvents ?? []);
+            _pipelineRuns.AddRange(snapshot.PipelineRuns ?? []);
+            _timelineEvents.AddRange(snapshot.TimelineEvents ?? []);
             _nextTaskNumber = Math.Max(snapshot.NextTaskNumber, NextTaskNumberFromItems());
             return true;
         }
@@ -1923,14 +3643,17 @@ namespace Rosenvall.DevOps.Api
         {
             var snapshot = new DevOpsSnapshot(
                 _workspaces.ToArray(),
-                _boards.Select(board => new BoardSnapshot(board.Id, board.WorkspaceId, board.Name, board.Columns)).ToArray(),
+                _boards.Select(board => new BoardSnapshot(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId)).ToArray(),
                 _items.Select(item => new WorkItemSnapshot(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.AiStatus, item.PullRequestUrl, item.SortOrder)).ToArray(),
                 _comments.ToArray(),
-                _aiRuns.Select(run => new AiRunSnapshot(run.Id, run.WorkItemId, run.Provider, run.Model, run.Status, run.Plan, run.ApprovedBy)).ToArray(),
+                _aiRuns.Select(run => new AiRunSnapshot(run.Id, run.WorkItemId, run.Provider, run.Model, run.Status, run.Plan, run.ApprovedBy, run.SequenceNumber, run.CreatedAt)).ToArray(),
                 _previews.ToArray(),
                 _development.Select(development => new DevelopmentSnapshot(development.WorkItemId, development.Development)).ToArray(),
                 _nextTaskNumber,
-                _previewEvents.ToArray());
+                _previewEvents.ToArray(),
+                _repositories.ToArray(),
+                _pipelineRuns.ToArray(),
+                _timelineEvents.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
 
             using var db = _dbFactory.CreateDbContext();
@@ -1949,7 +3672,15 @@ namespace Rosenvall.DevOps.Api
         }
     }
 
-    internal sealed record BoardRecord(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns);
+    internal sealed record BoardRecord(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
+    internal sealed class ConfiguredAuthentikUser
+    {
+        public string? Id { get; set; }
+        public string? Username { get; set; }
+        public string? Name { get; set; }
+        public string? DisplayName { get; set; }
+        public string? Email { get; set; }
+    }
 
     internal sealed class WorkItemRecord(Guid id, Guid boardId, string key, string type, string title, string description, string status, string priority, string? assignee, int sortOrder)
     {
@@ -1968,9 +3699,9 @@ namespace Rosenvall.DevOps.Api
     }
 
     internal sealed record DevelopmentDtoRecord(Guid WorkItemId, DevelopmentDto Development);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null);
-    internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null);
+    internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
-    internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy);
+    internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null);
     internal sealed record DevelopmentSnapshot(Guid WorkItemId, DevelopmentDto Development);
 }

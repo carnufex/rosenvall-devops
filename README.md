@@ -8,6 +8,11 @@ This is the first vertical slice of the DevOps SaaS plan.
 - `src/Rosenvall.DevOps.Api`: ASP.NET Core 10 Minimal API with SignalR update hub and v1 endpoint contracts.
 - `frontend`: React + TypeScript UI matching the supplied Rosenvall DevOps design direction.
 - `workflows`: GitHub Actions templates for target repositories that will run implementation agents.
+- Boards are repository-bound. RDO can model Forgejo/Gitea, GitHub, Azure DevOps, and generic Git remotes.
+- Timeline events combine card lifecycle, preview events, PR callbacks, commits, and pipeline runs.
+- Forgejo/Gitea is the first self-hosted Git target. The current policy is `LinkExistingFirst`, with repository creation exposed as configuration before wiring credentials.
+- Pipeline runs can render and submit Kubernetes Jobs, then expose token and code-delta metrics to the dashboard.
+- Assignee options can come from Authentik configuration plus the current board's existing assignees.
 
 The API seeds demo data on first run and persists state through EF Core. Local development uses SQLite when `ConnectionStrings__DevOps` is empty. Cluster runtime should provide `ConnectionStrings__DevOps` for CloudNativePG. The Kubernetes scaffold stages the PostgreSQL manifest but does not sync it until the secret contract exists.
 
@@ -71,12 +76,34 @@ Docker Compose demo:
 docker compose -f .\compose.yaml up --build
 ```
 
+## Homelab Deploy
+
+Product-side manifests live in `deploy/homelab`:
+
+```powershell
+kubectl apply -k .\deploy\homelab
+```
+
+The manifests publish `https://devops.rosenvall.se`, configure Authentik OIDC for the frontend/API, point Ollama at `http://ollama.ollama.svc.cluster.local:11434/api`, install Codex CLI in the API pod with a mounted `/app/codex-home`, and give the API service account RBAC to create preview and pipeline Kubernetes resources.
+
+To enable the `codex` AI provider in homelab, log in once inside the API pod:
+
+```powershell
+kubectl -n rosenvall-devops exec -it deploy/rosenvall-devops-api -- codex login --device-auth
+```
+
+The login state is stored in the `rosenvall-devops-codex-home` PVC. The `ollama` provider remains available and is still the default.
+
 ## Implemented API Contracts
 
 - `GET /api/workspaces`
 - `POST /api/workspaces`
 - `GET /api/workspaces/{workspaceId}/boards`
+- `POST /api/workspaces/{workspaceId}/boards`
+- `GET /api/repositories`
+- `POST /api/repositories`
 - `GET /api/boards/{boardId}`
+- `GET /api/boards/{boardId}/timeline`
 - `GET /api/work-items`
 - `POST /api/work-items`
 - `GET /api/work-items/{workItemId}`
@@ -89,12 +116,16 @@ docker compose -f .\compose.yaml up --build
 - `POST /api/ai-runs/{aiRunId}/approve`
 - `POST /api/ai-runs/{aiRunId}/discard`
 - `POST /api/integrations/github/callback`
+- `GET /api/metrics`
+- `GET /api/assignees`
+- `POST /api/pipeline-runs`
+- `POST /api/pipeline-runs/{pipelineRunId}/execute`
+- `GET /api/pipeline-runs/{pipelineRunId}/manifest`
 - `GET /api/previews/{workItemId}/manifest`
 - `GET /api/settings`
 
 ## Next Production Steps
 
 - Provide the PostgreSQL bootstrap secret and `ConnectionStrings__DevOps` before enabling CloudNativePG runtime in ArgoCD.
-- Add GitHub App authentication and workflow-dispatch signing.
-- The preview resource contract is implemented through `PreviewResourceSet` and `GET /api/previews/{workItemId}/manifest`. The remaining production step is applying those manifests from an RBAC-limited orchestrator process.
-- Publish immutable GHCR images and then enable runtime deployment manifests and public `HTTPRoute`.
+- Add real Forgejo and Authentik API tokens as Kubernetes secrets, then replace configured/static user and repository data with live API calls.
+- Publish immutable image tags from CI and pin `deploy/homelab` to those tags instead of `:main`.

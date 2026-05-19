@@ -13,10 +13,12 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 ENV ASPNETCORE_URLS=http://+:8080
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl nodejs npm \
     && curl -fsSLo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.31.1/bin/linux/amd64/kubectl \
     && chmod 0755 /usr/local/bin/kubectl \
+    && npm install -g @openai/codex \
     && apt-get purge -y --auto-remove curl \
+    && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/publish .
 ENTRYPOINT ["dotnet", "Rosenvall.DevOps.Api.dll"]

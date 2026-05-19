@@ -17,6 +17,17 @@ $apiOut = Join-Path $logDir "api.out.log"
 $apiErr = Join-Path $logDir "api.err.log"
 $frontendOut = Join-Path $logDir "frontend.out.log"
 $frontendErr = Join-Path $logDir "frontend.err.log"
+$homelabKubeconfig = Join-Path (Split-Path $root -Parent) "Rosenvalls-Homelab\tofu\output\kubeconfig"
+$previousPreviewKubeconfig = $env:Preview__KubeconfigPath
+$previousPipelinesKubeconfig = $env:Pipelines__KubeconfigPath
+
+if ([string]::IsNullOrWhiteSpace($env:Preview__KubeconfigPath) -and (Test-Path -LiteralPath $homelabKubeconfig)) {
+    $env:Preview__KubeconfigPath = (Resolve-Path -LiteralPath $homelabKubeconfig).Path
+}
+
+if ([string]::IsNullOrWhiteSpace($env:Pipelines__KubeconfigPath) -and (Test-Path -LiteralPath $homelabKubeconfig)) {
+    $env:Pipelines__KubeconfigPath = (Resolve-Path -LiteralPath $homelabKubeconfig).Path
+}
 
 Get-CimInstance Win32_Process |
     Where-Object {
@@ -32,6 +43,9 @@ $api = Start-Process -FilePath "dotnet.exe" `
     -RedirectStandardOutput $apiOut `
     -RedirectStandardError $apiErr `
     -PassThru
+
+$env:Preview__KubeconfigPath = $previousPreviewKubeconfig
+$env:Pipelines__KubeconfigPath = $previousPipelinesKubeconfig
 
 Start-Sleep -Seconds 3
 
@@ -51,3 +65,6 @@ Write-Host "API:      http://localhost:$ApiPort/healthz"
 Write-Host "API PID:  $($api.Id)"
 Write-Host "UI PID:   $($frontend.Id)"
 Write-Host "Logs:     $logDir"
+if (Test-Path -LiteralPath $homelabKubeconfig) {
+    Write-Host "Kubeconfig: $homelabKubeconfig"
+}

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Security.Cryptography;
 
 namespace Rosenvall.DevOps.Core;
 
@@ -64,7 +65,7 @@ public enum AiRunStatus
 
 public sealed class AiRun
 {
-    private AiRun(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy)
+    private AiRun(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy, int sequenceNumber, DateTimeOffset createdAt)
     {
         Id = id;
         WorkItemId = workItemId;
@@ -73,6 +74,8 @@ public sealed class AiRun
         Status = status;
         Plan = plan;
         ApprovedBy = approvedBy;
+        SequenceNumber = sequenceNumber;
+        CreatedAt = createdAt;
     }
 
     public Guid Id { get; }
@@ -82,8 +85,10 @@ public sealed class AiRun
     public AiRunStatus Status { get; private set; }
     public string? Plan { get; private set; }
     public string? ApprovedBy { get; private set; }
+    public int SequenceNumber { get; }
+    public DateTimeOffset CreatedAt { get; }
 
-    public static AiRun Start(Guid workItemId, string provider, string model)
+    public static AiRun Start(Guid workItemId, string provider, string model, int sequenceNumber = 1, DateTimeOffset? createdAt = null)
     {
         if (workItemId == Guid.Empty)
         {
@@ -100,10 +105,15 @@ public sealed class AiRun
             throw new ArgumentException("Model is required.", nameof(model));
         }
 
-        return new AiRun(Guid.NewGuid(), workItemId, provider.Trim(), model.Trim(), AiRunStatus.Planning, null, null);
+        if (sequenceNumber < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sequenceNumber), "Sequence number must be positive.");
+        }
+
+        return new AiRun(Guid.NewGuid(), workItemId, provider.Trim(), model.Trim(), AiRunStatus.Planning, null, null, sequenceNumber, createdAt ?? DateTimeOffset.UtcNow);
     }
 
-    public static AiRun Restore(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy)
+    public static AiRun Restore(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy, int sequenceNumber = 1, DateTimeOffset? createdAt = null)
     {
         if (id == Guid.Empty)
         {
@@ -115,7 +125,7 @@ public sealed class AiRun
             throw new ArgumentException("Work item id is required.", nameof(workItemId));
         }
 
-        return new AiRun(id, workItemId, provider, model, status, plan, approvedBy);
+        return new AiRun(id, workItemId, provider, model, status, plan, approvedBy, Math.Max(1, sequenceNumber), createdAt ?? DateTimeOffset.UtcNow);
     }
 
     public void PostPlan(string plan)
@@ -297,6 +307,11 @@ public static class PreviewManifestRenderer
         builder.AppendLine("      labels:");
         builder.AppendLine($"        app.kubernetes.io/name: {resources.Name}");
         builder.AppendLine("        app.kubernetes.io/part-of: rosenvall-devops-preview");
+        if (resources.SourceFiles.Count > 0)
+        {
+            builder.AppendLine("      annotations:");
+            builder.AppendLine($"        rosenvall.dev/source-hash: {ComputeSourceHash(resources.SourceFiles)}");
+        }
         builder.AppendLine("    spec:");
         builder.AppendLine("      securityContext:");
         builder.AppendLine("        runAsNonRoot: true");
@@ -313,7 +328,7 @@ public static class PreviewManifestRenderer
             builder.AppendLine("          command:");
             builder.AppendLine("            - sh");
             builder.AppendLine("            - -c");
-            builder.AppendLine("            - cp -R /source/. /workspace && cp -R /opt/rosenvall-preview/node_modules /workspace/node_modules && chmod -R u+rwX,g+rwX /workspace");
+            builder.AppendLine("            - cp -R /source/. /workspace/ && mkdir -p /workspace/node_modules && cp -R /opt/rosenvall-preview/node_modules/. /workspace/node_modules/");
             builder.AppendLine("          securityContext:");
             builder.AppendLine("            allowPrivilegeEscalation: false");
             builder.AppendLine("            capabilities:");
@@ -418,6 +433,20 @@ public static class PreviewManifestRenderer
         builder.AppendLine($"        - name: {resources.Name}");
         builder.AppendLine("          port: 8080");
         return builder.ToString();
+    }
+
+    private static string ComputeSourceHash(IReadOnlyCollection<PreviewSourceFile> sourceFiles)
+    {
+        var builder = new StringBuilder();
+        foreach (var file in sourceFiles.OrderBy(file => file.Key, StringComparer.Ordinal))
+        {
+            builder.Append(file.Key).Append('\n');
+            builder.Append(file.Path).Append('\n');
+            builder.Append(file.Content).Append('\n');
+        }
+
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
     private static string IndentBlock(string value, int spaces)

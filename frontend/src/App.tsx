@@ -8,7 +8,6 @@ import {
   ExternalLink,
   GitPullRequest,
   Github,
-  GripVertical,
   History,
   LayoutDashboard,
   PanelLeft,
@@ -19,8 +18,8 @@ import {
   Settings,
   Sparkles,
   SquareTerminal,
-  Square,
   Trash2,
+  Users,
   X
 } from 'lucide-react';
 import {
@@ -43,7 +42,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-type View = 'dashboard' | 'board' | 'settings';
+type View = 'dashboard' | 'board' | 'timeline' | 'settings';
 
 type Workspace = {
   id: string;
@@ -61,6 +60,17 @@ type Board = {
   workspaceId: string;
   name: string;
   columns: BoardColumn[];
+  repository?: RepositoryDto | null;
+};
+
+type RepositoryDto = {
+  id: string;
+  provider: string;
+  name: string;
+  remoteUrl: string;
+  webUrl?: string | null;
+  defaultBranch: string;
+  createdAt: string;
 };
 
 type BoardColumn = {
@@ -110,6 +120,13 @@ type PreviewDto = {
   staticHtml?: string | null;
   namespace?: string | null;
   resourceName?: string | null;
+  phase?: string | null;
+  message?: string | null;
+  lastCheckedAt?: string | null;
+  podName?: string | null;
+  failureReason?: string | null;
+  failureLog?: string | null;
+  sourceFiles?: Array<{ key: string; path: string; content: string }> | null;
 };
 
 type PreviewEnvironmentDto = {
@@ -123,6 +140,12 @@ type PreviewEnvironmentDto = {
   image: string;
   status: string;
   expiresAt: string;
+  phase?: string | null;
+  message?: string | null;
+  lastCheckedAt?: string | null;
+  podName?: string | null;
+  failureReason?: string | null;
+  failureLog?: string | null;
 };
 
 type PreviewEventDto = {
@@ -149,6 +172,27 @@ type PipelineStatusDto = {
   updatedAt: string;
 };
 
+type MetricsDto = {
+  boardId?: string | null;
+  tokensUsed: number;
+  codeAdded: number;
+  codeDeleted: number;
+  pipelineRuns: number;
+};
+
+type TimelineEventDto = {
+  id: string;
+  boardId?: string | null;
+  repositoryId?: string | null;
+  workItemId?: string | null;
+  kind: string;
+  title: string;
+  message: string;
+  actor: string;
+  url?: string | null;
+  createdAt: string;
+};
+
 type DevelopmentDto = {
   repository: string;
   branch: string;
@@ -171,12 +215,33 @@ type SettingsDto = {
     activeModel: string;
     availableModels: string[];
     autoReviewPullRequests: boolean;
+    availableProviders: AiProviderSettingsDto[];
   };
   preview: {
     domain: string;
     defaultTtlDays: number;
     namespace: string;
   };
+  repositories: {
+    provider: string;
+    mode: string;
+    apiBaseUrl: string;
+    canCreateRepositories: boolean;
+  };
+  authentik: {
+    enabled: boolean;
+    authority: string;
+    usersEndpoint: string;
+  };
+};
+
+type AiProviderSettingsDto = {
+  provider: string;
+  displayName: string;
+  status: string;
+  endpoint: string;
+  activeModel: string;
+  availableModels: string[];
 };
 
 type AiRun = {
@@ -187,6 +252,8 @@ type AiRun = {
   status: string;
   plan?: string | null;
   approvedBy?: string | null;
+  sequenceNumber: number;
+  createdAt: string;
 };
 
 type WorkItemForm = {
@@ -204,6 +271,26 @@ type AssigneeOption = {
   hint?: string;
 };
 
+type AssigneeDto = {
+  id: string;
+  displayName: string;
+  email: string;
+  source: string;
+};
+
+type CreateBoardForm = {
+  name: string;
+  repositoryProvider: string;
+  repositoryRemoteUrl: string;
+  repositoryDefaultBranch: string;
+};
+
+type ToastMessage = {
+  id: string;
+  kind: 'info' | 'success' | 'error';
+  message: string;
+};
+
 const emptyForm: WorkItemForm = {
   title: '',
   description: '',
@@ -212,6 +299,17 @@ const emptyForm: WorkItemForm = {
   priority: 'Medium',
   assignee: ''
 };
+
+const emptyBoardForm: CreateBoardForm = {
+  name: '',
+  repositoryProvider: 'Forgejo',
+  repositoryRemoteUrl: '',
+  repositoryDefaultBranch: 'main'
+};
+
+const selectedBoardStorageKey = 'rosenvall-devops:selected-board';
+const selectedAiProviderStorageKey = 'rosenvall-devops:selected-ai-provider';
+const selectedAiModelStorageKey = 'rosenvall-devops:selected-ai-model';
 
 const api = {
   async get<T>(path: string): Promise<T> {
@@ -272,13 +370,36 @@ function App() {
   const [shell, setShell] = React.useState<ShellState>({ status: 'loading' });
   const [selected, setSelected] = React.useState<SelectedState>({ status: 'closed' });
   const [createStatus, setCreateStatus] = React.useState<string | null>(null);
+  const [createBoardOpen, setCreateBoardOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
-  const [error, setError] = React.useState<string | null>(null);
+  const [toasts, setToasts] = React.useState<ToastMessage[]>([]);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
-  const [selectedAiModel, setSelectedAiModel] = React.useState<string | null>(null);
+  const [selectedAiProvider, setSelectedAiProviderState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiProviderStorageKey));
+  const [selectedAiModel, setSelectedAiModelState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiModelStorageKey));
+  const setSelectedAiProvider = React.useCallback((provider: string) => {
+    setSelectedAiProviderState(provider);
+    setSelectedAiModelState(null);
+    window.localStorage.setItem(selectedAiProviderStorageKey, provider);
+    window.localStorage.removeItem(selectedAiModelStorageKey);
+  }, []);
+  const setSelectedAiModel = React.useCallback((model: string) => {
+    setSelectedAiModelState(model);
+    window.localStorage.setItem(selectedAiModelStorageKey, model);
+  }, []);
+  const [selectedBoardId, setSelectedBoardIdState] = React.useState<string | null>(() => window.localStorage.getItem(selectedBoardStorageKey));
+  const selectedBoardIdRef = React.useRef<string | null>(selectedBoardId);
+  const setSelectedBoardId = React.useCallback((id: string | null) => {
+    selectedBoardIdRef.current = id;
+    setSelectedBoardIdState(id);
+    if (id) {
+      window.localStorage.setItem(selectedBoardStorageKey, id);
+    } else {
+      window.localStorage.removeItem(selectedBoardStorageKey);
+    }
+  }, []);
   const actor = auth.status === 'ready' ? auth.userName : 'Christopher Rosenvall';
   const assigneeOptions = React.useMemo(
-    () => buildAssigneeOptions(shell.status === 'ready' ? shell.board : null, auth),
+    () => buildAssigneeOptions(shell.status === 'ready' ? shell.board : null, shell.status === 'ready' ? shell.assignees : [], auth),
     [shell, auth]
   );
 
@@ -286,7 +407,15 @@ function App() {
     setAccessTokenProvider(() => auth.status === 'ready' ? auth.accessToken : null);
   }, [auth]);
 
-  const loadShell = React.useCallback(async () => {
+  const addToast = React.useCallback((kind: ToastMessage['kind'], message: string) => {
+    const id = crypto.randomUUID();
+    setToasts((current) => [{ id, kind, message }, ...current].slice(0, 3));
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, kind === 'success' ? 5000 : 30000);
+  }, []);
+
+  const loadShell = React.useCallback(async (preferredBoardId?: string | null) => {
     if (auth.status === 'checking') return;
     setShell((current) => current.status === 'ready' ? { ...current, busy: true } : { status: 'loading' });
     try {
@@ -294,20 +423,24 @@ function App() {
       const workspace = workspaces[0];
       if (!workspace) throw new Error('No workspace returned by API');
       const boards = await api.get<Board[]>(`/api/workspaces/${workspace.id}/boards`);
-      const board = boards[0];
+      const board = boards.find((entry) => entry.id === (preferredBoardId ?? selectedBoardIdRef.current)) ?? boards[0];
       if (!board) throw new Error('No board returned by API');
-      const [settings, previews, events, pipelines] = await Promise.all([
+      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees] = await Promise.all([
+        api.get<RepositoryDto[]>('/api/repositories'),
         api.get<SettingsDto>('/api/settings'),
         api.get<PreviewEnvironmentDto[]>('/api/preview-environments'),
         api.get<PreviewEventDto[]>('/api/preview-events'),
-        api.get<PipelineStatusDto[]>('/api/pipelines')
+        api.get<PipelineStatusDto[]>('/api/pipelines'),
+        api.get<TimelineEventDto[]>(`/api/boards/${board.id}/timeline`),
+        api.get<MetricsDto>(`/api/metrics?boardId=${board.id}`),
+        api.get<AssigneeDto[]>(`/api/assignees?boardId=${board.id}`)
       ]);
-      setShell({ status: 'ready', workspace, board, settings, previews, events, pipelines, busy: false });
-      setError(null);
+      setSelectedBoardId(board.id);
+      setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, busy: false });
     } catch (loadError) {
       setShell({ status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
     }
-  }, [auth.status]);
+  }, [auth.status, setSelectedBoardId]);
 
   const loadWorkItem = React.useCallback(async (id: string) => {
     setSelected((current) => current.status === 'open' && current.detail.item.id === id ? { ...current, busy: true } : { status: 'loading', id });
@@ -317,12 +450,11 @@ function App() {
         api.get<AiRun[]>(`/api/work-items/${id}/ai-runs`)
       ]);
       setSelected({ status: 'open', detail, aiRuns: runs, busy: false });
-      setError(null);
     } catch (loadError) {
       setSelected({ status: 'closed' });
-      setError(loadError instanceof Error ? loadError.message : 'Failed to load work item');
+      addToast('error', loadError instanceof Error ? loadError.message : 'Failed to load work item');
     }
-  }, []);
+  }, [addToast]);
 
   React.useEffect(() => {
     if (auth.status === 'ready' || auth.status === 'disabled') {
@@ -337,21 +469,82 @@ function App() {
     }
   }, [loadShell, loadWorkItem]);
 
+  const previewPollWorkItemId = selected.status === 'open' && isPreviewPendingStatus(selected.detail.preview?.status)
+    ? selected.detail.item.id
+    : null;
+
+  React.useEffect(() => {
+    if (!previewPollWorkItemId) return;
+    let cancelled = false;
+
+    const refreshPreviewStatus = async () => {
+      try {
+        const [detail, runs] = await Promise.all([
+          api.get<WorkItemDetail>(`/api/work-items/${previewPollWorkItemId}`),
+          api.get<AiRun[]>(`/api/work-items/${previewPollWorkItemId}/ai-runs`)
+        ]);
+        if (cancelled) return;
+        setSelected((current) => current.status === 'open' && current.detail.item.id === previewPollWorkItemId
+          ? { ...current, detail, aiRuns: runs, busy: false }
+          : current);
+        await loadShell();
+      } catch (pollError) {
+        console.warn('Failed to refresh preview status', pollError);
+      }
+    };
+
+    const interval = window.setInterval(() => void refreshPreviewStatus(), 5000);
+    void refreshPreviewStatus();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [loadShell, previewPollWorkItemId]);
+
   const runAction = React.useCallback(async (label: string, action: () => Promise<void>) => {
     setBusyAction(label);
-    setError(null);
     try {
       await action();
+      addToast('success', `${label} completed.`);
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : `${label} failed`);
+      addToast('error', actionError instanceof Error ? actionError.message : `${label} failed`);
     } finally {
       setBusyAction(null);
     }
-  }, []);
+  }, [addToast]);
 
   const actions: BoardActions = {
     openWorkItem: (id) => void loadWorkItem(id),
     openCreateCard: (status) => setCreateStatus(status),
+    openCreateBoard: () => setCreateBoardOpen(true),
+    selectBoard: (id) => {
+      setSelectedBoardId(id);
+      void loadShell(id);
+    },
+    createBoard: async (form) => {
+      await runAction('Creating board', async () => {
+        if (shell.status !== 'ready') return;
+        const created = await api.post<Board>(`/api/workspaces/${shell.workspace.id}/boards`, {
+          name: form.name,
+          repositoryId: null,
+          repositoryProvider: form.repositoryProvider,
+          repositoryName: repositoryNameFromRemote(form.repositoryRemoteUrl, form.name),
+          repositoryRemoteUrl: form.repositoryRemoteUrl,
+          repositoryWebUrl: webUrlFromRemote(form.repositoryRemoteUrl),
+          repositoryDefaultBranch: form.repositoryDefaultBranch || 'main'
+        });
+        setCreateBoardOpen(false);
+        setSelectedBoardId(created.id);
+        await loadShell(created.id);
+      });
+    },
+    executePipeline: async (pipelineRunId) => {
+      await runAction('Starting pipeline', async () => {
+        await api.post<PipelineStatusDto>(`/api/pipeline-runs/${pipelineRunId}/execute`, { actor });
+        await refreshAfterChange();
+      });
+    },
     createCard: async (form) => {
       await runAction('Creating card', async () => {
         if (shell.status !== 'ready') return;
@@ -391,16 +584,22 @@ function App() {
     startAiPlan: async (id) => {
       await runAction('Generating AI plan', async () => {
         if (shell.status !== 'ready') return;
+        const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
-          provider: shell.settings.ai.provider,
-          model: resolveActiveAiModel(shell.settings, selectedAiModel)
+          provider: provider.provider,
+          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel)
         });
         await refreshAfterChange(id);
       });
     },
     approvePlan: async (runId, workItemId) => {
-      await runAction('Approving plan and starting preview', async () => {
-        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor });
+      await runAction('Implementing plan and starting preview', async () => {
+        try {
+          await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor });
+        } catch (approveError) {
+          await refreshAfterChange(workItemId);
+          throw approveError;
+        }
         await refreshAfterChange(workItemId);
       });
     },
@@ -418,7 +617,12 @@ function App() {
     },
     startPreview: async (workItemId) => {
       await runAction('Starting preview', async () => {
-        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/start`, { actor });
+        try {
+          await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/start`, { actor });
+        } catch (previewError) {
+          await refreshAfterChange(workItemId);
+          throw previewError;
+        }
         await refreshAfterChange(workItemId);
       });
     },
@@ -437,12 +641,25 @@ function App() {
     addCommentAndAskAi: async (id, body) => {
       await runAction('Posting comment and asking AI', async () => {
         if (shell.status !== 'ready') return;
+        const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
         await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
-          provider: shell.settings.ai.provider,
-          model: resolveActiveAiModel(shell.settings, selectedAiModel)
+          provider: provider.provider,
+          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel)
         });
         await refreshAfterChange(id);
+      });
+    },
+    updateComment: async (commentId, workItemId, body) => {
+      await runAction('Updating comment', async () => {
+        await api.patch<CommentDto>(`/api/comments/${commentId}`, { actor, body });
+        await refreshAfterChange(workItemId);
+      });
+    },
+    deleteComment: async (commentId, workItemId) => {
+      await runAction('Deleting comment', async () => {
+        await api.delete(`/api/comments/${commentId}?actor=${encodeURIComponent(actor)}`);
+        await refreshAfterChange(workItemId);
       });
     },
     moveCard: async (id, status, sortOrder) => {
@@ -454,29 +671,33 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       } catch (moveError) {
         setShell({ ...shell, board: previous, busy: false });
-        setError(moveError instanceof Error ? moveError.message : 'Could not move card');
+        addToast('error', moveError instanceof Error ? moveError.message : 'Could not move card');
       }
     }
   };
 
   const board = shell.status === 'ready' ? filterBoard(shell.board, query) : null;
+  const activeBoardId = shell.status === 'ready' && selectedBoardId && shell.boards.some((entry) => entry.id === selectedBoardId)
+    ? selectedBoardId
+    : shell.status === 'ready'
+      ? shell.board.id
+      : selectedBoardId;
 
   return (
     <div className="app-shell">
       <Sidebar view={view} onChange={setView} onNewCard={() => setCreateStatus('Todo')} />
       <main className="main">
         <Topbar query={query} onQueryChange={setQuery} userName={auth.status === 'ready' ? auth.userName : null} />
-        {error && <div className="error-strip">{error}<button onClick={() => setError(null)}>Dismiss</button></div>}
         {auth.status === 'checking' && <Loading message="Checking authentication..." />}
         {auth.status === 'error' && <ErrorPanel message={auth.message} onRetry={() => window.location.reload()} />}
         {shell.status === 'loading' && <Loading />}
         {shell.status === 'error' && <ErrorPanel message={shell.message} onRetry={loadShell} />}
         {shell.status === 'ready' && board && (
           <>
-            {(shell.busy || busyAction) && <div className="busy-strip">{busyAction ?? 'Syncing API state'}...</div>}
-            {view === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} actions={actions} />}
-            {view === 'board' && <BoardView board={board} actions={actions} />}
-            {view === 'settings' && <SettingsView settings={shell.settings} selectedModel={selectedAiModel} onModelChange={setSelectedAiModel} onBack={() => setView('board')} />}
+            {view === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
+            {view === 'board' && <BoardView board={board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} actions={actions} />}
+            {view === 'timeline' && <TimelineView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} timeline={shell.timeline} actions={actions} />}
+            {view === 'settings' && <SettingsView settings={shell.settings} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -486,9 +707,12 @@ function App() {
           detail={selected.detail}
           aiRuns={selected.aiRuns}
           busy={selected.busy || busyAction !== null}
+          busyLabel={busyAction}
           board={shell.status === 'ready' ? shell.board : null}
-          aiModel={shell.status === 'ready' ? resolveActiveAiModel(shell.settings, selectedAiModel) : null}
+          aiProvider={shell.status === 'ready' ? resolveActiveAiProvider(shell.settings, selectedAiProvider).displayName : null}
+          aiModel={shell.status === 'ready' ? resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel) : null}
           assigneeOptions={assigneeOptions}
+          actor={actor}
           actions={actions}
           onClose={() => setSelected({ status: 'closed' })}
         />
@@ -502,6 +726,13 @@ function App() {
           onClose={() => setCreateStatus(null)}
         />
       )}
+      {createBoardOpen && shell.status === 'ready' && (
+        <CreateBoardModal
+          onCreate={actions.createBoard}
+          onClose={() => setCreateBoardOpen(false)}
+        />
+      )}
+      <ToastStack busyAction={busyAction ?? (shell.status === 'ready' && shell.busy ? 'Syncing API state' : null)} toasts={toasts} onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))} />
     </div>
   );
 }
@@ -584,7 +815,7 @@ async function initializeAuth(): Promise<User> {
 type ShellState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; workspace: Workspace; board: Board; settings: SettingsDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; busy: boolean };
+  | { status: 'ready'; workspace: Workspace; boards: Board[]; board: Board; repositories: RepositoryDto[]; settings: SettingsDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; timeline: TimelineEventDto[]; metrics: MetricsDto; assignees: AssigneeDto[]; busy: boolean };
 
 type SelectedState =
   | { status: 'closed' }
@@ -594,6 +825,10 @@ type SelectedState =
 type BoardActions = {
   openWorkItem(id: string): void;
   openCreateCard(status: string): void;
+  openCreateBoard(): void;
+  selectBoard(id: string): void;
+  createBoard(form: CreateBoardForm): Promise<void>;
+  executePipeline(pipelineRunId: string): Promise<void>;
   createCard(form: WorkItemForm): Promise<void>;
   updateCard(id: string, form: WorkItemForm): Promise<void>;
   deleteCard(id: string): Promise<void>;
@@ -605,13 +840,15 @@ type BoardActions = {
   stopPreview(workItemId: string): Promise<void>;
   addComment(id: string, body: string): Promise<void>;
   addCommentAndAskAi(id: string, body: string): Promise<void>;
+  updateComment(commentId: string, workItemId: string, body: string): Promise<void>;
+  deleteComment(commentId: string, workItemId: string): Promise<void>;
   moveCard(id: string, status: string, sortOrder: number): Promise<void>;
 };
 
 function useStateFromHash(): [View, (view: View) => void] {
   const readHash = () => {
     const next = (window.location.hash.replace('#', '') as View) || 'board';
-    return ['dashboard', 'board', 'settings'].includes(next) ? next : 'board';
+    return ['dashboard', 'board', 'timeline', 'settings'].includes(next) ? next : 'board';
   };
   const [view, setViewState] = React.useState<View>(readHash);
   React.useEffect(() => {
@@ -639,6 +876,7 @@ function Sidebar({ view, onChange, onNewCard }: { view: View; onChange: (view: V
       <button className="primary-action" onClick={onNewCard}><Plus size={16} />New card</button>
       <nav className="side-nav">
         <NavButton active={view === 'board'} icon={<PanelLeft size={20} />} label="Board" onClick={() => onChange('board')} />
+        <NavButton active={view === 'timeline'} icon={<History size={20} />} label="Timeline" onClick={() => onChange('timeline')} />
         <NavButton active={view === 'dashboard'} icon={<LayoutDashboard size={20} />} label="Dashboard" onClick={() => onChange('dashboard')} />
         <NavButton active={view === 'settings'} icon={<Settings size={20} />} label="Settings" onClick={() => onChange('settings')} />
       </nav>
@@ -683,7 +921,7 @@ function ErrorPanel({ message, onRetry }: { message: string; onRetry: () => void
   );
 }
 
-function DashboardView({ workspace, board, previews, events, pipelines, actions }: { workspace: Workspace; board: Board; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; actions: BoardActions }) {
+function DashboardView({ workspace, board, previews, events, pipelines, metrics, actions }: { workspace: Workspace; board: Board; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; metrics: MetricsDto; actions: BoardActions }) {
   const items = board.columns.flatMap((column) => column.items);
   const activeAi = items.filter((item) => item.aiStatus && item.aiStatus !== 'Completed');
   const openPrs = items.filter((item) => item.pullRequestUrl && !pipelines.some((pipeline) => pipeline.workItemId === item.id && pipeline.stage === 'PR' && pipeline.status === 'Approved')).length;
@@ -701,6 +939,7 @@ function DashboardView({ workspace, board, previews, events, pipelines, actions 
         <Metric label="Work items" value={items.length.toString()} note={`${activeAi.length} active AI jobs`} icon={<Boxes size={22} />} />
         <Metric label="Open PRs" value={openPrs.toString()} note="Waiting for human approval" icon={<GitPullRequest size={22} />} />
         <Metric label="AI completed" value={completedAi.toString()} note="Completed implementations" icon={<Sparkles size={22} />} accent />
+        <Metric label="Tokens" value={compactNumber(metrics.tokensUsed)} note={`${metrics.codeAdded} added / ${metrics.codeDeleted} removed`} icon={<Activity size={22} />} />
       </div>
       <div className="dashboard-grid">
         <section className="panel large">
@@ -725,9 +964,7 @@ function DashboardView({ workspace, board, previews, events, pipelines, actions 
               <p>{preview.namespace}</p>
               {preview.workItemId && (
                 <div className="row-actions">
-                  {preview.status === 'Running'
-                    ? <button className="secondary compact" onClick={() => void actions.stopPreview(preview.workItemId!)}><Square size={13} />Stop</button>
-                    : <button className="secondary compact" onClick={() => void actions.startPreview(preview.workItemId!)}><Play size={13} />Start</button>}
+                  {preview.status !== 'Running' && <button className="secondary compact" onClick={() => void actions.startPreview(preview.workItemId!)}><Play size={13} />Start</button>}
                 </div>
               )}
             </div>
@@ -739,7 +976,10 @@ function DashboardView({ workspace, board, previews, events, pipelines, actions 
           {pipelines.slice(0, 10).map((pipeline) => (
             <div className="list-row" key={pipeline.id}>
               <div><strong>{pipeline.workItemKey}</strong><p>{pipeline.workItemTitle}</p></div>
-              <span className={statusClass(pipeline.status)}>{pipeline.stage}: {pipeline.status}</span>
+              <div className="pipeline-actions">
+                <span className={statusClass(pipeline.status)}>{pipeline.stage}: {pipeline.status}</span>
+                {pipeline.status === 'Queued' && <button className="secondary compact inline" onClick={() => void actions.executePipeline(pipeline.id)}><Play size={13} />Run</button>}
+              </div>
             </div>
           ))}
         </section>
@@ -769,7 +1009,7 @@ function Metric({ label, value, note, icon, accent }: { label: string; value: st
   );
 }
 
-function BoardView({ board, actions }: { board: Board; actions: BoardActions }) {
+function BoardView({ board, boards, selectedBoardId, actions }: { board: Board; boards: Board[]; selectedBoardId: string; actions: BoardActions }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const itemIds = board.columns.flatMap((column) => column.items.map((item) => item.id));
   const [activeCard, setActiveCard] = React.useState<WorkItemSummary | null>(null);
@@ -792,8 +1032,8 @@ function BoardView({ board, actions }: { board: Board; actions: BoardActions }) 
     <section className="page board-page">
       <div className="page-heading compact-heading">
         <div>
-          <h1>{board.name}</h1>
-          <p>{board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
+          <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
+          <p>{board.repository ? `${board.repository.provider} / ${board.repository.name} - ${board.repository.defaultBranch}` : 'No repository linked'} - {board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
         </div>
         <button className="primary-action" onClick={() => actions.openCreateCard(board.columns[0]?.name ?? 'Todo')}><Plus size={16} />New card</button>
       </div>
@@ -805,6 +1045,68 @@ function BoardView({ board, actions }: { board: Board; actions: BoardActions }) 
         </div>
         <DragOverlay>{activeCard ? <WorkItemCardPreview item={activeCard} /> : null}</DragOverlay>
       </DndContext>
+    </section>
+  );
+}
+
+function BoardSelector({ boards, selectedBoardId, onSelect, onAdd }: {
+  boards: Board[];
+  selectedBoardId: string;
+  onSelect: (id: string) => void;
+  onAdd: () => void;
+}) {
+  return (
+    <select className="board-select" value={selectedBoardId} onChange={(event) => {
+      if (event.target.value === '__add_board__') {
+        onAdd();
+        return;
+      }
+      onSelect(event.target.value);
+    }}>
+      {boards.map((board) => (
+        <option value={board.id} key={board.id}>{board.name}</option>
+      ))}
+      <option value="__add_board__">Add board...</option>
+    </select>
+  );
+}
+
+function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
+  board: Board;
+  boards: Board[];
+  selectedBoardId: string;
+  timeline: TimelineEventDto[];
+  actions: BoardActions;
+}) {
+  const [filter, setFilter] = React.useState('All');
+  const filters = ['All', 'Cards', 'Git', 'Pipelines', 'Previews'];
+  const filtered = timeline.filter((entry) => filter === 'All' || timelineBucket(entry.kind) === filter);
+  return (
+    <section className="page timeline-page">
+      <div className="page-heading compact-heading">
+        <div>
+          <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
+          <p>{board.repository ? `${board.repository.provider} / ${board.repository.name}` : 'No repository linked'} - {filtered.length} events</p>
+        </div>
+        <div className="timeline-filters">
+          {filters.map((entry) => (
+            <button className={filter === entry ? 'secondary active-filter' : 'secondary'} onClick={() => setFilter(entry)} key={entry}>{entry}</button>
+          ))}
+        </div>
+      </div>
+      <section className="panel timeline-panel">
+        {filtered.length === 0 && <EmptyState>No timeline events for this board.</EmptyState>}
+        {filtered.map((entry) => (
+          <article className="timeline-row" key={entry.id}>
+            <div>
+              <div className="timeline-row-head"><strong>{entry.title}</strong><span className={statusClass(entry.kind)}>{entry.kind}</span></div>
+              <p>{entry.message}</p>
+              {entry.url && <a href={entry.url} target="_blank" rel="noreferrer">{entry.url}</a>}
+            </div>
+            <time>{relativeTime(entry.createdAt)}</time>
+          </article>
+        ))}
+      </section>
     </section>
   );
 }
@@ -839,12 +1141,13 @@ function WorkItemCard({ item, actions }: { item: WorkItemSummary; actions: Board
       style={style}
       className={`${item.status === 'AI Planning' ? 'card ai-card' : 'card'}${isDragging ? ' dragging' : ''}`}
       onClick={() => actions.openWorkItem(item.id)}
+      {...attributes}
+      {...listeners}
     >
       <div className="card-row">
         <span className={item.type === 'Bug' ? 'type bug' : 'type'}>{item.type}</span>
-        <button className="drag-handle" aria-label={`Drag ${item.key}`} onClick={(event) => event.stopPropagation()} {...attributes} {...listeners}><GripVertical size={16} /></button>
+        <code>{item.key}</code>
       </div>
-      <code>{item.key}</code>
       <h3>{item.title}</h3>
       {item.aiStatus && <div className="ai-state"><Sparkles size={14} />{item.aiStatus}</div>}
       {item.previewUrl && <div className="preview-chip"><ExternalLink size={13} />Demo ready</div>}
@@ -863,24 +1166,35 @@ function WorkItemCardPreview({ item }: { item: WorkItemSummary }) {
   );
 }
 
-function WorkItemModal({ detail, aiRuns, busy, board, aiModel, assigneeOptions, actions, onClose }: {
+function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiModel, assigneeOptions, actor, actions, onClose }: {
   detail: WorkItemDetail;
   aiRuns: AiRun[];
   busy: boolean;
+  busyLabel: string | null;
   board: Board | null;
+  aiProvider: string | null;
   aiModel: string | null;
   assigneeOptions: AssigneeOption[];
+  actor: string;
   actions: BoardActions;
   onClose: () => void;
 }) {
   const [form, setForm] = React.useState<WorkItemForm>(() => formFromDetail(detail));
   const [comment, setComment] = React.useState('');
-  const latestPlan = [...aiRuns].reverse().find((run) => run.status === 'PlanReady');
-  const latestActive = [...aiRuns].reverse().find((run) => ['PlanReady', 'Approved', 'ImplementationRunning'].includes(run.status));
+  const sortedPlans = React.useMemo(() => [...aiRuns].sort((left, right) => left.sequenceNumber - right.sequenceNumber || left.createdAt.localeCompare(right.createdAt)), [aiRuns]);
+  const defaultPlan = [...sortedPlans].reverse().find((run) => run.status === 'PlanReady') ?? sortedPlans[sortedPlans.length - 1];
+  const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(() => defaultPlan?.id ?? null);
+  const selectedPlan = sortedPlans.find((run) => run.id === selectedPlanId) ?? defaultPlan;
 
   React.useEffect(() => {
     setForm(formFromDetail(detail));
   }, [detail]);
+
+  React.useEffect(() => {
+    if (!selectedPlanId || !sortedPlans.some((run) => run.id === selectedPlanId)) {
+      setSelectedPlanId(defaultPlan?.id ?? null);
+    }
+  }, [defaultPlan?.id, selectedPlanId, sortedPlans]);
 
   return (
     <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose}>
@@ -898,11 +1212,22 @@ function WorkItemModal({ detail, aiRuns, busy, board, aiModel, assigneeOptions, 
             <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
             <button className="danger-button" disabled={busy} onClick={() => confirm('Delete this work item and tear down its preview namespace/resources?') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />Delete and clean up</button>
           </div>
-          <AiPlanPanel detail={detail} aiRuns={aiRuns} latestPlan={latestPlan} latestActive={latestActive} busy={busy} aiModel={aiModel} actions={actions} />
+          <AiPlanPanel detail={detail} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
           <section className="activity">
             <h2>Activity</h2>
             {detail.comments.length === 0 && <EmptyState>No comments yet.</EmptyState>}
-            {detail.comments.map((entry) => entry.kind === 'Plan' ? <AiComment comment={entry} key={entry.id} /> : <Comment comment={entry} key={entry.id} />)}
+            {detail.comments.map((entry) => (
+              <ActivityEntry
+                actor={actor}
+                aiRuns={sortedPlans}
+                comment={entry}
+                key={entry.id}
+                onDelete={(commentId) => actions.deleteComment(commentId, detail.item.id)}
+                onSelectPlan={setSelectedPlanId}
+                onUpdate={(commentId, body) => actions.updateComment(commentId, detail.item.id, body)}
+                busy={busy}
+              />
+            ))}
             <form className="comment-form" onSubmit={(event) => {
               event.preventDefault();
               if (!comment.trim()) return;
@@ -922,7 +1247,7 @@ function WorkItemModal({ detail, aiRuns, busy, board, aiModel, assigneeOptions, 
               <PanelHeader icon={<Github size={20} />} title="Development" />
               <p className="repo">{detail.development.repository}<br />{detail.development.branch}</p>
               {detail.development.pullRequestUrl && <a className="url-box" href={detail.development.pullRequestUrl} target="_blank" rel="noreferrer">Pull request <ExternalLink size={16} /></a>}
-              <p className="status-line"><span />{detail.development.checksStatus}</p>
+              <p className="status-line"><span />{developmentStatusText(detail.development)}</p>
               {detail.development.pullRequestUrl && !detail.development.pullRequestApprovedAt && (
                 <button className="primary-action side-action" disabled={busy} onClick={() => void actions.approvePullRequest(detail.item.id)}><CheckCircle2 size={16} />Approve PR</button>
               )}
@@ -933,16 +1258,7 @@ function WorkItemModal({ detail, aiRuns, busy, board, aiModel, assigneeOptions, 
             </section>
           )}
           {detail.preview && (
-            <section className="panel compact-panel">
-              <PanelHeader icon={<ExternalLink size={20} />} title="Preview environment" />
-              <a className="primary-action demo-link" href={detail.preview.url} target="_blank" rel="noreferrer">Open demo environment <ExternalLink size={16} /></a>
-              <a className="url-box" href={detail.preview.url} target="_blank" rel="noreferrer">{detail.preview.url}<ExternalLink size={16} /></a>
-              {detail.preview.namespace && <p className="namespace-note">Namespace: <code>{detail.preview.namespace}</code></p>}
-              <div className="split-stats"><span>Status<br /><strong>{detail.preview.status}</strong></span><span>TTL<br /><strong>{relativeDays(detail.preview.expiresAt)}</strong></span></div>
-              {detail.preview.status === 'Running'
-                ? <button className="secondary side-action" disabled={busy} onClick={() => void actions.stopPreview(detail.item.id)}><Square size={16} />Stop preview</button>
-                : <button className="primary-action side-action" disabled={busy} onClick={() => void actions.startPreview(detail.item.id)}><Play size={16} />Start preview</button>}
-            </section>
+            <PreviewPanel preview={detail.preview} busy={busy} onRetry={() => actions.startPreview(detail.item.id)} />
           )}
         </aside>
       </div>
@@ -950,32 +1266,119 @@ function WorkItemModal({ detail, aiRuns, busy, board, aiModel, assigneeOptions, 
   );
 }
 
-function AiPlanPanel({ detail, aiRuns, latestPlan, latestActive, busy, aiModel, actions }: {
+function AiPlanPanel({ detail, aiRuns, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
   detail: WorkItemDetail;
   aiRuns: AiRun[];
-  latestPlan?: AiRun;
-  latestActive?: AiRun;
+  selectedPlan?: AiRun;
+  onSelectPlan: (id: string) => void;
   busy: boolean;
+  busyLabel: string | null;
+  aiProvider: string | null;
   aiModel: string | null;
   actions: BoardActions;
 }) {
-  const canRequestPlan = !latestActive || latestActive.status === 'Approved' || latestActive.status === 'Completed';
+  const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
+  const previewRunning = detail.preview?.status === 'Running';
+  const previewHasGeneratedSource = (detail.preview?.sourceFiles?.length ?? 0) > 0;
+  const canImplementSelected = !!selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && !previewBusy && (!previewRunning || !previewHasGeneratedSource);
   return (
     <section className="panel ai-plan-panel">
-      <PanelHeader icon={<Bot size={20} />} title="AI plan" />
+      <PanelHeader icon={<Bot size={20} />} title="AI plans" />
       <div className="ai-plan-body">
-        {aiModel && <p>Next run model: {aiModel}.</p>}
-        {canRequestPlan && <button className="secondary" disabled={busy} onClick={() => void actions.startAiPlan(detail.item.id)}><Sparkles size={16} />{latestActive ? 'Generate revised AI plan' : 'Generate AI plan'}</button>}
-        {latestActive && <p>Provider: {latestActive.provider} / {latestActive.model}. Status: {latestActive.status}.</p>}
-        {latestPlan?.plan && <pre>{latestPlan.plan}</pre>}
-        <div className="approval-row">
-          {latestPlan && <button className="primary-action" disabled={busy} onClick={() => void actions.approvePlan(latestPlan.id, detail.item.id)}><CheckCircle2 size={16} />Approve plan</button>}
-          {latestPlan && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(latestPlan.id, detail.item.id)}>Discard plan</button>}
+        {busyLabel && <div className="inline-progress"><Sparkles size={15} />{busyLabel}...</div>}
+        <div className="plan-toolbar">
+          {aiModel && <p>Next run: {aiProvider ? `${aiProvider} / ` : ''}{aiModel}.</p>}
+          <button className="secondary" disabled={busy} onClick={() => void actions.startAiPlan(detail.item.id)}><Sparkles size={16} />{aiRuns.length > 0 ? 'Generate revised AI plan' : 'Generate AI plan'}</button>
         </div>
+        {aiRuns.length > 0 && (
+          <div className="plan-tabs" aria-label="AI plans">
+            {aiRuns.map((run) => (
+              <button className={run.id === selectedPlan?.id ? 'plan-tab active' : 'plan-tab'} key={run.id} onClick={() => onSelectPlan(run.id)} type="button">
+                <strong>#{run.sequenceNumber}</strong>
+                <span>{planTitle(run)}</span>
+                <small>{run.status} · {run.model} · {relativeTime(run.createdAt)}</small>
+              </button>
+            ))}
+          </div>
+        )}
+        {selectedPlan?.plan
+          ? (
+            <>
+              <p>Provider: {selectedPlan.provider} / {selectedPlan.model}. Status: {selectedPlan.status}.</p>
+              <div className="plan-markdown"><CommentBody body={selectedPlan.plan} /></div>
+            </>
+          )
+          : <EmptyState>No AI plans yet.</EmptyState>}
+        <div className="approval-row">
+          {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void actions.approvePlan(selectedPlan.id, detail.item.id)}><CheckCircle2 size={16} />{selectedPlan.status === 'Approved' ? 'Rebuild with Codex' : 'Implement plan'}</button>}
+          {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
+        </div>
+        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.</p>}
         {aiRuns.some((run) => run.status === 'Discarded') && <p>Discarded plans are kept in history but hidden from approval.</p>}
       </div>
     </section>
   );
+}
+
+function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: boolean; onRetry: () => Promise<void> }) {
+  const status = preview.status;
+  const running = status === 'Running';
+  const failed = status === 'Failed';
+  const waiting = !running && !failed;
+  const actionLabel = failed ? 'Preview failed' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
+  return (
+    <section className="panel compact-panel preview-panel">
+      <PanelHeader icon={<ExternalLink size={20} />} title="Preview environment" />
+      {running
+        ? <a className="demo-link" href={preview.url} target="_blank" rel="noreferrer">Open demo environment <ExternalLink size={16} /></a>
+        : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
+      <div className="preview-progress">
+        <div className={`preview-step ${stepClass(status, 'Implementing')}`}>Implementing preview source</div>
+        <div className={`preview-step ${stepClass(status, 'Applying')}`}>Applying Kubernetes resources</div>
+        <div className={`preview-step ${stepClass(status, 'Provisioning')}`}>Waiting for pod readiness</div>
+        <div className={`preview-step ${running ? 'done' : failed ? 'blocked' : ''}`}>Running</div>
+      </div>
+      {preview.namespace && <p className="namespace-note">Namespace: <code>{preview.namespace}</code></p>}
+      <p className="preview-message">{preview.message ?? preview.phase ?? previewStatusText(preview)}</p>
+      {preview.podName && <p className="namespace-note">Pod: <code>{preview.podName}</code></p>}
+      {preview.lastCheckedAt && <p className="namespace-note">Last checked {relativeTime(preview.lastCheckedAt)}.</p>}
+      <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
+      {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
+      {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
+      {failed && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />Retry preview setup</button>}
+    </section>
+  );
+}
+
+function stepClass(status: string, step: string) {
+  const order = ['Implementing', 'Applying', 'Provisioning', 'Running'];
+  if (status === 'Failed') return 'blocked';
+  const current = order.indexOf(status);
+  const target = order.indexOf(step);
+  if (current > target || status === 'Running') return 'done';
+  if (current === target) return 'active';
+  return '';
+}
+
+function previewStatusText(preview: PreviewDto) {
+  if (preview.status === 'Running') return 'Preview is healthy and ready.';
+  if (preview.status === 'Failed') return 'Preview setup failed. Review the reason below and retry after fixing the issue.';
+  if (preview.status === 'Implementing') return 'Generating local React/Tailwind source from the card context.';
+  if (preview.status === 'Applying') return 'Applying Kubernetes resources.';
+  return 'Kubernetes resources are applied. Waiting for a healthy preview pod.';
+}
+
+function isPreviewPendingStatus(status?: string) {
+  return status === 'Implementing' || status === 'Applying' || status === 'Provisioning';
+}
+
+function developmentStatusText(development: DevelopmentDto) {
+  if (development.repository === 'local/vite-react-tailwind' &&
+      development.checksStatus.toLowerCase().includes('preview ready')) {
+    return 'Local React/Tailwind source generated';
+  }
+
+  return development.checksStatus;
 }
 
 function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, onClose }: {
@@ -985,7 +1388,7 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
   onCreate: (form: WorkItemForm) => Promise<void>;
   onClose: () => void;
 }) {
-  const [form, setForm] = React.useState<WorkItemForm>({ ...emptyForm, status: initialStatus });
+  const [form, setForm] = React.useState<WorkItemForm>({ ...emptyForm, status: initialStatus, assignee: preferredAssignee(assigneeOptions) });
   return (
     <ModalFrame title="New card" onClose={onClose}>
       <form className="create-form" onSubmit={(event) => {
@@ -1030,14 +1433,66 @@ function AssigneeSelect({ value, options, onChange }: {
   );
 }
 
-function SettingsView({ settings, selectedModel, onModelChange, onBack }: {
+function ToastStack({ busyAction, toasts, onDismiss }: {
+  busyAction: string | null;
+  toasts: ToastMessage[];
+  onDismiss: (id: string) => void;
+}) {
+  const visibleToasts = toasts.slice(0, busyAction ? 2 : 3);
+  if (!busyAction && visibleToasts.length === 0) return null;
+
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {busyAction && <div className="toast info"><span className="spinner" />{busyAction}...</div>}
+      {visibleToasts.map((toast) => (
+        <div className={`toast ${toast.kind}`} key={toast.id}>
+          <span>{toast.message}</span>
+          <button onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification"><X size={14} /></button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CreateBoardModal({ onCreate, onClose }: {
+  onCreate: (form: CreateBoardForm) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [form, setForm] = React.useState<CreateBoardForm>(emptyBoardForm);
+  const normalizedName = form.name.trim();
+  return (
+    <ModalFrame title="Add board" onClose={onClose}>
+      <form className="create-form" onSubmit={(event) => {
+        event.preventDefault();
+        if (!normalizedName || !form.repositoryRemoteUrl.trim()) return;
+        void onCreate({ ...form, name: normalizedName });
+      }}>
+        <label>Board name<input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Gatewaybound" /></label>
+        <div className="form-grid two">
+          <label>Provider<select value={form.repositoryProvider} onChange={(event) => setForm({ ...form, repositoryProvider: event.target.value })}><option>Forgejo</option><option>GitHub</option><option>AzureDevOps</option><option>GenericGit</option></select></label>
+          <label>Default branch<input value={form.repositoryDefaultBranch} onChange={(event) => setForm({ ...form, repositoryDefaultBranch: event.target.value })} /></label>
+          <label>Repository URL<input value={form.repositoryRemoteUrl} onChange={(event) => setForm({ ...form, repositoryRemoteUrl: event.target.value })} placeholder="https://github.com/owner/repo.git" /></label>
+        </div>
+        <div className="modal-actions">
+          <button className="primary-action" disabled={!normalizedName || !form.repositoryRemoteUrl.trim()}><Plus size={16} />Create board</button>
+          <button className="secondary" type="button" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </ModalFrame>
+  );
+}
+
+function SettingsView({ settings, selectedProvider, selectedModel, onProviderChange, onModelChange, onBack }: {
   settings: SettingsDto;
+  selectedProvider: string | null;
   selectedModel: string | null;
+  onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onBack: () => void;
 }) {
-  const modelOptions = settings.ai.availableModels.length > 0 ? settings.ai.availableModels : [settings.ai.activeModel];
-  const activeModel = resolveActiveAiModel(settings, selectedModel);
+  const activeProvider = resolveActiveAiProvider(settings, selectedProvider);
+  const modelOptions = activeProvider.availableModels.length > 0 ? activeProvider.availableModels : [activeProvider.activeModel];
+  const activeModel = resolveActiveAiModel(settings, selectedProvider, selectedModel);
   return (
     <section className="page settings-page">
       <div className="page-heading">
@@ -1056,9 +1511,10 @@ function SettingsView({ settings, selectedModel, onModelChange, onBack }: {
         </section>
         <SectionTitle icon={<Bot size={22} />} title="AI engine" amber />
         <section className="panel form-panel ai-settings">
-          <label>Adapter endpoint<input value={settings.ai.endpoint} readOnly /></label>
+          <label>Provider<select value={activeProvider.provider} onChange={(event) => onProviderChange(event.target.value)}>{settings.ai.availableProviders.map((provider) => <option value={provider.provider} key={provider.provider} disabled={provider.status === 'Unavailable'}>{provider.displayName} - {provider.status}</option>)}</select></label>
           <label>Planning model<select value={activeModel} onChange={(event) => onModelChange(event.target.value)}>{modelOptions.map((model) => <option value={model} key={model}>{model}</option>)}</select></label>
-          <label>Provider<input value={settings.ai.provider} readOnly /></label>
+          <label>Adapter endpoint<input value={activeProvider.endpoint} readOnly /></label>
+          <p className={activeProvider.status === 'Ready' ? 'provider-status ready' : 'provider-status'}>{activeProvider.displayName} status: {activeProvider.status === 'LoginRequired' ? 'Login required on server' : activeProvider.status}.</p>
           <label>Auto review pull requests<input value={settings.ai.autoReviewPullRequests ? 'Enabled' : 'Disabled'} readOnly /></label>
         </section>
         <SectionTitle icon={<ExternalLink size={22} />} title="Preview environments" />
@@ -1066,6 +1522,16 @@ function SettingsView({ settings, selectedModel, onModelChange, onBack }: {
           <label>Domain<input value={settings.preview.domain} readOnly /></label>
           <label>Default TTL<input value={`${settings.preview.defaultTtlDays} days`} readOnly /></label>
           <label>Namespace strategy<input value={settings.preview.namespace} readOnly /></label>
+        </section>
+        <SectionTitle icon={<GitPullRequest size={22} />} title="Repository hosting" />
+        <section className="panel form-panel">
+          <div className="connected"><GitPullRequest size={28} /><div><strong>{settings.repositories.provider}</strong><p>{settings.repositories.mode}</p></div><span>{settings.repositories.canCreateRepositories ? 'Create enabled' : 'Link only'}</span></div>
+          <label>Forgejo API<input value={settings.repositories.apiBaseUrl} readOnly /></label>
+        </section>
+        <SectionTitle icon={<Users size={22} />} title="Authentik users" />
+        <section className="panel form-panel">
+          <div className="connected"><Users size={28} /><div><strong>{settings.authentik.enabled ? 'Enabled' : 'Disabled'}</strong><p>{settings.authentik.authority}</p></div><span>{settings.authentik.enabled ? 'Active' : 'Local'}</span></div>
+          <label>Users endpoint<input value={settings.authentik.usersEndpoint} readOnly /></label>
         </section>
       </div>
     </section>
@@ -1086,22 +1552,189 @@ function ModalFrame({ title, onClose, children }: { title: string; onClose: () =
   );
 }
 
-function Comment({ comment }: { comment: CommentDto }) {
+function ActivityEntry({ actor, aiRuns, comment, busy, onDelete, onSelectPlan, onUpdate }: {
+  actor: string;
+  aiRuns: AiRun[];
+  comment: CommentDto;
+  busy: boolean;
+  onDelete: (commentId: string) => Promise<void>;
+  onSelectPlan: (planId: string) => void;
+  onUpdate: (commentId: string, body: string) => Promise<void>;
+}) {
+  if (comment.kind === 'Plan') {
+    return <PlanReferenceComment aiRuns={aiRuns} comment={comment} onSelectPlan={onSelectPlan} />;
+  }
+
+  const editable = comment.kind === 'Comment' && comment.author.toLowerCase() === actor.toLowerCase();
+  return comment.author === 'Rosenvall AI' || comment.kind !== 'Comment'
+    ? <SystemComment aiRuns={aiRuns} comment={comment} onSelectPlan={onSelectPlan} />
+    : <HumanComment busy={busy} comment={comment} editable={editable} onDelete={onDelete} onUpdate={onUpdate} />;
+}
+
+function HumanComment({ comment, editable, busy, onDelete, onUpdate }: {
+  comment: CommentDto;
+  editable: boolean;
+  busy: boolean;
+  onDelete: (commentId: string) => Promise<void>;
+  onUpdate: (commentId: string, body: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(comment.body);
+
+  React.useEffect(() => {
+    setDraft(comment.body);
+    setEditing(false);
+  }, [comment.body, comment.id]);
+
   return (
     <article className="comment">
       <div className="avatar small">{initials(comment.author)}</div>
-      <div><div className="comment-head"><strong>{comment.author}</strong><time>{relativeTime(comment.createdAt)}</time></div><p>{comment.body}</p></div>
+      <div>
+        <div className="comment-head">
+          <strong>{comment.author}</strong>
+          <time>{relativeTime(comment.createdAt)}</time>
+          {editable && !editing && (
+            <div className="comment-tools">
+              <button className="link-button" disabled={busy} onClick={() => setEditing(true)} type="button">Edit</button>
+              <button className="link-button danger-link" disabled={busy} onClick={() => confirm('Delete this comment?') && void onDelete(comment.id)} type="button">Delete</button>
+            </div>
+          )}
+        </div>
+        {editing
+          ? (
+            <div className="comment-editor">
+              <textarea value={draft} onChange={(event) => setDraft(event.target.value)} />
+              <div className="comment-actions">
+                <button className="primary-action" disabled={busy || !draft.trim()} onClick={() => void onUpdate(comment.id, draft.trim()).then(() => setEditing(false))} type="button">Save</button>
+                <button className="secondary" disabled={busy} onClick={() => { setDraft(comment.body); setEditing(false); }} type="button">Cancel</button>
+              </div>
+            </div>
+          )
+          : <CommentBody body={comment.body} />}
+      </div>
     </article>
   );
 }
 
-function AiComment({ comment }: { comment: CommentDto }) {
+function SystemComment({ aiRuns, comment, onSelectPlan }: { aiRuns: AiRun[]; comment: CommentDto; onSelectPlan: (planId: string) => void }) {
+  const referencedPlan = findReferencedPlan(comment, aiRuns);
   return (
-    <article className={comment.kind === 'Result' ? 'comment result-comment' : 'ai-comment'}>
-      <div className="comment-head"><strong>{comment.author}</strong><span>{comment.kind}</span><time>{relativeTime(comment.createdAt)}</time></div>
-      <p>{comment.body}</p>
+    <article className="comment result-comment">
+      <div className="avatar small">RA</div>
+      <div>
+        <div className="comment-head"><strong>{comment.author}</strong><span>{comment.kind}</span><time>{relativeTime(comment.createdAt)}</time></div>
+        {referencedPlan
+          ? <PlanReferenceButton plan={referencedPlan} prefix="Created" onSelectPlan={onSelectPlan} />
+          : <CommentBody body={comment.body} />}
+      </div>
     </article>
   );
+}
+
+function PlanReferenceComment({ aiRuns, comment, onSelectPlan }: { aiRuns: AiRun[]; comment: CommentDto; onSelectPlan: (planId: string) => void }) {
+  const referencedPlan = findReferencedPlan(comment, aiRuns);
+  return (
+    <article className="ai-comment compact-plan-comment">
+      <div className="comment-head"><strong>{comment.author}</strong><span>Plan</span><time>{relativeTime(comment.createdAt)}</time></div>
+      {referencedPlan
+        ? <PlanReferenceButton plan={referencedPlan} prefix="Created" onSelectPlan={onSelectPlan} />
+        : (
+          <>
+            <p>Legacy AI plan</p>
+            <CommentBody body={comment.body} />
+          </>
+        )}
+    </article>
+  );
+}
+
+function PlanReferenceButton({ plan, prefix, onSelectPlan }: { plan: AiRun; prefix: string; onSelectPlan: (planId: string) => void }) {
+  return (
+    <button className="plan-reference" onClick={() => onSelectPlan(plan.id)} type="button">
+      {prefix} plan #{plan.sequenceNumber}: {planTitle(plan)}
+    </button>
+  );
+}
+
+function CommentBody({ body }: { body: string }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const collapsible = body.length > 520 || body.split(/\r?\n/).length > 6;
+  const visible = collapsible && !expanded ? `${body.slice(0, 520).trimEnd()}...` : body;
+  return (
+    <div
+      className={collapsible && !expanded ? 'markdown-body collapsed' : 'markdown-body'}
+      onClick={() => collapsible && setExpanded(true)}
+      role={collapsible ? 'button' : undefined}
+      tabIndex={collapsible ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (collapsible && (event.key === 'Enter' || event.key === ' ')) {
+          setExpanded(true);
+        }
+      }}
+    >
+      <MarkdownText text={visible} />
+      {collapsible && !expanded && <span className="read-more">Show more</span>}
+    </div>
+  );
+}
+
+function MarkdownText({ text }: { text: string }) {
+  const lines = text.split(/\r?\n/);
+  const blocks: React.ReactNode[] = [];
+  let list: string[] = [];
+
+  const flushList = () => {
+    if (list.length === 0) return;
+    blocks.push(<ul key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}>{renderInlineMarkdown(item)}</li>)}</ul>);
+    list = [];
+  };
+
+  for (const line of lines) {
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (bullet) {
+      list.push(bullet[1]);
+      continue;
+    }
+
+    flushList();
+    if (!line.trim()) {
+      continue;
+    }
+
+    blocks.push(<p key={`p-${blocks.length}`}>{renderInlineMarkdown(line)}</p>);
+  }
+
+  flushList();
+  return <>{blocks}</>;
+}
+
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > last) {
+      nodes.push(text.slice(last, match.index));
+    }
+
+    const token = match[0];
+    if (token.startsWith('**')) {
+      nodes.push(<strong key={nodes.length}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith('`')) {
+      nodes.push(<code key={nodes.length}>{token.slice(1, -1)}</code>);
+    } else {
+      const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      nodes.push(link ? <a key={nodes.length} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a> : token);
+    }
+
+    last = match.index + token.length;
+  }
+
+  if (last < text.length) {
+    nodes.push(text.slice(last));
+  }
+
+  return nodes;
 }
 
 function PanelHeader({ icon, title }: { icon: React.ReactNode; title: string }) {
@@ -1130,9 +1763,43 @@ function filterBoard(board: Board, query: string): Board {
   };
 }
 
-function resolveActiveAiModel(settings: SettingsDto, selectedModel: string | null) {
-  const options = settings.ai.availableModels.length > 0 ? settings.ai.availableModels : [settings.ai.activeModel];
-  return selectedModel && options.includes(selectedModel) ? selectedModel : settings.ai.activeModel;
+function resolveActiveAiProvider(settings: SettingsDto, selectedProvider: string | null): AiProviderSettingsDto {
+  const providers = settings.ai.availableProviders.length > 0
+    ? settings.ai.availableProviders
+    : [{ provider: settings.ai.provider, displayName: settings.ai.provider, status: 'Ready', endpoint: settings.ai.endpoint, activeModel: settings.ai.activeModel, availableModels: settings.ai.availableModels }];
+  return providers.find((provider) => provider.provider === selectedProvider && provider.status !== 'Unavailable')
+    ?? providers.find((provider) => provider.provider === settings.ai.provider && provider.status !== 'Unavailable')
+    ?? providers.find((provider) => provider.status !== 'Unavailable')
+    ?? providers[0];
+}
+
+function resolveActiveAiModel(settings: SettingsDto, selectedProvider: string | null, selectedModel: string | null) {
+  const provider = resolveActiveAiProvider(settings, selectedProvider);
+  const options = provider.availableModels.length > 0 ? provider.availableModels : [provider.activeModel];
+  return selectedModel && options.includes(selectedModel) ? selectedModel : provider.activeModel;
+}
+
+function planTitle(run: AiRun): string {
+  const firstLine = (run.plan ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^#+\s*/, '').replace(/\*\*/g, '').trim())
+    .find(Boolean);
+  if (!firstLine) return 'Untitled plan';
+  return firstLine.length > 72 ? `${firstLine.slice(0, 69).trimEnd()}...` : firstLine;
+}
+
+function findReferencedPlan(comment: CommentDto, aiRuns: AiRun[]): AiRun | undefined {
+  const sequence = comment.body.match(/plan\s+#(\d+)/i);
+  if (sequence) {
+    const match = aiRuns.find((run) => run.sequenceNumber === Number(sequence[1]));
+    if (match) return match;
+  }
+
+  if (comment.kind === 'Plan') {
+    return aiRuns.find((run) => run.plan?.trim() === comment.body.trim());
+  }
+
+  return undefined;
 }
 
 function resolveDropTarget(board: Board, overId: string): { status: string; sortOrder: number } | null {
@@ -1158,6 +1825,14 @@ function statusClass(value: string) {
   if (['failed', 'cleanupfailed', 'applyfailed'].some((token) => normalized.includes(token))) return 'state-bad';
   if (['stopped', 'deleted', 'discarded'].some((token) => normalized.includes(token))) return 'state-muted';
   return 'state-warn';
+}
+
+function timelineBucket(kind: string) {
+  const normalized = kind.toLowerCase();
+  if (normalized.includes('preview')) return 'Previews';
+  if (normalized.includes('pipeline')) return 'Pipelines';
+  if (normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return 'Git';
+  return 'Cards';
 }
 
 function moveCardInBoard(board: Board, id: string, status: string, sortOrder: number): Board {
@@ -1186,9 +1861,17 @@ function formFromDetail(detail: WorkItemDetail): WorkItemForm {
   };
 }
 
-function buildAssigneeOptions(board: Board | null, auth: AuthState): AssigneeOption[] {
+function buildAssigneeOptions(board: Board | null, assignees: AssigneeDto[], auth: AuthState): AssigneeOption[] {
   const options = new Map<string, AssigneeOption>();
   options.set('', { value: '', label: 'Unassigned' });
+
+  for (const assignee of assignees) {
+    options.set(assignee.displayName, {
+      value: assignee.displayName,
+      label: assignee.displayName,
+      hint: assignee.source === 'Authentik' ? assignee.email : assignee.source
+    });
+  }
 
   if (auth.status === 'ready') {
     options.set(auth.userName, { value: auth.userName, label: auth.userName, hint: 'Signed in' });
@@ -1211,6 +1894,32 @@ function buildAssigneeOptions(board: Board | null, auth: AuthState): AssigneeOpt
   }
 
   return [...options.values()];
+}
+
+function compactNumber(value: number) {
+  return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+}
+
+function preferredAssignee(options: AssigneeOption[]) {
+  return options.find((option) => option.value && (option.hint === 'Signed in' || option.hint === 'Local dev' || option.hint?.includes('@')))?.value
+    ?? options.find((option) => option.value)?.value
+    ?? '';
+}
+
+function repositoryNameFromRemote(remoteUrl: string, boardName: string) {
+  const normalized = remoteUrl.trim().replace(/\.git$/i, '');
+  const path = normalized.split(/[/:]/).filter(Boolean).slice(-2).join('/');
+  return path || boardName.trim() || 'repository';
+}
+
+function webUrlFromRemote(remoteUrl: string) {
+  const normalized = remoteUrl.trim().replace(/\.git$/i, '');
+  if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+    return normalized;
+  }
+
+  const sshMatch = normalized.match(/^ssh:\/\/git@([^/]+)\/(.+)$/i) ?? normalized.match(/^git@([^:]+):(.+)$/i);
+  return sshMatch ? `https://${sshMatch[1]}/${sshMatch[2]}` : null;
 }
 
 function initials(value: string) {

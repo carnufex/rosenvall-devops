@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rosenvall-devops-frontend
+  namespace: rosenvall-devops
+  labels:
+    app.kubernetes.io/name: rosenvall-devops-frontend
+    app.kubernetes.io/part-of: rosenvall-devops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rosenvall-devops-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rosenvall-devops-frontend
+        app.kubernetes.io/part-of: rosenvall-devops
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/carnufex/rosenvall-devops-frontend:main
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rosenvall-devops-frontend
+  namespace: rosenvall-devops
+spec:
+  selector:
+    app.kubernetes.io/name: rosenvall-devops-frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

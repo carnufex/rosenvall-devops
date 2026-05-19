@@ -1,0 +1,29 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: rosenvall-devops
+  namespace: rosenvall-devops
+spec:
+  parentRefs:
+    - name: external
+      namespace: gateway
+  hostnames:
+    - devops.rosenvall.se
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: rosenvall-devops-api
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /hubs
+      backendRefs:
+        - name: rosenvall-devops-api
+          port: 8080
+    - backendRefs:
+        - name: rosenvall-devops-frontend
+          port: 8080

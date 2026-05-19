@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rosenvall-devops-api
+  namespace: rosenvall-devops
+  labels:
+    app.kubernetes.io/name: rosenvall-devops-api
+    app.kubernetes.io/part-of: rosenvall-devops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rosenvall-devops-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rosenvall-devops-api
+        app.kubernetes.io/part-of: rosenvall-devops
+    spec:
+      serviceAccountName: rosenvall-devops-api
+      containers:
+        - name: api
+          image: ghcr.io/carnufex/rosenvall-devops-api:main
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ASPNETCORE_URLS
+              value: http://+:8080
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: Frontend__AllowedOrigins__0
+              value: https://devops.rosenvall.se
+            - name: Authentication__Authority
+              value: https://authentik.rosenvall.se/application/o/rosenvall-devops/
+            - name: Authentication__Audience
+              value: rosenvall-devops
+            - name: Ai__DefaultProvider
+              value: codex
+            - name: Ai__OllamaEndpoint
+              value: http://ollama.ollama.svc.cluster.local:11434/api
+            - name: Ai__Codex__Path
+              value: codex
+            - name: Ai__Codex__Home
+              value: /app/codex-home
+            - name: Ai__Codex__Model
+              value: gpt-5.4
+            - name: Ai__Codex__AvailableModels__0
+              value: gpt-5.4
+            - name: Ai__Codex__AvailableModels__1
+              value: gpt-5.3-codex
+            - name: Repositories__Provider
+              value: Forgejo
+            - name: Repositories__Mode
+              value: LinkExistingFirst
+            - name: Repositories__Forgejo__ApiBaseUrl
+              value: https://git.rosenvall.se/api/v1
+            - name: Repositories__Forgejo__CanCreateRepositories
+              value: "true"
+            - name: Authentik__Authority
+              value: https://authentik.rosenvall.se
+            - name: Authentik__UsersEndpoint
+              value: https://authentik.rosenvall.se/api/v3/core/users/
+            - name: Preview__KubeconfigPath
+              value: ""
+            - name: Pipelines__KubeconfigPath
+              value: ""
+            - name: Storage__SqlitePath
+              value: /app/data/devops-state.db
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: codex-home
+              mountPath: /app/codex-home
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rosenvall-devops-api-data
+        - name: codex-home
+          persistentVolumeClaim:
+            claimName: rosenvall-devops-codex-home
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rosenvall-devops-api-data
+  namespace: rosenvall-devops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rosenvall-devops-codex-home
+  namespace: rosenvall-devops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rosenvall-devops-api
+  namespace: rosenvall-devops
+spec:
+  selector:
+    app.kubernetes.io/name: rosenvall-devops-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

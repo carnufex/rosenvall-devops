@@ -123,5 +123,33 @@ public sealed class DevOpsDomainTests
         Assert.Contains("path: src/App.tsx", manifest);
         Assert.Contains("path: tailwind.config.ts", manifest);
         Assert.Contains("<h1>Hello world</h1>", manifest);
+        Assert.Contains("annotations:", manifest);
+        Assert.Contains("rosenvall.dev/source-hash:", manifest);
+    }
+
+    [Fact]
+    public void Preview_manifest_source_hash_changes_when_source_changes()
+    {
+        var first = PreviewResourceSet.Create(
+            "TASK-4825",
+            "hello world",
+            "ghcr.io/carnufex/rosenvall-devops-preview-base:main",
+            sourceFiles: [new PreviewSourceFile("src-app-tsx", "src/App.tsx", "export default function App() { return <h1>One</h1>; }")]);
+        var second = PreviewResourceSet.Create(
+            "TASK-4825",
+            "hello world",
+            "ghcr.io/carnufex/rosenvall-devops-preview-base:main",
+            sourceFiles: [new PreviewSourceFile("src-app-tsx", "src/App.tsx", "export default function App() { return <h1>Two</h1>; }")]);
+
+        var firstManifest = PreviewManifestRenderer.Render(first);
+        var secondManifest = PreviewManifestRenderer.Render(second);
+
+        Assert.NotEqual(ExtractSourceHash(firstManifest), ExtractSourceHash(secondManifest));
+    }
+
+    private static string ExtractSourceHash(string manifest)
+    {
+        var line = manifest.Split('\n').Single(entry => entry.Contains("rosenvall.dev/source-hash:", StringComparison.Ordinal));
+        return line.Split(':', 2)[1].Trim();
     }
 }

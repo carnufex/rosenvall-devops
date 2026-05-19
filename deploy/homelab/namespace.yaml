@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rosenvall-devops
+  labels:
+    app.kubernetes.io/name: rosenvall-devops
+    app.kubernetes.io/part-of: rosenvall-devops
