@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+.git/
+.vs/
+.vscode/
+
+devops-state.db
+devops-state.db-shm
+devops-state.db-wal
+*.user
+*.suo
+*.tsbuildinfo

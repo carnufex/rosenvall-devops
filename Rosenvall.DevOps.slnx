@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Rosenvall.DevOps.Api/Rosenvall.DevOps.Api.csproj" />
+    <Project Path="src/Rosenvall.DevOps.Core/Rosenvall.DevOps.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Rosenvall.DevOps.Tests/Rosenvall.DevOps.Tests.csproj" />
+  </Folder>
+</Solution>

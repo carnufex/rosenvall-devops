@@ -1,0 +1,26 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: src/Rosenvall.DevOps.Api/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      Storage__SqlitePath: /app/data/devops-state.db
+      Frontend__AllowedOrigins__0: http://localhost:5173
+    ports:
+      - "5088:8080"
+    volumes:
+      - devops-api-data:/app/data
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "5173:8080"
+
+volumes:
+  devops-api-data:
