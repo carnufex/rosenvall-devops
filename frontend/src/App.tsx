@@ -10,6 +10,7 @@ import {
   Github,
   History,
   LayoutDashboard,
+  Maximize2,
   PanelLeft,
   Play,
   Plus,
@@ -1361,28 +1362,52 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
 }
 
 function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; active: boolean }) {
+  const [expanded, setExpanded] = React.useState(false);
   const terminalRef = React.useRef<HTMLDivElement | null>(null);
   React.useEffect(() => {
     terminalRef.current?.scrollTo({ top: terminalRef.current.scrollHeight });
   }, [lines.length]);
   const visibleLines = lines.slice(-80);
+  const terminalContent = <TerminalLog lines={visibleLines} terminalRef={terminalRef} />;
   return (
-    <div className="preview-terminal">
-      <div className="terminal-head">
-        <span><SquareTerminal size={15} />Implementation log</span>
-        {active && <span className="terminal-live"><span className="spinner" />live</span>}
+    <>
+      <div className="preview-terminal">
+        <div className="terminal-head">
+          <span><SquareTerminal size={15} />Implementation log</span>
+          <div className="terminal-actions">
+            {active && <span className="terminal-live"><span className="spinner" />live</span>}
+            <button className="terminal-expand" type="button" onClick={() => setExpanded(true)} aria-label="Open larger implementation log"><Maximize2 size={14} />Expand</button>
+          </div>
+        </div>
+        {terminalContent}
       </div>
-      <div className="terminal-body" ref={terminalRef}>
-        {visibleLines.length === 0
-          ? <p className="terminal-empty">Waiting for Codex output...</p>
-          : visibleLines.map((line, index) => (
-            <div className={`terminal-line ${line.stream.toLowerCase()}`} key={`${line.createdAt}-${index}`}>
-              <span>{terminalTime(line.createdAt)}</span>
-              <strong>{line.stream}</strong>
-              <code>{line.message}</code>
+      {expanded && (
+        <ModalFrame title="Implementation log" onClose={() => setExpanded(false)} size="wide">
+          <div className="terminal-modal-content">
+            <div className="terminal-modal-meta">
+              <span>{lines.length} log lines</span>
+              {active && <span className="terminal-live"><span className="spinner" />live</span>}
             </div>
-          ))}
-      </div>
+            <TerminalLog lines={lines} expanded />
+          </div>
+        </ModalFrame>
+      )}
+    </>
+  );
+}
+
+function TerminalLog({ lines, expanded = false, terminalRef }: { lines: PreviewTerminalLineDto[]; expanded?: boolean; terminalRef?: React.RefObject<HTMLDivElement | null> }) {
+  return (
+    <div className={expanded ? 'terminal-body expanded' : 'terminal-body'} ref={terminalRef}>
+      {lines.length === 0
+        ? <p className="terminal-empty">Waiting for Codex output...</p>
+        : lines.map((line, index) => (
+          <div className={`terminal-line ${line.stream.toLowerCase()}`} key={`${line.createdAt}-${index}`}>
+            <span>{terminalTime(line.createdAt)}</span>
+            <strong>{line.stream}</strong>
+            <code>{line.message}</code>
+          </div>
+        ))}
     </div>
   );
 }
@@ -1575,10 +1600,10 @@ function SettingsView({ settings, selectedProvider, selectedModel, onProviderCha
   );
 }
 
-function ModalFrame({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function ModalFrame({ title, onClose, children, size = 'default' }: { title: string; onClose: () => void; children: React.ReactNode; size?: 'default' | 'wide' }) {
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <section className={size === 'wide' ? 'modal modal-wide' : 'modal'} role="dialog" aria-modal="true" aria-label={title}>
         <header className="modal-head">
           <h2>{title}</h2>
           <button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
