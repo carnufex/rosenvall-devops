@@ -897,6 +897,28 @@ public sealed class DevOpsStoreTests
 
     private static string CreateFakeCodexScript(int exitCode, string plan)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            var unixScriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-{Guid.NewGuid():N}.sh");
+            var escapedPlan = plan.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+            File.WriteAllText(unixScriptPath, $$"""
+#!/usr/bin/env sh
+last=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    last="$1"
+    break
+  fi
+  shift
+done
+if [ -n "$last" ]; then printf '%s\n' '{{escapedPlan}}' > "$last"; fi
+exit {{exitCode}}
+""");
+            File.SetUnixFileMode(unixScriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return unixScriptPath;
+        }
+
         var scriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-{Guid.NewGuid():N}.cmd");
         File.WriteAllText(scriptPath, $"""
 @echo off
@@ -918,6 +940,20 @@ exit /b {exitCode}
 
     private static string CreateFakeCodexImplementationScript(int exitCode, string appSource)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            var unixScriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-implementation-{Guid.NewGuid():N}.sh");
+            var escapedAppSource = appSource.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+            File.WriteAllText(unixScriptPath, $$"""
+#!/usr/bin/env sh
+mkdir -p src
+printf '%s\n' '{{escapedAppSource}}' > src/App.tsx
+exit {{exitCode}}
+""");
+            File.SetUnixFileMode(unixScriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return unixScriptPath;
+        }
+
         var scriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-implementation-{Guid.NewGuid():N}.cmd");
         var escapedSource = appSource
             .Replace("^", "^^", StringComparison.Ordinal)
