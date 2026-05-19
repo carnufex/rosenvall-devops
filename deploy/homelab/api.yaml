@@ -44,6 +44,8 @@ spec:
               value: codex
             - name: Ai__Codex__Home
               value: /app/codex-home
+            - name: CODEX_HOME
+              value: /app/codex-home
             - name: Ai__Codex__Model
               value: gpt-5.4
             - name: Ai__Codex__AvailableModels__0
