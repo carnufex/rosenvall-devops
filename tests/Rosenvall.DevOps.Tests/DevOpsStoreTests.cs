@@ -464,6 +464,24 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Interrupted_preview_implementation_is_recoverable_after_restart()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "hamburgare", "Skapa en demo for tva hamburgare.", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement two burger cards.")!;
+        store.ApproveAiRun(run.Id, "crille");
+        store.BeginPreviewImplementation(item.Id, "codex");
+
+        var restored = fixture.Reopen().GetWorkItemDetail(item.Id)!;
+
+        Assert.Equal("Failed", restored.Preview?.Status);
+        Assert.Equal("ServerRestart", restored.Preview?.FailureReason);
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("interrupted", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Approved_ai_plan_can_be_reimplemented_with_generated_source_files()
     {
         using var fixture = DevOpsStoreFixture.Create();

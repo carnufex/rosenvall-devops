@@ -2374,6 +2374,10 @@ namespace Rosenvall.DevOps.Api
                 _nextTaskNumber = NextTaskNumberFromItems();
                 Persist();
             }
+            else
+            {
+                RecoverInterruptedPreviewImplementations();
+            }
         }
 
         public IReadOnlyList<WorkspaceDto> GetWorkspaces()
@@ -3676,6 +3680,42 @@ namespace Rosenvall.DevOps.Api
 
         private static string NormalizePreviewStatus(string status) =>
             string.Equals(status, "Healthy", StringComparison.OrdinalIgnoreCase) ? "Running" : status;
+
+        private void RecoverInterruptedPreviewImplementations()
+        {
+            var recovered = false;
+            for (var index = 0; index < _previews.Count; index++)
+            {
+                var preview = _previews[index];
+                if (!string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var message = "Preview implementation was interrupted by an API restart. Retry the plan implementation to start a fresh Codex session.";
+                var terminalLines = (preview.TerminalLines ?? [])
+                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", message)])
+                    .TakeLast(200)
+                    .ToArray();
+                _previews[index] = preview with
+                {
+                    Status = "Failed",
+                    Phase = "Failed",
+                    Message = message,
+                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    FailureReason = "ServerRestart",
+                    FailureLog = message,
+                    TerminalLines = terminalLines
+                };
+                recovered = true;
+            }
+
+            if (recovered)
+            {
+                Persist();
+            }
+        }
 
         private void PlaceItem(WorkItemRecord item, string status, int requestedSortOrder)
         {
