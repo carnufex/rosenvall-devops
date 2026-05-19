@@ -8,6 +8,7 @@ metadata:
     app.kubernetes.io/part-of: rosenvall-devops
 spec:
   replicas: 1
+  revisionHistoryLimit: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: rosenvall-devops-frontend
