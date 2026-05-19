@@ -1075,12 +1075,14 @@ namespace Rosenvall.DevOps.Api
         {
             foreach (var preview in store.GetPreviewsAwaitingHealthCheck())
             {
+                var isTimedOutRecovery = string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(preview.FailureReason, "Timeout", StringComparison.OrdinalIgnoreCase);
                 if (!_startedAt.ContainsKey(preview.Id))
                 {
-                    _startedAt[preview.Id] = preview.LastCheckedAt ?? DateTimeOffset.UtcNow;
+                    _startedAt[preview.Id] = isTimedOutRecovery ? DateTimeOffset.UtcNow : preview.LastCheckedAt ?? DateTimeOffset.UtcNow;
                 }
 
-                if (DateTimeOffset.UtcNow - _startedAt[preview.Id] > PreviewTimeout)
+                if (!isTimedOutRecovery && DateTimeOffset.UtcNow - _startedAt[preview.Id] > PreviewTimeout)
                 {
                     store.UpdatePreviewHealth(preview.WorkItemId, PreviewHealthCheckResult.Failed("Timeout", "Preview did not become healthy within 3 minutes.", null, preview.PodName));
                     _startedAt.Remove(preview.Id);
@@ -1088,6 +1090,11 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var health = await previews.CheckHealthAsync(preview, cancellationToken);
+                if (isTimedOutRecovery && string.Equals(health.Status, "Provisioning", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 store.UpdatePreviewHealth(preview.WorkItemId, health);
                 if (!string.Equals(health.Status, "Provisioning", StringComparison.OrdinalIgnoreCase))
                 {
@@ -3344,7 +3351,11 @@ namespace Rosenvall.DevOps.Api
                         (string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
-                         string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase)))
+                         string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase) ||
+                         (string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
+                          string.Equals(preview.FailureReason, "Timeout", StringComparison.OrdinalIgnoreCase) &&
+                          !string.IsNullOrWhiteSpace(preview.Namespace) &&
+                          !string.IsNullOrWhiteSpace(preview.ResourceName))))
                     .ToArray();
             }
         }
