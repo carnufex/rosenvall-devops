@@ -7,7 +7,7 @@ This inventory keeps the v1 UI honest: every visible control must either perform
 | Sidebar | New card | Implemented | Opens the create work item modal with `Todo` as default status. |
 | Sidebar | Board | Implemented | Navigates to the board route. |
 | Sidebar | Dashboard | Implemented | Navigates to API-backed dashboard state. |
-| Sidebar | Settings | Implemented | Navigates to read-only settings from `/api/settings`. |
+| Sidebar | Settings | Implemented | Navigates to API-backed settings from `/api/settings`. |
 | Sidebar | Documentation / Support | Removed from v1 | Removed until real destinations exist. |
 | Topbar | Search work items | Implemented | Filters visible board cards by key, title, type, status, assignee, or priority. |
 | Topbar | Pipelines / Logs / Deploy / notifications / help | Removed from v1 | Removed until pipelines, logs, deploys, notifications, and help are implemented. |
@@ -35,4 +35,5 @@ This inventory keeps the v1 UI honest: every visible control must either perform
 | Dashboard | Runtime history | Read-only | Lists preview/cleanup/PR lifecycle events from `/api/preview-events`. |
 | Dashboard | Pipeline status | Read-only | Lists internal AI, preview, and PR pipeline state from `/api/pipelines`. |
 | Settings | Back to board | Implemented | Returns to the board route. |
-| Settings | GitHub, AI, and preview fields | Read-only | Shows API settings without editable controls in v1. |
+| Settings | Planning model | Implemented | Selects the Ollama model used for subsequent AI-plan requests in the current UI session. |
+| Settings | GitHub, AI endpoint/provider/review, and preview fields | Read-only | Shows API settings that do not yet have editable controls in v1. |

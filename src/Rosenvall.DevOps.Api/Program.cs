@@ -79,9 +79,17 @@ if (!string.IsNullOrWhiteSpace(authority))
 }
 
 app.MapHealthChecks("/healthz");
-app.MapHub<DevOpsHub>("/hubs/devops");
+var hub = app.MapHub<DevOpsHub>("/hubs/devops");
+if (!string.IsNullOrWhiteSpace(authority))
+{
+    hub.RequireAuthorization();
+}
 
 var api = app.MapGroup("/api");
+if (!string.IsNullOrWhiteSpace(authority))
+{
+    api.RequireAuthorization();
+}
 
 api.MapGet("/workspaces", (DevOpsStore store) => store.GetWorkspaces());
 api.MapPost("/workspaces", async (CreateWorkspaceRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
@@ -344,7 +352,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record DevelopmentDto(string Repository, string Branch, string? PullRequestUrl, string ChecksStatus, string? PullRequestApprovedBy = null, DateTimeOffset? PullRequestApprovedAt = null);
     public sealed record SettingsDto(GitHubSettingsDto GitHub, AiSettingsDto Ai, PreviewSettingsDto Preview);
     public sealed record GitHubSettingsDto(string Account, string TargetRepository, string BranchWatchPatterns, bool Connected);
-    public sealed record AiSettingsDto(string Provider, string Endpoint, string ActiveModel, bool AutoReviewPullRequests);
+    public sealed record AiSettingsDto(string Provider, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels, bool AutoReviewPullRequests);
     public sealed record PreviewSettingsDto(string Domain, int DefaultTtlDays, string Namespace);
 
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
@@ -1204,15 +1212,28 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public SettingsDto GetSettings(IConfiguration configuration) =>
-            new(
+        public SettingsDto GetSettings(IConfiguration configuration)
+        {
+            var configuredActiveModel = configuration["Ai:DefaultModel"] ?? configuration["Ai:Ollama:Model"];
+            var activeModel = string.IsNullOrWhiteSpace(configuredActiveModel) ? "qwen3.5:latest" : configuredActiveModel.Trim();
+            var configuredModels = configuration.GetSection("Ai:AvailableModels").Get<string[]>() ?? [];
+            var availableModels = new[] { activeModel }
+                .Concat(configuredModels)
+                .Where(model => !string.IsNullOrWhiteSpace(model))
+                .Select(model => model.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return new(
                 new GitHubSettingsDto("rosenvall-corp / core-infrastructure", "rosenvall-corp/core-infrastructure", "main, release/*, feat/*", true),
                 new AiSettingsDto(
                     configuration["Ai:DefaultProvider"] ?? "ollama",
                     configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api",
-                    configuration["Ai:DefaultModel"] ?? configuration["Ai:Ollama:Model"] ?? "qwen3.5:latest",
+                    activeModel,
+                    availableModels,
                     true),
                 new PreviewSettingsDto("rosenvall.se", 7, "per-preview namespace"));
+        }
 
         public string? RenderPreviewManifest(Guid workItemId)
         {

@@ -190,6 +190,27 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Settings_exposes_configured_ai_model_choices()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:DefaultModel"] = "qwen3.5:latest",
+                ["Ai:AvailableModels:0"] = "llama3.1:8b",
+                ["Ai:AvailableModels:1"] = "qwen3.5:latest",
+                ["Ai:AvailableModels:2"] = " ",
+                ["Ai:AvailableModels:3"] = "llama3.1:8b"
+            })
+            .Build();
+
+        var settings = fixture.Store.GetSettings(configuration);
+
+        Assert.Equal("qwen3.5:latest", settings.Ai.ActiveModel);
+        Assert.Equal(["qwen3.5:latest", "llama3.1:8b"], settings.Ai.AvailableModels);
+    }
+
+    [Fact]
     public void Pull_request_can_be_approved_by_human()
     {
         using var fixture = DevOpsStoreFixture.Create();

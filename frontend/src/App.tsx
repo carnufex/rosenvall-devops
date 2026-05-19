@@ -1,4 +1,5 @@
 import React from 'react';
+import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import {
   Activity,
   Bot,
@@ -168,6 +169,7 @@ type SettingsDto = {
     provider: string;
     endpoint: string;
     activeModel: string;
+    availableModels: string[];
     autoReviewPullRequests: boolean;
   };
   preview: {
@@ -207,13 +209,13 @@ const emptyForm: WorkItemForm = {
 
 const api = {
   async get<T>(path: string): Promise<T> {
-    const response = await fetch(path);
+    const response = await fetch(path, { headers: authHeaders() });
     return parseResponse<T>(response);
   },
   async post<T>(path: string, body: unknown): Promise<T> {
     const response = await fetch(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body)
     });
     return parseResponse<T>(response);
@@ -221,16 +223,27 @@ const api = {
   async patch<T>(path: string, body: unknown): Promise<T> {
     const response = await fetch(path, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body)
     });
     return parseResponse<T>(response);
   },
   async delete(path: string): Promise<void> {
-    const response = await fetch(path, { method: 'DELETE' });
+    const response = await fetch(path, { method: 'DELETE', headers: authHeaders() });
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   }
 };
+
+let accessTokenProvider: () => string | null = () => null;
+
+function setAccessTokenProvider(provider: () => string | null) {
+  accessTokenProvider = provider;
+}
+
+function authHeaders(base?: HeadersInit): HeadersInit {
+  const token = accessTokenProvider();
+  return token ? { ...base, Authorization: `Bearer ${token}` } : { ...base };
+}
 
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -248,6 +261,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
 }
 
 function App() {
+  const auth = useAuth();
   const [view, setView] = useStateFromHash();
   const [shell, setShell] = React.useState<ShellState>({ status: 'loading' });
   const [selected, setSelected] = React.useState<SelectedState>({ status: 'closed' });
@@ -255,8 +269,14 @@ function App() {
   const [query, setQuery] = React.useState('');
   const [error, setError] = React.useState<string | null>(null);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
+  const [selectedAiModel, setSelectedAiModel] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setAccessTokenProvider(() => auth.status === 'ready' ? auth.accessToken : null);
+  }, [auth]);
 
   const loadShell = React.useCallback(async () => {
+    if (auth.status === 'checking') return;
     setShell((current) => current.status === 'ready' ? { ...current, busy: true } : { status: 'loading' });
     try {
       const workspaces = await api.get<Workspace[]>('/api/workspaces');
@@ -276,7 +296,7 @@ function App() {
     } catch (loadError) {
       setShell({ status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
     }
-  }, []);
+  }, [auth.status]);
 
   const loadWorkItem = React.useCallback(async (id: string) => {
     setSelected((current) => current.status === 'open' && current.detail.item.id === id ? { ...current, busy: true } : { status: 'loading', id });
@@ -294,8 +314,10 @@ function App() {
   }, []);
 
   React.useEffect(() => {
-    void loadShell();
-  }, [loadShell]);
+    if (auth.status === 'ready' || auth.status === 'disabled') {
+      void loadShell();
+    }
+  }, [auth.status, loadShell]);
 
   const refreshAfterChange = React.useCallback(async (workItemId?: string) => {
     await loadShell();
@@ -360,7 +382,7 @@ function App() {
         if (shell.status !== 'ready') return;
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: shell.settings.ai.provider,
-          model: shell.settings.ai.activeModel
+          model: resolveActiveAiModel(shell.settings, selectedAiModel)
         });
         await refreshAfterChange(id);
       });
@@ -407,7 +429,7 @@ function App() {
         await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: 'crille', kind: 'Comment', body });
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: shell.settings.ai.provider,
-          model: shell.settings.ai.activeModel
+          model: resolveActiveAiModel(shell.settings, selectedAiModel)
         });
         await refreshAfterChange(id);
       });
@@ -432,8 +454,10 @@ function App() {
     <div className="app-shell">
       <Sidebar view={view} onChange={setView} onNewCard={() => setCreateStatus('Todo')} />
       <main className="main">
-        <Topbar query={query} onQueryChange={setQuery} />
+        <Topbar query={query} onQueryChange={setQuery} userName={auth.status === 'ready' ? auth.userName : null} />
         {error && <div className="error-strip">{error}<button onClick={() => setError(null)}>Dismiss</button></div>}
+        {auth.status === 'checking' && <Loading message="Checking authentication..." />}
+        {auth.status === 'error' && <ErrorPanel message={auth.message} onRetry={() => window.location.reload()} />}
         {shell.status === 'loading' && <Loading />}
         {shell.status === 'error' && <ErrorPanel message={shell.message} onRetry={loadShell} />}
         {shell.status === 'ready' && board && (
@@ -441,7 +465,7 @@ function App() {
             {(shell.busy || busyAction) && <div className="busy-strip">{busyAction ?? 'Syncing API state'}...</div>}
             {view === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} actions={actions} />}
             {view === 'board' && <BoardView board={board} actions={actions} />}
-            {view === 'settings' && <SettingsView settings={shell.settings} onBack={() => setView('board')} />}
+            {view === 'settings' && <SettingsView settings={shell.settings} selectedModel={selectedAiModel} onModelChange={setSelectedAiModel} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -452,6 +476,7 @@ function App() {
           aiRuns={selected.aiRuns}
           busy={selected.busy || busyAction !== null}
           board={shell.status === 'ready' ? shell.board : null}
+          aiModel={shell.status === 'ready' ? resolveActiveAiModel(shell.settings, selectedAiModel) : null}
           actions={actions}
           onClose={() => setSelected({ status: 'closed' })}
         />
@@ -466,6 +491,73 @@ function App() {
       )}
     </div>
   );
+}
+
+type AuthState =
+  | { status: 'checking' }
+  | { status: 'disabled' }
+  | { status: 'ready'; accessToken: string; userName: string }
+  | { status: 'error'; message: string };
+
+function useAuth(): AuthState {
+  const [auth, setAuth] = React.useState<AuthState>(() => authSettings.enabled ? { status: 'checking' } : { status: 'disabled' });
+
+  React.useEffect(() => {
+    if (!authSettings.enabled) return;
+    let cancelled = false;
+
+    initializeAuth()
+      .then((user) => {
+        if (!cancelled) setAuth({ status: 'ready', accessToken: user.access_token, userName: user.profile.name || user.profile.preferred_username || user.profile.email || 'Authenticated' });
+      })
+      .catch((error) => {
+        if (!cancelled) setAuth({ status: 'error', message: error instanceof Error ? error.message : 'Authentication failed' });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return auth;
+}
+
+const authSettings = {
+  enabled: import.meta.env.VITE_AUTH_ENABLED === 'true',
+  authority: import.meta.env.VITE_AUTH_AUTHORITY as string | undefined,
+  clientId: import.meta.env.VITE_AUTH_CLIENT_ID as string | undefined,
+  redirectUri: (import.meta.env.VITE_AUTH_REDIRECT_URI as string | undefined) ?? `${window.location.origin}/auth/callback`,
+  postLogoutRedirectUri: (import.meta.env.VITE_AUTH_POST_LOGOUT_REDIRECT_URI as string | undefined) ?? window.location.origin
+};
+
+const userManager = authSettings.enabled ? new UserManager({
+  authority: authSettings.authority ?? '',
+  client_id: authSettings.clientId ?? '',
+  redirect_uri: authSettings.redirectUri,
+  post_logout_redirect_uri: authSettings.postLogoutRedirectUri,
+  response_type: 'code',
+  scope: 'openid profile email',
+  userStore: new WebStorageStateStore({ store: window.localStorage })
+}) : null;
+
+async function initializeAuth(): Promise<User> {
+  if (!userManager || !authSettings.authority || !authSettings.clientId) {
+    throw new Error('Authentication is enabled but authority or client ID is missing.');
+  }
+
+  if (window.location.pathname === '/auth/callback') {
+    const callbackUser = await userManager.signinRedirectCallback();
+    window.history.replaceState({}, document.title, '/');
+    return callbackUser;
+  }
+
+  const user = await userManager.getUser();
+  if (user && !user.expired) {
+    return user;
+  }
+
+  await userManager.signinRedirect();
+  return new Promise<User>(() => undefined);
 }
 
 type ShellState =
@@ -542,20 +634,20 @@ function NavButton({ active, icon, label, onClick }: { active: boolean; icon: Re
   );
 }
 
-function Topbar({ query, onQueryChange }: { query: string; onQueryChange: (query: string) => void }) {
+function Topbar({ query, onQueryChange, userName }: { query: string; onQueryChange: (query: string) => void; userName: string | null }) {
   return (
     <header className="topbar">
       <label className="search">
         <Search size={18} />
         <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search work items..." />
       </label>
-      <div className="avatar">CR</div>
+      <div className="avatar">{userName ? initials(userName) : 'CR'}</div>
     </header>
   );
 }
 
-function Loading() {
-  return <section className="page"><div className="panel state-panel">Loading Rosenvall DevOps...</div></section>;
+function Loading({ message = 'Loading Rosenvall DevOps...' }: { message?: string }) {
+  return <section className="page"><div className="panel state-panel">{message}</div></section>;
 }
 
 function ErrorPanel({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -750,11 +842,12 @@ function WorkItemCardPreview({ item }: { item: WorkItemSummary }) {
   );
 }
 
-function WorkItemModal({ detail, aiRuns, busy, board, actions, onClose }: {
+function WorkItemModal({ detail, aiRuns, busy, board, aiModel, actions, onClose }: {
   detail: WorkItemDetail;
   aiRuns: AiRun[];
   busy: boolean;
   board: Board | null;
+  aiModel: string | null;
   actions: BoardActions;
   onClose: () => void;
 }) {
@@ -783,7 +876,7 @@ function WorkItemModal({ detail, aiRuns, busy, board, actions, onClose }: {
             <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
             <button className="danger-button" disabled={busy} onClick={() => confirm('Delete this work item and tear down its preview namespace/resources?') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />Delete and clean up</button>
           </div>
-          <AiPlanPanel detail={detail} aiRuns={aiRuns} latestPlan={latestPlan} latestActive={latestActive} busy={busy} actions={actions} />
+          <AiPlanPanel detail={detail} aiRuns={aiRuns} latestPlan={latestPlan} latestActive={latestActive} busy={busy} aiModel={aiModel} actions={actions} />
           <section className="activity">
             <h2>Activity</h2>
             {detail.comments.length === 0 && <EmptyState>No comments yet.</EmptyState>}
@@ -835,12 +928,13 @@ function WorkItemModal({ detail, aiRuns, busy, board, actions, onClose }: {
   );
 }
 
-function AiPlanPanel({ detail, aiRuns, latestPlan, latestActive, busy, actions }: {
+function AiPlanPanel({ detail, aiRuns, latestPlan, latestActive, busy, aiModel, actions }: {
   detail: WorkItemDetail;
   aiRuns: AiRun[];
   latestPlan?: AiRun;
   latestActive?: AiRun;
   busy: boolean;
+  aiModel: string | null;
   actions: BoardActions;
 }) {
   const canRequestPlan = !latestActive || latestActive.status === 'Approved' || latestActive.status === 'Completed';
@@ -848,6 +942,7 @@ function AiPlanPanel({ detail, aiRuns, latestPlan, latestActive, busy, actions }
     <section className="panel ai-plan-panel">
       <PanelHeader icon={<Bot size={20} />} title="AI plan" />
       <div className="ai-plan-body">
+        {aiModel && <p>Next run model: {aiModel}.</p>}
         {canRequestPlan && <button className="secondary" disabled={busy} onClick={() => void actions.startAiPlan(detail.item.id)}><Sparkles size={16} />{latestActive ? 'Generate revised AI plan' : 'Generate AI plan'}</button>}
         {latestActive && <p>Provider: {latestActive.provider} / {latestActive.model}. Status: {latestActive.status}.</p>}
         {latestPlan?.plan && <pre>{latestPlan.plan}</pre>}
@@ -892,13 +987,20 @@ function CreateWorkItemModal({ board, initialStatus, onCreate, onClose }: {
   );
 }
 
-function SettingsView({ settings, onBack }: { settings: SettingsDto; onBack: () => void }) {
+function SettingsView({ settings, selectedModel, onModelChange, onBack }: {
+  settings: SettingsDto;
+  selectedModel: string | null;
+  onModelChange: (model: string) => void;
+  onBack: () => void;
+}) {
+  const modelOptions = settings.ai.availableModels.length > 0 ? settings.ai.availableModels : [settings.ai.activeModel];
+  const activeModel = resolveActiveAiModel(settings, selectedModel);
   return (
     <section className="page settings-page">
       <div className="page-heading">
         <div>
           <h1>Settings</h1>
-          <p>Read-only v1 configuration surfaced from the API.</p>
+          <p>Configuration surfaced from the API.</p>
         </div>
         <button className="secondary" onClick={onBack}>Back to board</button>
       </div>
@@ -912,7 +1014,7 @@ function SettingsView({ settings, onBack }: { settings: SettingsDto; onBack: () 
         <SectionTitle icon={<Bot size={22} />} title="AI engine" amber />
         <section className="panel form-panel ai-settings">
           <label>Adapter endpoint<input value={settings.ai.endpoint} readOnly /></label>
-          <label>Active model<input value={`${settings.ai.activeModel} - Local`} readOnly /></label>
+          <label>Planning model<select value={activeModel} onChange={(event) => onModelChange(event.target.value)}>{modelOptions.map((model) => <option value={model} key={model}>{model}</option>)}</select></label>
           <label>Provider<input value={settings.ai.provider} readOnly /></label>
           <label>Auto review pull requests<input value={settings.ai.autoReviewPullRequests ? 'Enabled' : 'Disabled'} readOnly /></label>
         </section>
@@ -983,6 +1085,11 @@ function filterBoard(board: Board, query: string): Board {
           .some((value) => value.toLowerCase().includes(normalized)))
     }))
   };
+}
+
+function resolveActiveAiModel(settings: SettingsDto, selectedModel: string | null) {
+  const options = settings.ai.availableModels.length > 0 ? settings.ai.availableModels : [settings.ai.activeModel];
+  return selectedModel && options.includes(selectedModel) ? selectedModel : settings.ai.activeModel;
 }
 
 function resolveDropTarget(board: Board, overId: string): { status: string; sortOrder: number } | null {
