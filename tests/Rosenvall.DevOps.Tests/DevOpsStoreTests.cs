@@ -444,6 +444,26 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_implementation_exposes_terminal_lines_while_codex_runs()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "hamburgare", "Skapa en demo for tva hamburgare.", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement two burger cards.")!;
+        store.ApproveAiRun(run.Id, "crille");
+
+        var preview = store.BeginPreviewImplementation(item.Id, "codex");
+        store.AppendPreviewTerminalLine(item.Id, "stdout", "OpenAI Codex v0.131.0");
+        var applying = store.MarkPreviewApplying(item.Id, "Applying Kubernetes resources.")!;
+
+        Assert.NotNull(preview);
+        Assert.Equal("Implementing", preview.Status);
+        Assert.Contains(applying.Preview!.TerminalLines!, line => line.Message.Contains("OpenAI Codex", StringComparison.Ordinal));
+        Assert.Equal("Applying", applying.Preview.Status);
+    }
+
+    [Fact]
     public void Approved_ai_plan_can_be_reimplemented_with_generated_source_files()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -750,7 +770,7 @@ public sealed class DevOpsStoreTests
             .Build();
         var provider = new CodexCliPreviewSourceProvider(configuration, NullLogger<CodexCliPreviewSourceProvider>.Instance);
 
-        var files = await provider.GenerateSourceAsync("gpt-5.4", run, context, CancellationToken.None);
+        var files = await provider.GenerateSourceAsync("gpt-5.4", run, context, null, CancellationToken.None);
 
         Assert.Contains(files, file => file.Path == "src/App.tsx" && file.Content.Contains("AI paint canvas", StringComparison.Ordinal));
         Assert.Contains(files, file => file.Path == "vite.config.ts" && file.Content.Contains("allowedHosts", StringComparison.Ordinal));

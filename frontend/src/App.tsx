@@ -127,6 +127,13 @@ type PreviewDto = {
   failureReason?: string | null;
   failureLog?: string | null;
   sourceFiles?: Array<{ key: string; path: string; content: string }> | null;
+  terminalLines?: PreviewTerminalLineDto[] | null;
+};
+
+type PreviewTerminalLineDto = {
+  createdAt: string;
+  stream: string;
+  message: string;
 };
 
 type PreviewEnvironmentDto = {
@@ -493,7 +500,7 @@ function App() {
       }
     };
 
-    const interval = window.setInterval(() => void refreshPreviewStatus(), 5000);
+    const interval = window.setInterval(() => void refreshPreviewStatus(), 2000);
     void refreshPreviewStatus();
 
     return () => {
@@ -593,15 +600,17 @@ function App() {
       });
     },
     approvePlan: async (runId, workItemId) => {
-      await runAction('Implementing plan and starting preview', async () => {
-        try {
-          await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor });
-        } catch (approveError) {
-          await refreshAfterChange(workItemId);
-          throw approveError;
-        }
+      setBusyAction('Starting preview implementation');
+      try {
+        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
-      });
+        addToast('info', 'Preview implementation started. Follow the terminal log in the preview panel.');
+      } catch (approveError) {
+        await refreshAfterChange(workItemId);
+        addToast('error', approveError instanceof Error ? approveError.message : 'Preview implementation failed to start');
+      } finally {
+        setBusyAction(null);
+      }
     },
     discardPlan: async (runId, workItemId) => {
       await runAction('Discarding plan', async () => {
@@ -1342,11 +1351,39 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       <p className="preview-message">{preview.message ?? preview.phase ?? previewStatusText(preview)}</p>
       {preview.podName && <p className="namespace-note">Pod: <code>{preview.podName}</code></p>}
       {preview.lastCheckedAt && <p className="namespace-note">Last checked {relativeTime(preview.lastCheckedAt)}.</p>}
+      <PreviewTerminal lines={preview.terminalLines ?? []} active={waiting} />
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
       {failed && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />Retry preview setup</button>}
     </section>
+  );
+}
+
+function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; active: boolean }) {
+  const terminalRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    terminalRef.current?.scrollTo({ top: terminalRef.current.scrollHeight });
+  }, [lines.length]);
+  const visibleLines = lines.slice(-80);
+  return (
+    <div className="preview-terminal">
+      <div className="terminal-head">
+        <span><SquareTerminal size={15} />Implementation log</span>
+        {active && <span className="terminal-live"><span className="spinner" />live</span>}
+      </div>
+      <div className="terminal-body" ref={terminalRef}>
+        {visibleLines.length === 0
+          ? <p className="terminal-empty">Waiting for Codex output...</p>
+          : visibleLines.map((line, index) => (
+            <div className={`terminal-line ${line.stream.toLowerCase()}`} key={`${line.createdAt}-${index}`}>
+              <span>{terminalTime(line.createdAt)}</span>
+              <strong>{line.stream}</strong>
+              <code>{line.message}</code>
+            </div>
+          ))}
+      </div>
+    </div>
   );
 }
 
@@ -1937,6 +1974,14 @@ function relativeTime(value: string) {
 function relativeDays(value: string) {
   const diff = new Date(value).getTime() - Date.now();
   return `${Math.max(0, Math.ceil(diff / 86400000))}d`;
+}
+
+function terminalTime(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).format(new Date(value));
 }
 
 export default App;

@@ -267,7 +267,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     return Results.Accepted($"/api/ai-runs/{run.Id}", run);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, DevOpsStore store, CodexCliPreviewSourceProvider previewSourceProvider, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, DevOpsStore store, CodexCliPreviewSourceProvider previewSourceProvider, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, ILoggerFactory loggerFactory) =>
 {
     AiRun? result;
     try
@@ -285,45 +285,17 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     }
 
     await hub.Clients.All.SendAsync("aiRunChanged", result);
-    var context = store.GetWorkItemDetail(result.WorkItemId);
-    if (context is null)
+    var preview = store.BeginPreviewImplementation(result.WorkItemId, "codex");
+    if (preview is null)
     {
         return Results.NotFound();
     }
 
-    IReadOnlyList<PreviewSourceFile> sourceFiles;
-    try
-    {
-        var implementationModel = configuration["Ai:Codex:Model"] ?? "gpt-5.4";
-        sourceFiles = await previewSourceProvider.GenerateSourceAsync(implementationModel, result, context, cancellationToken);
-    }
-    catch (AiPlanProviderUnavailableException ex)
-    {
-        store.RecordImplementationFailure(result.WorkItemId, request.ApprovedBy, ex.Message);
-        return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
+    await hub.Clients.All.SendAsync("previewChanged", preview);
+    _ = Task.Run(() => RunApprovedPlanImplementationAsync(result, request.ApprovedBy, store, previewSourceProvider, previews, configuration, hub, loggerFactory.CreateLogger("PreviewImplementation")), CancellationToken.None);
 
-    var implementation = store.CompletePreviewImplementation(result.WorkItemId, sourceFiles, "codex");
-    if (implementation is not null)
-    {
-        var manifest = store.RenderPreviewManifest(result.WorkItemId);
-        if (manifest is not null)
-        {
-            var apply = await previews.ApplyAsync(manifest, cancellationToken);
-            if (!apply.Succeeded)
-            {
-                store.RecordPreviewFailure(result.WorkItemId, "ApplyFailed", request.ApprovedBy, apply.Message);
-                return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
-            }
-
-            store.MarkPreviewProvisioning(result.WorkItemId, apply.Message);
-            implementation = store.GetWorkItemDetail(result.WorkItemId);
-        }
-
-        await hub.Clients.All.SendAsync("previewChanged", implementation?.Preview);
-    }
-
-    return Results.Accepted($"/api/ai-runs/{aiRunId}", implementation ?? (object)result);
+    var detail = store.GetWorkItemDetail(result.WorkItemId);
+    return Results.Accepted($"/api/ai-runs/{aiRunId}", detail ?? (object)result);
 });
 
 api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRunRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
@@ -451,6 +423,72 @@ api.MapGet("/settings", (DevOpsStore store, IConfiguration configuration) => sto
 
 app.Run();
 
+static async Task RunApprovedPlanImplementationAsync(AiRun run, string approvedBy, DevOpsStore store, CodexCliPreviewSourceProvider previewSourceProvider, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, ILogger logger)
+{
+    try
+    {
+        var context = store.GetWorkItemDetail(run.WorkItemId);
+        if (context is null)
+        {
+            return;
+        }
+
+        var implementationModel = configuration["Ai:Codex:Model"] ?? "gpt-5.4";
+        var sourceFiles = await previewSourceProvider.GenerateSourceAsync(
+            implementationModel,
+            run,
+            context,
+            async line =>
+            {
+                var updated = store.AppendPreviewTerminalLine(run.WorkItemId, line.Stream, line.Message, line.CreatedAt);
+                if (updated is not null)
+                {
+                    await hub.Clients.All.SendAsync("previewChanged", updated.Preview);
+                }
+            },
+            CancellationToken.None);
+
+        store.AppendPreviewTerminalLine(run.WorkItemId, "system", $"Codex generated {sourceFiles.Count} source files.");
+        var implementation = store.CompletePreviewImplementation(run.WorkItemId, sourceFiles, "codex");
+        await hub.Clients.All.SendAsync("previewChanged", implementation?.Preview);
+
+        var manifest = store.RenderPreviewManifest(run.WorkItemId);
+        if (manifest is null)
+        {
+            store.RecordPreviewFailure(run.WorkItemId, "ManifestMissing", approvedBy, "Preview manifest could not be rendered.");
+            await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
+            return;
+        }
+
+        store.MarkPreviewApplying(run.WorkItemId, "Applying Kubernetes resources.");
+        store.AppendPreviewTerminalLine(run.WorkItemId, "system", "kubectl apply started.");
+        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
+
+        var apply = await previews.ApplyAsync(manifest, CancellationToken.None);
+        store.AppendPreviewTerminalLine(run.WorkItemId, apply.Succeeded ? "system" : "stderr", apply.Message);
+        if (!apply.Succeeded)
+        {
+            store.RecordPreviewFailure(run.WorkItemId, "ApplyFailed", approvedBy, apply.Message);
+            await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
+            return;
+        }
+
+        store.MarkPreviewProvisioning(run.WorkItemId, apply.Message);
+        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
+    }
+    catch (AiPlanProviderUnavailableException ex)
+    {
+        store.RecordImplementationFailure(run.WorkItemId, approvedBy, ex.Message);
+        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Preview implementation failed for AI run {AiRunId}", run.Id);
+        store.RecordImplementationFailure(run.WorkItemId, approvedBy, $"Unexpected preview implementation failure: {ex.Message}");
+        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
+    }
+}
+
 namespace Rosenvall.DevOps.Api
 {
     public sealed class DevOpsHub : Hub;
@@ -462,9 +500,10 @@ namespace Rosenvall.DevOps.Api
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
     public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
-    public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null);
+    public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
     public sealed record PreviewEventDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string EventType, string? Namespace, string? Url, string Actor, string Message, DateTimeOffset CreatedAt);
+    public sealed record PreviewTerminalLineDto(DateTimeOffset CreatedAt, string Stream, string Message);
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record TimelineEventDto(Guid Id, Guid? BoardId, Guid? RepositoryId, Guid? WorkItemId, string Kind, string Title, string Message, string Actor, string? Url, DateTimeOffset CreatedAt);
@@ -2043,14 +2082,14 @@ namespace Rosenvall.DevOps.Api
 
     public interface IPreviewSourceProvider
     {
-        Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, CancellationToken cancellationToken);
+        Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken);
     }
 
     public sealed class CodexCliPreviewSourceProvider(IConfiguration configuration, ILogger<CodexCliPreviewSourceProvider> logger) : IPreviewSourceProvider
     {
         private static readonly string[] SkippedDirectories = ["node_modules", "dist", ".git", ".codex"];
 
-        public async Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, CancellationToken cancellationToken)
+        public async Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
         {
             var codexPath = CodexExecutableResolver.Resolve(configuration["Ai:Codex:Path"] ?? "codex");
             var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:ImplementationTimeoutSeconds", configuration.GetValue("Ai:Codex:RequestTimeoutSeconds", configuration.GetValue("Ai:RequestTimeoutSeconds", 180))));
@@ -2059,7 +2098,9 @@ namespace Rosenvall.DevOps.Api
             try
             {
                 Directory.CreateDirectory(workspacePath);
+                await ReportTerminalAsync(onTerminalLine, "system", $"Preparing preview workspace at {workspacePath}.");
                 await SeedWorkspaceAsync(workspacePath, context, cancellationToken);
+                await ReportTerminalAsync(onTerminalLine, "system", $"Starting Codex CLI with model {model}.");
 
                 using var process = new Process
                 {
@@ -2076,8 +2117,10 @@ namespace Rosenvall.DevOps.Api
                 await process.StandardInput.WriteAsync(BuildImplementationPrompt(run, context).AsMemory(), cancellationToken);
                 process.StandardInput.Close();
 
-                var stdOut = process.StandardOutput.ReadToEndAsync(cancellationToken);
-                var stdErr = process.StandardError.ReadToEndAsync(cancellationToken);
+                var outputBuilder = new StringBuilder();
+                var errorBuilder = new StringBuilder();
+                var stdOut = ReadProcessStreamAsync(process.StandardOutput, "stdout", outputBuilder, onTerminalLine, cancellationToken);
+                var stdErr = ReadProcessStreamAsync(process.StandardError, "stderr", errorBuilder, onTerminalLine, cancellationToken);
                 using var timeoutCancellation = new CancellationTokenSource(timeout);
                 using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
                 try
@@ -2090,8 +2133,9 @@ namespace Rosenvall.DevOps.Api
                     throw new AiPlanProviderUnavailableException($"Codex preview source generation timed out after {timeout.TotalSeconds:0} seconds; no preview was deployed.");
                 }
 
-                var output = await stdOut;
-                var error = await stdErr;
+                await Task.WhenAll(stdOut, stdErr);
+                var output = outputBuilder.ToString();
+                var error = errorBuilder.ToString();
                 if (process.ExitCode != 0)
                 {
                     var detail = FirstUsefulLine(error, output);
@@ -2105,6 +2149,7 @@ namespace Rosenvall.DevOps.Api
                     throw new AiPlanProviderUnavailableException("Codex preview source generation did not produce src/App.tsx; no preview was deployed.");
                 }
 
+                await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
                 return sourceFiles;
             }
             catch (Exception ex) when (ex is not AiPlanProviderUnavailableException && (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException))
@@ -2127,6 +2172,29 @@ namespace Rosenvall.DevOps.Api
                 }
             }
         }
+
+        private static async Task ReadProcessStreamAsync(TextReader reader, string stream, StringBuilder output, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
+        {
+            while (await reader.ReadLineAsync(cancellationToken) is { } line)
+            {
+                output.AppendLine(line);
+                await ReportTerminalAsync(onTerminalLine, stream, line);
+            }
+        }
+
+        private static Task ReportTerminalAsync(Func<PreviewTerminalLineDto, Task>? onTerminalLine, string stream, string message)
+        {
+            var cleanMessage = StripAnsi(message).TrimEnd();
+            if (string.IsNullOrWhiteSpace(cleanMessage))
+            {
+                return Task.CompletedTask;
+            }
+
+            return onTerminalLine?.Invoke(new PreviewTerminalLineDto(DateTimeOffset.UtcNow, stream, cleanMessage)) ?? Task.CompletedTask;
+        }
+
+        private static string StripAnsi(string value) =>
+            System.Text.RegularExpressions.Regex.Replace(value, @"\x1B\[[0-?]*[ -/]*[@-~]", "");
 
         private ProcessStartInfo BuildStartInfo(string codexPath, string model, string workspacePath, string outputPath)
         {
@@ -2870,6 +2938,65 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public PreviewDto? BeginPreviewImplementation(Guid workItemId, string implementationProvider)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                var resources = PreviewResourceSet.Create(item.Key, item.Title, LocalReactPreviewProject.Image);
+                var providerName = NormalizeText(implementationProvider, "codex");
+                var now = DateTimeOffset.UtcNow;
+                var preview = new PreviewDto(
+                    Guid.NewGuid(),
+                    item.Id,
+                    $"https://{resources.Hostname}",
+                    resources.Image,
+                    "Implementing",
+                    now.AddDays(7),
+                    null,
+                    resources.Namespace,
+                    resources.Name,
+                    "Implementing preview source",
+                    $"{providerName} is generating React/Tailwind preview source from the approved plan.",
+                    TerminalLines:
+                    [
+                        new PreviewTerminalLineDto(now, "system", $"Queued preview implementation for {item.Key}."),
+                        new PreviewTerminalLineDto(now, "system", $"Provider: {providerName}.")
+                    ]);
+                _previews.RemoveAll(p => p.WorkItemId == item.Id);
+                _previews.Add(preview);
+                AddPreviewEvent(item, preview, "Implementing", providerName, $"Preview implementation started for {item.Key}.");
+                Persist();
+                return preview;
+            }
+        }
+
+        public WorkItemDetailDto? AppendPreviewTerminalLine(Guid workItemId, string stream, string message, DateTimeOffset? createdAt = null)
+        {
+            lock (_lock)
+            {
+                var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
+                if (preview is null || string.IsNullOrWhiteSpace(message))
+                {
+                    return null;
+                }
+
+                var lines = (preview.TerminalLines ?? [])
+                    .Concat([new PreviewTerminalLineDto(createdAt ?? DateTimeOffset.UtcNow, NormalizeText(stream, "system"), message.Trim())])
+                    .TakeLast(200)
+                    .ToArray();
+                _previews.Remove(preview);
+                _previews.Add(preview with { TerminalLines = lines });
+                Persist();
+                return GetWorkItemDetail(workItemId);
+            }
+        }
+
         public WorkItemDetailDto? CompleteLocalReactImplementation(Guid workItemId)
         {
             lock (_lock)
@@ -2890,7 +3017,8 @@ namespace Rosenvall.DevOps.Api
                 item.AiStatus = "Completed";
                 item.Status = "Review";
 
-                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Implementing", DateTimeOffset.UtcNow.AddDays(7), null, resources.Namespace, resources.Name, "Implementing preview source", "Generating local React/Tailwind source from the card context.", SourceFiles: sourceFiles);
+                var existingPreview = _previews.SingleOrDefault(p => p.WorkItemId == item.Id);
+                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Implementing", DateTimeOffset.UtcNow.AddDays(7), null, resources.Namespace, resources.Name, "Implementing preview source", "Generating local React/Tailwind source from the card context.", SourceFiles: sourceFiles, TerminalLines: existingPreview?.TerminalLines);
                 _previews.RemoveAll(p => p.WorkItemId == item.Id);
                 _previews.Add(preview);
                 AddPreviewEvent(item, preview, "Created", "system", $"Preview created for {item.Key}.");
@@ -2924,6 +3052,7 @@ namespace Rosenvall.DevOps.Api
                 item.Status = "Review";
 
                 var providerName = NormalizeText(implementationProvider, "codex");
+                var existingPreview = _previews.SingleOrDefault(p => p.WorkItemId == item.Id);
                 var preview = new PreviewDto(
                     Guid.NewGuid(),
                     item.Id,
@@ -2936,7 +3065,8 @@ namespace Rosenvall.DevOps.Api
                     resources.Name,
                     "Implementing preview source",
                     $"{providerName} generated React/Tailwind preview source from the approved plan.",
-                    SourceFiles: sourceFiles);
+                    SourceFiles: sourceFiles,
+                    TerminalLines: existingPreview?.TerminalLines);
                 _previews.RemoveAll(p => p.WorkItemId == item.Id);
                 _previews.Add(preview);
                 AddPreviewEvent(item, preview, "Created", providerName, $"Preview source generated for {item.Key}.");
@@ -2960,6 +3090,25 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 item.AiStatus = "ImplementationFailed";
+                var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
+                if (preview is not null)
+                {
+                    var failedLines = (preview.TerminalLines ?? [])
+                        .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", message)])
+                        .TakeLast(200)
+                        .ToArray();
+                    _previews.Remove(preview);
+                    _previews.Add(preview with
+                    {
+                        Status = "Failed",
+                        Phase = "Failed",
+                        Message = message,
+                        LastCheckedAt = DateTimeOffset.UtcNow,
+                        FailureReason = "ImplementationFailed",
+                        FailureLog = message,
+                        TerminalLines = failedLines
+                    });
+                }
                 _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Preview source implementation failed: {message}", DateTimeOffset.UtcNow));
                 AddTimelineForItem(item, "AiImplementationFailed", item.Key, message, actor);
                 Persist();
@@ -3091,6 +3240,32 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public WorkItemDetailDto? MarkPreviewApplying(Guid workItemId, string message)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
+                if (item is null || preview is null)
+                {
+                    return null;
+                }
+
+                _previews.Remove(preview);
+                var applying = preview with
+                {
+                    Status = "Applying",
+                    Phase = "Applying Kubernetes resources",
+                    Message = NormalizeText(message, "Applying Kubernetes resources."),
+                    LastCheckedAt = DateTimeOffset.UtcNow
+                };
+                _previews.Add(applying);
+                AddPreviewEvent(item, applying, "Applying", "system", applying.Message ?? "Applying Kubernetes resources.");
+                Persist();
+                return GetWorkItemDetail(workItemId);
+            }
+        }
+
         public WorkItemDetailDto? MarkPreviewProvisioning(Guid workItemId, string message)
         {
             lock (_lock)
@@ -3201,6 +3376,10 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _previews.Remove(preview);
+                var terminalLines = (preview.TerminalLines ?? [])
+                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", message)])
+                    .TakeLast(200)
+                    .ToArray();
                 var failed = preview with
                 {
                     Status = "Failed",
@@ -3208,7 +3387,8 @@ namespace Rosenvall.DevOps.Api
                     Message = message,
                     LastCheckedAt = DateTimeOffset.UtcNow,
                     FailureReason = eventType,
-                    FailureLog = null
+                    FailureLog = null,
+                    TerminalLines = terminalLines
                 };
                 _previews.Add(failed);
                 AddPreviewEvent(item, failed, eventType, actor, message);
