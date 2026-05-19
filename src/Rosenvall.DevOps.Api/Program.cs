@@ -3341,7 +3341,8 @@ namespace Rosenvall.DevOps.Api
             {
                 return _previews
                     .Where(preview => preview.WorkItemId != Guid.Empty &&
-                        (string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase) ||
+                        (string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase)))
                     .ToArray();

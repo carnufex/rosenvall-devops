@@ -482,6 +482,23 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Implementing_preview_is_checked_for_health_recovery()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "hamburgare", "Skapa en demo for tva hamburgare.", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement two burger cards.")!;
+        store.ApproveAiRun(run.Id, "crille");
+
+        store.BeginPreviewImplementation(item.Id, "codex");
+
+        var awaiting = store.GetPreviewsAwaitingHealthCheck();
+
+        Assert.Contains(awaiting, preview => preview.WorkItemId == item.Id && preview.Status == "Implementing");
+    }
+
+    [Fact]
     public void Approved_ai_plan_can_be_reimplemented_with_generated_source_files()
     {
         using var fixture = DevOpsStoreFixture.Create();
