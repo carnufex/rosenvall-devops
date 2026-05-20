@@ -16,6 +16,42 @@ This is the first vertical slice of the DevOps SaaS plan.
 
 The API seeds demo data on first run and persists state through EF Core. Local development uses SQLite when `ConnectionStrings__DevOps` is empty. Cluster runtime should provide `ConnectionStrings__DevOps` for CloudNativePG. The Kubernetes scaffold stages the PostgreSQL manifest but does not sync it until the secret contract exists.
 
+## Architecture and Tech Stack
+
+Rosenvall DevOps is a React frontend backed by an ASP.NET Core API. The browser uses HTTP for commands and queries against `/api/*`, and keeps board, card, preview, and AI progress fresh through the SignalR hub at `/hubs/devops`.
+
+```mermaid
+flowchart LR
+    user["User / browser"] --> frontend["React + Vite frontend"]
+    authentik["Authentik OIDC"] --> frontend
+    authentik --> api
+
+    frontend -->|"HTTP /api/*"| api["ASP.NET Core 10 Minimal API"]
+    frontend <-->|"SignalR /hubs/devops"| api
+
+    api --> store["EF Core state\nSQLite local\nPostgreSQL when configured"]
+    api -->|"kubectl + service account RBAC"| k8s["Kubernetes API"]
+    k8s --> preview["Preview namespaces\nConfigMap source\nDeployment + Service\nGateway API HTTPRoute"]
+    preview --> base["ghcr.io/carnufex/rosenvall-devops-preview-base:main"]
+
+    api -->|"HTTP /api/generate"| ollama["Ollama service"]
+    api -->|"server-side Codex CLI"| codex["Codex provider"]
+    codex --> codexhome["CODEX_HOME PVC\n/app/codex-home"]
+```
+
+The backend orchestrates the product workflow. It owns the board state, AI run records, comment history, preview lifecycle, pipeline manifests, and Kubernetes health checks. In local development `kubectl` uses the configured kubeconfig path. In homelab the API image includes `kubectl`, `Preview__KubeconfigPath` is empty, and Kubernetes auth comes from the `rosenvall-devops-runtime` service account and RBAC.
+
+AI planning is provider-based. The `ollama` provider calls an Ollama HTTP endpoint, usually `http://localhost:11434/api` locally or `http://ollama.ollama.svc.cluster.local:11434/api` in homelab. The `codex` provider runs Codex CLI inside the API pod or local API process, using server-side auth from `CODEX_HOME`; Codex tokens are never sent to the browser. Homelab currently defaults to `codex`, with `ollama` available as a fallback provider.
+
+Preview apps are generated as per-ticket React/Tailwind source files, stored in a Kubernetes ConfigMap, and mounted into the prewarmed `rosenvall-devops-preview-base` image. The preview lifecycle is tracked separately from `kubectl apply`: the UI only exposes the public demo URL after the backend health checker sees an available Deployment and a ready pod.
+
+Tech stack:
+
+- Frontend: React 19, TypeScript, Vite, dnd-kit, `oidc-client-ts`, and `lucide-react`.
+- Backend: .NET / ASP.NET Core 10, Minimal API, SignalR, EF Core, SQLite for local state, and PostgreSQL support when configured.
+- AI: Ollama HTTP plan provider, Codex CLI plan provider, and Codex CLI preview-source generation.
+- Runtime and deploy: Kubernetes, Gateway API `HTTPRoute`, GHCR images, Authentik OIDC, Cloudflare tunnel / Zero Trust, and service-account RBAC.
+
 ## Local Run
 
 One-command local demo:
@@ -92,7 +128,7 @@ To enable the `codex` AI provider in homelab, log in once inside the API pod:
 kubectl -n rosenvall-devops exec -it deploy/rosenvall-devops-api -- codex login --device-auth
 ```
 
-The login state is stored in the `rosenvall-devops-codex-home` PVC. The `ollama` provider remains available and is still the default.
+The login state is stored in the `rosenvall-devops-codex-home` PVC. Homelab defaults to the `codex` provider, and `ollama` remains available as a fallback.
 
 ## Implemented API Contracts
 
