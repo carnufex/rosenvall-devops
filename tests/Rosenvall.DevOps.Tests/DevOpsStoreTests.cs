@@ -301,6 +301,36 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_runner_can_reference_per_run_github_app_token_secret()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "GitHub",
+            "Gatebound",
+            "https://github.com/carnufex/Gatebound.git",
+            "main",
+            "https://github.com/carnufex/Gatebound",
+            "carnufex",
+            "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Gatebound", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add dash ability", "Implement a small player dash.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Inspect the Unity project and add a focused dash implementation.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille"))!;
+        var tokenSecretName = RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(implementationRun);
+
+        var secretManifest = RepositoryImplementationJobManifestRenderer.RenderGitHubTokenSecret(implementationRun, "ghs_short_lived_installation_token");
+        var runnerManifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build(), tokenSecretName);
+
+        Assert.Contains("kind: Secret", secretManifest);
+        Assert.Contains("rosenvall-devops-pipelines", secretManifest);
+        Assert.Contains("ghs_short_lived_installation_token", secretManifest);
+        Assert.Contains(tokenSecretName, runnerManifest);
+        Assert.DoesNotContain("ghs_short_lived_installation_token", runnerManifest);
+    }
+
+    [Fact]
     public void React_preview_boards_do_not_start_repository_implementation_runs()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -358,7 +388,7 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal(unity.Id, linked.Repository!.Id);
         Assert.Equal(2, linked.Repositories!.Count);
-        Assert.Single(linked.Repositories.Where(repository => repository.IsPrimary));
+        Assert.Single(linked.Repositories, repository => repository.IsPrimary);
         Assert.Contains(linked.Repositories, repository => repository.RepositoryId == api.Id && !repository.IsPrimary);
         Assert.Contains(linked.Repositories, repository => repository.RepositoryId == unity.Id && repository.IsPrimary && repository.ImplementationProfile == "unity");
     }
@@ -436,6 +466,18 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal(12345, integration.InstallationId);
         Assert.Contains(reopened.GetGitHubIntegrations(), entry => entry.InstallationId == 12345 && entry.AccountLogin == "carnufex" && entry.RepositoriesCount == 7);
+    }
+
+    [Fact]
+    public void GitHub_app_integration_is_selected_for_matching_repository_owner()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var repository = fixture.Store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(111, "other-org", "Organization", "authentik|crille", 3));
+        var integration = fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(222, "carnufex", "User", "authentik|crille", 7));
+
+        Assert.Equal(222, fixture.Store.GetDefaultGitHubInstallationId());
+        Assert.Equal(integration.Id, fixture.Store.GetGitHubIntegrationForRepository(repository)!.Id);
     }
 
     [Fact]

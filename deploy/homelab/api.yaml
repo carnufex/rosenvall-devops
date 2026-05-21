@@ -61,12 +61,26 @@ spec:
                   name: rosenvall-devops-github
                   key: token
                   optional: true
+            - name: GitHub__AppId
+              valueFrom:
+                secretKeyRef:
+                  name: rosenvall-devops-github-app
+                  key: app-id
+                  optional: true
+            - name: GitHub__AppPrivateKey
+              valueFrom:
+                secretKeyRef:
+                  name: rosenvall-devops-github-app
+                  key: private-key
+                  optional: true
+            - name: GitHub__AppSlug
+              value: rosenvall-devops
             - name: GitHub__TokenSecretName
               value: rosenvall-devops-github
             - name: Repositories__Provider
-              value: Forgejo
+              value: GitHub
             - name: Repositories__Mode
-              value: LinkExistingFirst
+              value: GitHubApp
             - name: Repositories__Forgejo__ApiBaseUrl
               value: https://git.rosenvall.se/api/v1
             - name: Repositories__Forgejo__CanCreateRepositories
