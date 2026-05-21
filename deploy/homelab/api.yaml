@@ -74,7 +74,11 @@ spec:
                   key: private-key
                   optional: true
             - name: GitHub__AppSlug
-              value: rosenvall-devops
+              valueFrom:
+                secretKeyRef:
+                  name: rosenvall-devops-github-app
+                  key: app-slug
+                  optional: true
             - name: GitHub__TokenSecretName
               value: rosenvall-devops-github
             - name: Repositories__Provider
