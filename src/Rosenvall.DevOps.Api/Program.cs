@@ -2537,10 +2537,10 @@ namespace Rosenvall.DevOps.Api
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             var root = document.RootElement;
             var id = root.TryGetProperty("id", out var idElement) && idElement.TryGetInt64(out var value) ? value : 0;
-            var slug = GetString(root, "slug");
             var name = GetString(root, "name");
+            var slug = FirstNonEmpty(GetString(root, "slug"), SlugFromHtmlUrl(GetString(root, "html_url")), SafeSlug(name), "rosenvall-devops");
             var pem = GetString(root, "pem");
-            return id > 0 && !string.IsNullOrWhiteSpace(slug) && !string.IsNullOrWhiteSpace(pem)
+            return id > 0 && !string.IsNullOrWhiteSpace(pem)
                 ? new GitHubManifestAppDto(id, slug, string.IsNullOrWhiteSpace(name) ? slug : name, pem)
                 : null;
         }
@@ -2663,6 +2663,27 @@ namespace Rosenvall.DevOps.Api
 
             var origin = configuration.GetSection("Frontend:AllowedOrigins").Get<string[]>()?.FirstOrDefault(origin => origin.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
             return string.IsNullOrWhiteSpace(origin) ? "https://devops.rosenvall.se" : origin.Trim();
+        }
+
+        private static string FirstNonEmpty(params string?[] values) =>
+            values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? "";
+
+        private static string SlugFromHtmlUrl(string htmlUrl)
+        {
+            var marker = "/apps/";
+            var index = htmlUrl.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            return index >= 0 ? htmlUrl[(index + marker.Length)..].Trim('/') : "";
+        }
+
+        private static string SafeSlug(string value)
+        {
+            var safe = new string(value.ToLowerInvariant().Select(character => char.IsLetterOrDigit(character) ? character : '-').ToArray()).Trim('-');
+            while (safe.Contains("--", StringComparison.Ordinal))
+            {
+                safe = safe.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return safe;
         }
     }
 
