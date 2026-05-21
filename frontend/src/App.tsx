@@ -1336,18 +1336,21 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
   const failed = status === 'Failed';
   const waiting = !running && !failed;
   const actionLabel = failed ? 'Preview failed' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
+  const steps = previewLifecycleSteps(status);
   return (
     <section className="panel compact-panel preview-panel">
       <PanelHeader icon={<ExternalLink size={20} />} title="Preview environment" />
       {running
         ? <a className="demo-link" href={preview.url} target="_blank" rel="noreferrer">Open demo environment <ExternalLink size={16} /></a>
         : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
-      <div className="preview-progress">
-        <div className={`preview-step ${stepClass(status, 'Implementing')}`}>Implementing preview source</div>
-        <div className={`preview-step ${stepClass(status, 'Applying')}`}>Applying Kubernetes resources</div>
-        <div className={`preview-step ${stepClass(status, 'Provisioning')}`}>Waiting for pod readiness</div>
-        <div className={`preview-step ${running ? 'done' : failed ? 'blocked' : ''}`}>Running</div>
-      </div>
+      <ol className="preview-stepper" aria-label="Preview lifecycle">
+        {steps.map((step, index) => (
+          <li className={`stepper-item ${step.state}`} key={step.key}>
+            <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
+            <span className="stepper-body"><strong>{step.title}</strong><span>{step.description}</span></span>
+          </li>
+        ))}
+      </ol>
       {preview.namespace && <p className="namespace-note">Namespace: <code>{preview.namespace}</code></p>}
       <p className="preview-message">{preview.message ?? preview.phase ?? previewStatusText(preview)}</p>
       {preview.podName && <p className="namespace-note">Pod: <code>{preview.podName}</code></p>}
@@ -1367,7 +1370,7 @@ function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; a
   React.useEffect(() => {
     terminalRef.current?.scrollTo({ top: terminalRef.current.scrollHeight });
   }, [lines.length]);
-  const visibleLines = lines.slice(-80);
+  const visibleLines = lines.slice(-160);
   const terminalContent = <TerminalLog lines={visibleLines} terminalRef={terminalRef} />;
   return (
     <>
@@ -1404,22 +1407,45 @@ function TerminalLog({ lines, expanded = false, terminalRef }: { lines: PreviewT
         : lines.map((line, index) => (
           <div className={`terminal-line ${line.stream.toLowerCase()}`} key={`${line.createdAt}-${index}`}>
             <span>{terminalTime(line.createdAt)}</span>
-            <strong>{line.stream}</strong>
-            <code>{line.message}</code>
+            <code><strong>{terminalStreamLabel(line.stream)}</strong>{line.message}</code>
           </div>
         ))}
     </div>
   );
 }
 
-function stepClass(status: string, step: string) {
-  const order = ['Implementing', 'Applying', 'Provisioning', 'Running'];
-  if (status === 'Failed') return 'blocked';
-  const current = order.indexOf(status);
-  const target = order.indexOf(step);
-  if (current > target || status === 'Running') return 'done';
-  if (current === target) return 'active';
-  return '';
+function previewLifecycleSteps(status: string) {
+  const steps = [
+    ['Implementing', 'Implementing preview source', 'Codex generates the React/Tailwind files.'],
+    ['Applying', 'Applying Kubernetes resources', 'The API submits namespace, ConfigMap, Deployment, Service and route.'],
+    ['Provisioning', 'Waiting for pod readiness', 'Kubernetes starts the preview pod and health checks it.'],
+    ['Running', 'Running', 'The deployment is available and the demo link is enabled.']
+  ] as const;
+  const current = status === 'Failed'
+    ? 2
+    : Math.max(0, steps.findIndex(([key]) => key === status));
+
+  return steps.map(([key, title, description], index) => ({
+    key,
+    title,
+    description,
+    state: status === 'Running'
+      ? 'done'
+      : status === 'Failed' && index === current
+        ? 'blocked'
+        : index < current
+          ? 'done'
+          : index === current
+            ? 'active'
+            : 'pending'
+  }));
+}
+
+function terminalStreamLabel(stream: string) {
+  const normalized = stream.toLowerCase();
+  if (normalized === 'stderr') return 'agent';
+  if (normalized === 'stdout') return 'output';
+  return normalized || 'system';
 }
 
 function previewStatusText(preview: PreviewDto) {

@@ -643,6 +643,15 @@ namespace Rosenvall.DevOps.Api
             var deployment = await RunKubectlOutputAsync($"get deployment {preview.ResourceName} -n {preview.Namespace} -o json", cancellationToken);
             if (!deployment.Succeeded)
             {
+                if (!string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) &&
+                    IsMissingPreviewNamespace(deployment.Message))
+                {
+                    return PreviewHealthCheckResult.Failed(
+                        "NamespaceNotFound",
+                        "Preview namespace was not found. Retry preview setup to recreate the Kubernetes resources.",
+                        deployment.Message);
+                }
+
                 return PreviewHealthCheckResult.Provisioning("Waiting for deployment.", deployment.Message);
             }
 
@@ -904,6 +913,11 @@ namespace Rosenvall.DevOps.Api
 
         public static bool IsRecoverableKubectlException(Exception ex) =>
             ex is InvalidOperationException or System.ComponentModel.Win32Exception or OperationCanceledException or IOException;
+
+        public static bool IsMissingPreviewNamespace(string message) =>
+            message.Contains("Error from server (NotFound)", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("namespaces", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("not found", StringComparison.OrdinalIgnoreCase);
 
         private static string? ResolveKubeconfigPath(string? configuredPath)
         {

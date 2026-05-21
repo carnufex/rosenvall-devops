@@ -259,6 +259,14 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Kubectl_namespace_not_found_is_treated_as_preview_failure()
+    {
+        var message = "Error from server (NotFound): namespaces \"devops-preview-task-4826-cv-hemsida\" not found";
+
+        Assert.True(PreviewEnvironmentOrchestrator.IsMissingPreviewNamespace(message));
+    }
+
+    [Fact]
     public async Task Preview_orchestration_reports_missing_kubeconfig_before_starting_kubectl()
     {
         var missingKubeconfig = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "kubeconfig");
