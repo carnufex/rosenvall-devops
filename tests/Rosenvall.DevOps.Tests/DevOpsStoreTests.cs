@@ -331,6 +331,23 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitHub_app_secret_manifest_persists_manifest_credentials()
+    {
+        var manifest = GitHubAppSecretRenderer.Render(new GitHubManifestAppDto(
+            12345,
+            "rosenvall-devops",
+            "Rosenvall DevOps",
+            "-----BEGIN RSA PRIVATE KEY-----\nprivate-key-body\n-----END RSA PRIVATE KEY-----\n"));
+
+        Assert.Contains("name: rosenvall-devops-github-app", manifest);
+        Assert.Contains("namespace: rosenvall-devops", manifest);
+        Assert.Contains("app-id: \"12345\"", manifest);
+        Assert.Contains("app-slug: \"rosenvall-devops\"", manifest);
+        Assert.Contains("private-key: |", manifest);
+        Assert.Contains("    private-key-body", manifest);
+    }
+
+    [Fact]
     public void React_preview_boards_do_not_start_repository_implementation_runs()
     {
         using var fixture = DevOpsStoreFixture.Create();

@@ -24,6 +24,13 @@ spec:
       backendRefs:
         - name: rosenvall-devops-api
           port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /integrations/github
+      backendRefs:
+        - name: rosenvall-devops-api
+          port: 8080
     - backendRefs:
         - name: rosenvall-devops-frontend
           port: 8080

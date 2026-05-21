@@ -96,6 +96,42 @@ if (!string.IsNullOrWhiteSpace(authority))
     hub.RequireAuthorization();
 }
 
+app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github) =>
+    Results.Content(github.RenderManifestStartPage(), "text/html; charset=utf-8"));
+
+app.MapGet("/integrations/github/callback", async (string? code, long? installation_id, string? setup_action, string? state, DevOpsStore store, GitHubRepositoryClient github, PipelineJobOrchestrator jobs, CancellationToken cancellationToken) =>
+{
+    if (!string.IsNullOrWhiteSpace(code))
+    {
+        var app = await github.CreateAppFromManifestAsync(code, cancellationToken);
+        if (app is null)
+        {
+            return Results.Problem("GitHub App manifest conversion failed.", statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        var apply = await jobs.ApplyAsync(GitHubAppSecretRenderer.Render(app), cancellationToken);
+        if (!apply.Succeeded)
+        {
+            return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        return Results.Redirect($"https://github.com/apps/{WebUtility.UrlEncode(app.Slug)}/installations/new?state={WebUtility.UrlEncode(state ?? Guid.NewGuid().ToString("N"))}");
+    }
+
+    if (installation_id is { } installationId)
+    {
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(
+            installationId,
+            state is { Length: > 0 } ? state : $"installation-{installationId}",
+            "GitHub",
+            "github-app",
+            Status: setup_action ?? "Installed"));
+        return Results.Redirect($"/?githubIntegration={integration.Id}#settings");
+    }
+
+    return Results.BadRequest("Missing GitHub manifest code or installation id.");
+});
+
 var api = app.MapGroup("/api");
 if (!string.IsNullOrWhiteSpace(authority))
 {
@@ -678,6 +714,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt);
+    public sealed record GitHubManifestAppDto(long Id, string Slug, string Name, string Pem);
     public sealed record BoardSecretDto(Guid Id, Guid BoardId, Guid? RepositoryId, string Key, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastUsedAt = null);
     public sealed record AiSessionDto(Guid Id, Guid WorkItemId, string Provider, string Model, string? ProviderSessionId, string Status, DateTimeOffset LastPromptAt, Guid? RepositoryId = null, Guid? LastRunId = null, string? ContextSummary = null);
     public sealed record TimelineEventDto(Guid Id, Guid? BoardId, Guid? RepositoryId, Guid? WorkItemId, string Kind, string Title, string Message, string Actor, string? Url, DateTimeOffset CreatedAt);
@@ -992,6 +1029,36 @@ namespace Rosenvall.DevOps.Api
         }
 
         private static string Escape(string? value) => (value ?? "").Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+    }
+
+    public static class GitHubAppSecretRenderer
+    {
+        public static string Render(GitHubManifestAppDto app) =>
+            $$"""
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: rosenvall-devops-github-app
+                namespace: rosenvall-devops
+                labels:
+                  app.kubernetes.io/part-of: rosenvall-devops
+              type: Opaque
+              stringData:
+                app-id: "{{app.Id}}"
+                app-slug: "{{Escape(app.Slug)}}"
+                private-key: |
+              {{IndentBlock(app.Pem, 4)}}
+              """;
+
+        private static string IndentBlock(string value, int spaces)
+        {
+            var prefix = new string(' ', spaces);
+            return string.Join("\n", value.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd().Split('\n').Select(line => prefix + line));
+        }
+
+        private static string Escape(string value) =>
+            value.Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal);
     }
 
     public static class BoardSecretManifestRenderer
@@ -2400,9 +2467,79 @@ namespace Rosenvall.DevOps.Api
     {
         public string GetInstallUrl()
         {
+            if (string.IsNullOrWhiteSpace(configuration["GitHub:AppId"]) || string.IsNullOrWhiteSpace(configuration["GitHub:AppPrivateKey"]))
+            {
+                return "/integrations/github/manifest/start";
+            }
+
             var slug = configuration["GitHub:AppSlug"] ?? configuration["GitHub:AppName"] ?? "rosenvall-devops";
             var state = Guid.NewGuid().ToString("N");
             return $"https://github.com/apps/{WebUtility.UrlEncode(slug)}/installations/new?state={state}";
+        }
+
+        public string RenderManifestStartPage()
+        {
+            var baseUrl = PublicBaseUrl().TrimEnd('/');
+            var callbackUrl = $"{baseUrl}/integrations/github/callback";
+            var manifest = JsonSerializer.Serialize(new
+            {
+                name = configuration["GitHub:AppName"] ?? "Rosenvall DevOps",
+                url = baseUrl,
+                redirect_url = callbackUrl,
+                callback_urls = new[] { callbackUrl },
+                @public = false,
+                default_permissions = new Dictionary<string, string>
+                {
+                    ["metadata"] = "read",
+                    ["contents"] = "write",
+                    ["pull_requests"] = "write",
+                    ["issues"] = "write",
+                    ["actions"] = "read",
+                    ["checks"] = "read"
+                },
+                default_events = new[] { "pull_request", "push" }
+            });
+            var owner = configuration["GitHub:ManifestOwner"];
+            var action = string.IsNullOrWhiteSpace(owner)
+                ? "https://github.com/settings/apps/new"
+                : $"https://github.com/organizations/{WebUtility.UrlEncode(owner.Trim())}/settings/apps/new";
+            var state = Guid.NewGuid().ToString("N");
+            return $$"""
+                   <!doctype html>
+                   <html lang="en">
+                   <head><meta charset="utf-8"><title>Install Rosenvall DevOps GitHub App</title></head>
+                   <body>
+                     <form id="github-app-manifest" action="{{action}}?state={{state}}" method="post">
+                       <input type="hidden" name="manifest" value="{{WebUtility.HtmlEncode(manifest)}}">
+                     </form>
+                     <script>document.getElementById('github-app-manifest').submit();</script>
+                     <noscript><button form="github-app-manifest">Continue to GitHub</button></noscript>
+                   </body>
+                   </html>
+                   """;
+        }
+
+        public async Task<GitHubManifestAppDto?> CreateAppFromManifestAsync(string code, CancellationToken cancellationToken)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, $"https://api.github.com/app-manifests/{WebUtility.UrlEncode(code.Trim())}/conversions");
+            request.Headers.UserAgent.ParseAdd("rosenvall-devops");
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var root = document.RootElement;
+            var id = root.TryGetProperty("id", out var idElement) && idElement.TryGetInt64(out var value) ? value : 0;
+            var slug = GetString(root, "slug");
+            var name = GetString(root, "name");
+            var pem = GetString(root, "pem");
+            return id > 0 && !string.IsNullOrWhiteSpace(slug) && !string.IsNullOrWhiteSpace(pem)
+                ? new GitHubManifestAppDto(id, slug, string.IsNullOrWhiteSpace(name) ? slug : name, pem)
+                : null;
         }
 
         public async Task<IReadOnlyList<RepositoryDto>> GetRepositoriesAsync(CancellationToken cancellationToken, long? installationId = null)
@@ -2512,6 +2649,18 @@ namespace Rosenvall.DevOps.Api
 
         private static string NormalizeTextValue(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+        private string PublicBaseUrl()
+        {
+            var configured = configuration["PublicBaseUrl"] ?? configuration["GitHub:PublicBaseUrl"];
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                return configured.Trim();
+            }
+
+            var origin = configuration.GetSection("Frontend:AllowedOrigins").Get<string[]>()?.FirstOrDefault(origin => origin.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+            return string.IsNullOrWhiteSpace(origin) ? "https://devops.rosenvall.se" : origin.Trim();
+        }
     }
 
     public sealed class OllamaPlanProvider(HttpClient httpClient, IConfiguration configuration) : IAiPlanProvider
