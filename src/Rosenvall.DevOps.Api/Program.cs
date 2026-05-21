@@ -2483,9 +2483,10 @@ namespace Rosenvall.DevOps.Api
         {
             var baseUrl = PublicBaseUrl().TrimEnd('/');
             var callbackUrl = $"{baseUrl}/integrations/github/callback";
+            var manifestName = configuration["GitHub:AppName"] ?? $"Rosenvall DevOps {DateTimeOffset.UtcNow:yyyyMMddHHmm}";
             var manifest = JsonSerializer.Serialize(new
             {
-                name = configuration["GitHub:AppName"] ?? "Rosenvall DevOps",
+                name = manifestName,
                 url = baseUrl,
                 hook_attributes = new { url = $"{baseUrl}/integrations/github/webhook" },
                 redirect_url = callbackUrl,
