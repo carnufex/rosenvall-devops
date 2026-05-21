@@ -276,6 +276,18 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .connected span { margin-left: auto; color: var(--secondary); font-weight: 700; }
 .provider-status { margin: -4px 0 0; color: #fcd34d; font-size: 13px; }
 .provider-status.ready { color: var(--secondary); }
+.settings-inline { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--surface-high); border: 1px solid var(--line); padding: 14px; border-radius: 8px; }
+.settings-inline p { margin-top: 4px; }
+.settings-list { display: grid; gap: 10px; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--line); background: #121314; padding: 12px 14px; border-radius: 8px; }
+.settings-row p { margin-top: 4px; overflow-wrap: anywhere; }
+.team-card { display: grid; gap: 8px; border: 1px solid var(--line); background: #121314; padding: 12px; border-radius: 8px; }
+.team-card .settings-row { border: 0; background: transparent; padding: 0 0 8px; border-bottom: 1px solid var(--line); border-radius: 0; }
+.member-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted-strong); font-size: 13px; }
+.member-row strong { color: var(--secondary); }
+.secret-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(180px, 0.7fr) auto; gap: 12px; align-items: end; }
+.session-line { color: var(--secondary); font-size: 13px; }
+.target-repo-select { display: grid; gap: 8px; max-width: 420px; }
 
 .board-select { min-width: 260px; max-width: min(480px, 80vw); height: 42px; font-size: 22px; font-weight: 800; background: #090a0b; border-color: var(--line-strong); color: var(--text); padding: 0 34px 0 12px; }
 .board-select:focus { border-color: var(--focus); }
@@ -312,6 +324,8 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
   .page { padding: 20px 14px; }
   h1 { font-size: 26px; line-height: 34px; }
   .metrics, .dashboard-grid, .modal-grid, .form-grid, .form-grid.two { grid-template-columns: 1fr; }
+  .secret-form { grid-template-columns: 1fr; }
+  .settings-inline, .settings-row { align-items: stretch; flex-direction: column; }
   .form-grid.two > label:first-child, .form-grid.two > label:nth-child(2) { grid-column: 1 / -1; }
   .board { grid-template-columns: repeat(5, 300px); }
   .modal-backdrop { padding: 12px; place-items: start center; }

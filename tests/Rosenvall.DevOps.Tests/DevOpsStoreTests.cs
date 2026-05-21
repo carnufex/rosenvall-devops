@@ -327,6 +327,118 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Users_teams_and_roles_are_persisted_for_board_authorization()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var user = store.GetOrCreateUser(new UserIdentityRequest("authentik|crille", "Christopher Rosenvall", "christopher.rosenvall@gmail.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("Gatebound"), user.Subject);
+
+        var updated = store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(user.Id, "Admin"));
+        var reopened = fixture.Reopen();
+
+        Assert.NotNull(updated);
+        Assert.Contains(reopened.GetUsers(), entry => entry.Subject == "authentik|crille");
+        Assert.Contains(reopened.GetTeams(), entry => entry.Name == "Gatebound" && entry.Members.Any(member => member.UserId == user.Id && member.Role == "Admin"));
+        Assert.True(reopened.CanMutateBoard(board.Id, user.Subject));
+    }
+
+    [Fact]
+    public void Board_can_link_multiple_repositories_with_one_primary()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var api = store.CreateRepository(new CreateRepositoryRequest("GitHub", "api", "https://github.com/rosenvall/api.git", "main", "https://github.com/rosenvall/api", "rosenvall", "code-repo"));
+        var unity = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Product", api.Id, null, null, null, null, null))!;
+
+        var linked = store.LinkRepositoryToBoard(board.Id, new LinkBoardRepositoryRequest(unity.Id, true, "unity"))!;
+
+        Assert.Equal(unity.Id, linked.Repository!.Id);
+        Assert.Equal(2, linked.Repositories!.Count);
+        Assert.Single(linked.Repositories.Where(repository => repository.IsPrimary));
+        Assert.Contains(linked.Repositories, repository => repository.RepositoryId == api.Id && !repository.IsPrimary);
+        Assert.Contains(linked.Repositories, repository => repository.RepositoryId == unity.Id && repository.IsPrimary && repository.ImplementationProfile == "unity");
+    }
+
+    [Fact]
+    public void Board_secrets_store_metadata_only_and_runner_references_kubernetes_secret()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Gatebound", repository.Id, null, null, null, null, null))!;
+        var secret = store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("UNITY_LICENSE", "super-secret-license", repository.Id))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add dash", "Implement dash in Unity.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Add a focused dash implementation.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["GitHub:TokenSecretName"] = "rosenvall-devops-github",
+                ["Secrets:Namespace"] = "rosenvall-devops"
+            })
+            .Build();
+
+        var secretManifest = BoardSecretManifestRenderer.Render(secret, "super-secret-license", configuration);
+        var runnerManifest = store.RenderImplementationRunManifest(implementationRun.Id, configuration);
+        var listed = store.GetBoardSecrets(board.Id);
+
+        Assert.Single(listed);
+        Assert.Equal("UNITY_LICENSE", listed[0].Key);
+        Assert.DoesNotContain("super-secret-license", JsonSerializer.Serialize(listed));
+        Assert.Contains("UNITY_LICENSE", secretManifest);
+        Assert.Contains(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("super-secret-license")), secretManifest);
+        Assert.Contains("UNITY_LICENSE", runnerManifest);
+        Assert.Contains("secretKeyRef:", runnerManifest);
+        Assert.DoesNotContain("super-secret-license", runnerManifest);
+    }
+
+    [Fact]
+    public void Ai_session_is_stable_per_card_and_codex_resume_is_used_when_session_id_exists()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Gatebound", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add inventory", "Implement inventory.", "Todo", "Medium", null));
+        var first = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Plan inventory.")!;
+        var firstSession = store.GetAiSession(item.Id)!;
+        store.SetAiSessionProviderSession(item.Id, "11111111-1111-1111-1111-111111111111");
+        var second = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Revise inventory plan.")!;
+        var secondSession = store.GetAiSession(item.Id)!;
+        var run = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(second.Id, "crille", repository.Id))!;
+
+        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder().Build());
+        var reopened = fixture.Reopen();
+
+        Assert.Equal(firstSession.Id, secondSession.Id);
+        Assert.Equal(second.Id, secondSession.LastRunId);
+        Assert.Equal("11111111-1111-1111-1111-111111111111", secondSession.ProviderSessionId);
+        Assert.Contains("codex exec resume", manifest);
+        Assert.Contains("ROSENVALL_CODEX_SESSION_ID", manifest);
+        Assert.Equal(2, reopened.GetAiRuns(item.Id).Count);
+        Assert.Equal(secondSession.Id, reopened.GetAiSession(item.Id)!.Id);
+        Assert.NotEqual(first.Id, second.Id);
+    }
+
+    [Fact]
+    public void GitHub_app_integration_callback_is_persisted()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var integration = fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(12345, "carnufex", "User", "authentik|crille", 7));
+
+        var reopened = fixture.Reopen();
+
+        Assert.Equal(12345, integration.InstallationId);
+        Assert.Contains(reopened.GetGitHubIntegrations(), entry => entry.InstallationId == 12345 && entry.AccountLogin == "carnufex" && entry.RepositoriesCount == 7);
+    }
+
+    [Fact]
     public void Assignee_options_include_authentik_users_and_current_board_assignees()
     {
         using var fixture = DevOpsStoreFixture.Create();

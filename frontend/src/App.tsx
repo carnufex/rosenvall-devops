@@ -62,6 +62,7 @@ type Board = {
   name: string;
   columns: BoardColumn[];
   repository?: RepositoryDto | null;
+  repositories?: BoardRepositoryDto[] | null;
 };
 
 type RepositoryDto = {
@@ -74,6 +75,14 @@ type RepositoryDto = {
   createdAt: string;
   owner?: string | null;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
+};
+
+type BoardRepositoryDto = {
+  boardId: string;
+  repositoryId: string;
+  isPrimary: boolean;
+  implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
+  repository: RepositoryDto;
 };
 
 type BoardColumn = {
@@ -103,6 +112,7 @@ type WorkItemDetail = {
   preview?: PreviewDto | null;
   development?: DevelopmentDto | null;
   implementationRuns?: ImplementationRunDto[] | null;
+  aiSession?: AiSessionDto | null;
 };
 
 type CommentDto = {
@@ -155,6 +165,60 @@ type ImplementationRunDto = {
   createdAt: string;
   updatedAt: string;
   terminalLines?: PreviewTerminalLineDto[] | null;
+};
+
+type AiSessionDto = {
+  id: string;
+  workItemId: string;
+  provider: string;
+  model: string;
+  providerSessionId?: string | null;
+  status: string;
+  lastPromptAt: string;
+  repositoryId?: string | null;
+  lastRunId?: string | null;
+  contextSummary?: string | null;
+};
+
+type UserDto = {
+  id: string;
+  displayName: string;
+  email: string;
+  subject: string;
+  avatarUrl?: string | null;
+};
+
+type TeamMemberDto = {
+  userId: string;
+  role: string;
+};
+
+type TeamDto = {
+  id: string;
+  name: string;
+  members: TeamMemberDto[];
+  createdAt: string;
+};
+
+type GitHubIntegrationDto = {
+  id: string;
+  installationId: number;
+  accountLogin: string;
+  accountType: string;
+  status: string;
+  repositoriesCount: number;
+  installedBy: string;
+  createdAt: string;
+};
+
+type BoardSecretDto = {
+  id: string;
+  boardId: string;
+  repositoryId?: string | null;
+  key: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string | null;
 };
 
 type PreviewEnvironmentDto = {
@@ -369,6 +433,14 @@ const api = {
   async delete(path: string): Promise<void> {
     const response = await fetch(path, { method: 'DELETE', headers: authHeaders() });
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  },
+  async put<T>(path: string, body: unknown): Promise<T> {
+    const response = await fetch(path, {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body)
+    });
+    return parseResponse<T>(response);
   }
 };
 
@@ -459,7 +531,7 @@ function App() {
       const boards = await api.get<Board[]>(`/api/workspaces/${workspace.id}/boards`);
       const board = boards.find((entry) => entry.id === (preferredBoardId ?? selectedBoardIdRef.current)) ?? boards[0];
       if (!board) throw new Error('No board returned by API');
-      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees] = await Promise.all([
+      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets] = await Promise.all([
         api.get<RepositoryDto[]>('/api/repositories'),
         api.get<SettingsDto>('/api/settings'),
         api.get<PreviewEnvironmentDto[]>('/api/preview-environments'),
@@ -467,10 +539,14 @@ function App() {
         api.get<PipelineStatusDto[]>('/api/pipelines'),
         api.get<TimelineEventDto[]>(`/api/boards/${board.id}/timeline`),
         api.get<MetricsDto>(`/api/metrics?boardId=${board.id}`),
-        api.get<AssigneeDto[]>(`/api/assignees?boardId=${board.id}`)
+        api.get<AssigneeDto[]>(`/api/assignees?boardId=${board.id}`),
+        api.get<UserDto>('/api/me'),
+        api.get<TeamDto[]>('/api/teams'),
+        api.get<GitHubIntegrationDto[]>('/api/integrations/github'),
+        api.get<BoardSecretDto[]>(`/api/boards/${board.id}/secrets`)
       ]);
       setSelectedBoardId(board.id);
-      setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, busy: false });
+      setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, busy: false });
     } catch (loadError) {
       setShell({ status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
     }
@@ -645,10 +721,10 @@ function App() {
         setBusyAction(null);
       }
     },
-    startImplementationRun: async (workItemId, aiRunId) => {
+    startImplementationRun: async (workItemId, aiRunId, repositoryId) => {
       setBusyAction('Starting repository implementation');
       try {
-        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, actor });
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, actor, repositoryId });
         await refreshAfterChange(workItemId);
         addToast('info', 'Repository implementation started. Follow the implementation run terminal.');
       } catch (implementationError) {
@@ -657,6 +733,24 @@ function App() {
       } finally {
         setBusyAction(null);
       }
+    },
+    addGitHubIntegration: async () => {
+      await runAction('Opening GitHub integration', async () => {
+        const install = await api.get<{ url: string }>('/api/integrations/github/install-url');
+        window.location.href = install.url;
+      });
+    },
+    createBoardSecret: async (boardId, key, value, repositoryId) => {
+      await runAction('Saving board secret', async () => {
+        await api.post<BoardSecretDto>(`/api/boards/${boardId}/secrets`, { key, value, repositoryId: repositoryId || null });
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
+    deleteBoardSecret: async (boardId, secretId) => {
+      await runAction('Deleting board secret', async () => {
+        await api.delete(`/api/boards/${boardId}/secrets/${secretId}`);
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
     },
     discardPlan: async (runId, workItemId) => {
       await runAction('Discarding plan', async () => {
@@ -752,7 +846,7 @@ function App() {
             {view === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
             {view === 'board' && <BoardView board={board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} actions={actions} />}
             {view === 'timeline' && <TimelineView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} timeline={shell.timeline} actions={actions} />}
-            {view === 'settings' && <SettingsView settings={shell.settings} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onBack={() => setView('board')} />}
+            {view === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -870,7 +964,7 @@ async function initializeAuth(): Promise<User> {
 type ShellState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; workspace: Workspace; boards: Board[]; board: Board; repositories: RepositoryDto[]; settings: SettingsDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; timeline: TimelineEventDto[]; metrics: MetricsDto; assignees: AssigneeDto[]; busy: boolean };
+  | { status: 'ready'; workspace: Workspace; boards: Board[]; board: Board; repositories: RepositoryDto[]; settings: SettingsDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; timeline: TimelineEventDto[]; metrics: MetricsDto; assignees: AssigneeDto[]; me: UserDto; teams: TeamDto[]; githubIntegrations: GitHubIntegrationDto[]; boardSecrets: BoardSecretDto[]; busy: boolean };
 
 type SelectedState =
   | { status: 'closed' }
@@ -889,7 +983,10 @@ type BoardActions = {
   deleteCard(id: string): Promise<void>;
   startAiPlan(id: string): Promise<void>;
   approvePlan(runId: string, workItemId: string): Promise<void>;
-  startImplementationRun(workItemId: string, aiRunId: string): Promise<void>;
+  startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<void>;
+  addGitHubIntegration(): Promise<void>;
+  createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<void>;
+  deleteBoardSecret(boardId: string, secretId: string): Promise<void>;
   discardPlan(runId: string, workItemId: string): Promise<void>;
   approvePullRequest(workItemId: string): Promise<void>;
   startPreview(workItemId: string): Promise<void>;
@@ -1089,7 +1186,7 @@ function BoardView({ board, boards, selectedBoardId, actions }: { board: Board; 
       <div className="page-heading compact-heading">
         <div>
           <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
-          <p>{board.repository ? `${board.repository.provider} / ${repositoryLabel(board.repository)} - ${board.repository.defaultBranch} - ${profileLabel(board.repository.implementationProfile)}` : 'No repository linked'} - {board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
+          <p>{boardRepositorySummary(board)} - {board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
         </div>
         <button className="primary-action" onClick={() => actions.openCreateCard(board.columns[0]?.name ?? 'Todo')}><Plus size={16} />New card</button>
       </div>
@@ -1142,7 +1239,7 @@ function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
       <div className="page-heading compact-heading">
         <div>
           <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
-          <p>{board.repository ? `${board.repository.provider} / ${repositoryLabel(board.repository)} - ${profileLabel(board.repository.implementationProfile)}` : 'No repository linked'} - {filtered.length} events</p>
+          <p>{boardRepositorySummary(board)} - {filtered.length} events</p>
         </div>
         <div className="timeline-filters">
           {filters.map((entry) => (
@@ -1241,6 +1338,8 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const defaultPlan = [...sortedPlans].reverse().find((run) => run.status === 'PlanReady') ?? sortedPlans[sortedPlans.length - 1];
   const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(() => defaultPlan?.id ?? null);
   const selectedPlan = sortedPlans.find((run) => run.id === selectedPlanId) ?? defaultPlan;
+  const targetRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const [targetRepositoryId, setTargetRepositoryId] = React.useState<string | null>(() => targetRepositories.find((entry) => entry.isPrimary)?.repositoryId ?? targetRepositories[0]?.repositoryId ?? null);
 
   React.useEffect(() => {
     setForm(formFromDetail(detail));
@@ -1251,6 +1350,10 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
       setSelectedPlanId(defaultPlan?.id ?? null);
     }
   }, [defaultPlan?.id, selectedPlanId, sortedPlans]);
+  React.useEffect(() => {
+    if (targetRepositoryId && targetRepositories.some((entry) => entry.repositoryId === targetRepositoryId)) return;
+    setTargetRepositoryId(targetRepositories.find((entry) => entry.isPrimary)?.repositoryId ?? targetRepositories[0]?.repositoryId ?? null);
+  }, [targetRepositories, targetRepositoryId]);
   const activeImplementationRun = latestImplementationRun(detail.implementationRuns);
 
   return (
@@ -1269,7 +1372,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
             <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
             <button className="danger-button" disabled={busy} onClick={() => confirm('Delete this work item and tear down its preview namespace/resources?') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />Delete and clean up</button>
           </div>
-          <AiPlanPanel detail={detail} board={board} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
+          <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
           <section className="activity">
             <h2>Activity</h2>
             {detail.comments.length === 0 && <EmptyState>No comments yet.</EmptyState>}
@@ -1326,9 +1429,11 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   );
 }
 
-function AiPlanPanel({ detail, board, aiRuns, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
+function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChange, aiRuns, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
   detail: WorkItemDetail;
   board: Board | null;
+  targetRepositoryId: string | null;
+  onTargetRepositoryChange: (repositoryId: string | null) => void;
   aiRuns: AiRun[];
   selectedPlan?: AiRun;
   onSelectPlan: (id: string) => void;
@@ -1338,7 +1443,9 @@ function AiPlanPanel({ detail, board, aiRuns, selectedPlan, onSelectPlan, busy, 
   aiModel: string | null;
   actions: BoardActions;
 }) {
-  const repositoryProfile = board?.repository?.implementationProfile ?? 'react-preview';
+  const boardRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const targetRepository = boardRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? boardRepositories.find((entry) => entry.isPrimary) ?? boardRepositories[0];
+  const repositoryProfile = targetRepository?.implementationProfile ?? board?.repository?.implementationProfile ?? 'react-preview';
   const isRepositoryImplementation = repositoryProfile !== 'react-preview';
   const pendingRun = (detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status));
   const hasReadyPullRequest = (detail.implementationRuns ?? []).some((run) => run.status === 'PullRequestReady' && !!run.pullRequestUrl);
@@ -1381,12 +1488,18 @@ function AiPlanPanel({ detail, board, aiRuns, selectedPlan, onSelectPlan, busy, 
           ? (
             <>
               <p>Provider: {selectedPlan.provider} / {selectedPlan.model}. Status: {selectedPlan.status}.</p>
+              {detail.aiSession && <p className="session-line">Session: {detail.aiSession.provider} / {detail.aiSession.model} - {detail.aiSession.providerSessionId ? 'Codex resume ready' : 'No provider session id yet'}.</p>}
+              {isRepositoryImplementation && boardRepositories.length > 0 && (
+                <label className="target-repo-select">Target repo<select value={targetRepository?.repositoryId ?? ''} onChange={(event) => onTargetRepositoryChange(event.target.value || null)}>
+                  {boardRepositories.map((entry) => <option key={entry.repositoryId} value={entry.repositoryId}>{repositoryLabel(entry.repository)} {entry.isPrimary ? '(primary)' : ''} - {profileLabel(entry.implementationProfile)}</option>)}
+                </select></label>
+              )}
               <div className="plan-markdown"><CommentBody body={selectedPlan.plan} /></div>
             </>
           )
           : <EmptyState>No AI plans yet.</EmptyState>}
         <div className="approval-row">
-          {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementLabel}</button>}
+          {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementLabel}</button>}
           {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
         </div>
         {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
@@ -1745,10 +1858,17 @@ function CreateBoardModal({ onCreate, onClose }: {
   );
 }
 
-function SettingsView({ settings, selectedProvider, selectedModel, onProviderChange, onModelChange, onBack }: {
+function SettingsView({ settings, board, me, teams, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, actions, onProviderChange, onModelChange, onBack }: {
   settings: SettingsDto;
+  board: Board;
+  me: UserDto;
+  teams: TeamDto[];
+  repositories: RepositoryDto[];
+  boardSecrets: BoardSecretDto[];
+  githubIntegrations: GitHubIntegrationDto[];
   selectedProvider: string | null;
   selectedModel: string | null;
+  actions: BoardActions;
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onBack: () => void;
@@ -1756,12 +1876,28 @@ function SettingsView({ settings, selectedProvider, selectedModel, onProviderCha
   const activeProvider = resolveActiveAiProvider(settings, selectedProvider);
   const modelOptions = activeProvider.availableModels.length > 0 ? activeProvider.availableModels : [activeProvider.activeModel];
   const activeModel = resolveActiveAiModel(settings, selectedProvider, selectedModel);
+  const [secretKey, setSecretKey] = React.useState('');
+  const [secretValue, setSecretValue] = React.useState('');
+  const [secretRepositoryId, setSecretRepositoryId] = React.useState('');
+  const boardRepositories = board.repositories?.length ? board.repositories : board.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const visibleTeams = teams.length > 0 ? teams : [];
+  const canSaveSecret = secretKey.trim().length > 0 && secretValue.length > 0;
+
+  async function saveSecret(event: React.FormEvent) {
+    event.preventDefault();
+    if (!canSaveSecret) return;
+    await actions.createBoardSecret(board.id, secretKey.trim(), secretValue, secretRepositoryId || null);
+    setSecretKey('');
+    setSecretValue('');
+    setSecretRepositoryId('');
+  }
+
   return (
     <section className="page settings-page">
       <div className="page-heading">
         <div>
           <h1>Settings</h1>
-          <p>Configuration surfaced from the API.</p>
+          <p>Team, integration, AI and board-level runtime configuration.</p>
         </div>
         <button className="secondary" onClick={onBack}>Back to board</button>
       </div>
@@ -1771,6 +1907,28 @@ function SettingsView({ settings, selectedProvider, selectedModel, onProviderCha
           <div className="connected"><Github size={28} /><div><strong>Connected account</strong><p>{settings.gitHub.account}</p></div><span>{settings.gitHub.connected ? 'Active' : 'Disconnected'}</span></div>
           <label>Target repository<input value={settings.gitHub.targetRepository} readOnly /></label>
           <label>Branch watch patterns<input value={settings.gitHub.branchWatchPatterns} readOnly /></label>
+          <div className="settings-inline">
+            <div>
+              <strong>GitHub App installations</strong>
+              <p>Repositories are fetched through server-side installation tokens. Browser clients never receive GitHub credentials.</p>
+            </div>
+            <button className="secondary" onClick={() => void actions.addGitHubIntegration()} type="button"><Github size={16} />Add integration</button>
+          </div>
+          {githubIntegrations.length === 0
+            ? <p className="provider-status">No GitHub App installation has been recorded yet.</p>
+            : (
+              <div className="settings-list">
+                {githubIntegrations.map((integration) => (
+                  <div className="settings-row" key={integration.id}>
+                    <div>
+                      <strong>{integration.accountLogin}</strong>
+                      <p>{integration.accountType} - {integration.repositoriesCount} repositories - installed by {integration.installedBy}</p>
+                    </div>
+                    <span className={integration.status === 'Active' ? 'state-good' : 'state-muted'}>{integration.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
         </section>
         <SectionTitle icon={<Bot size={22} />} title="AI engine" amber />
         <section className="panel form-panel ai-settings">
@@ -1779,6 +1937,84 @@ function SettingsView({ settings, selectedProvider, selectedModel, onProviderCha
           <label>Adapter endpoint<input value={activeProvider.endpoint} readOnly /></label>
           <p className={activeProvider.status === 'Ready' ? 'provider-status ready' : 'provider-status'}>{activeProvider.displayName} status: {activeProvider.status === 'LoginRequired' ? 'Login required on server' : activeProvider.status}.</p>
           <label>Auto review pull requests<input value={settings.ai.autoReviewPullRequests ? 'Enabled' : 'Disabled'} readOnly /></label>
+        </section>
+        <SectionTitle icon={<Users size={22} />} title="Team and access" />
+        <section className="panel form-panel">
+          <div className="connected"><Users size={28} /><div><strong>{me.displayName}</strong><p>{me.email || me.subject}</p></div><span>Signed in</span></div>
+          {visibleTeams.length === 0
+            ? <p className="provider-status">No teams are available yet.</p>
+            : (
+              <div className="settings-list">
+                {visibleTeams.map((team) => (
+                  <div className="team-card" key={team.id}>
+                    <div className="settings-row">
+                      <div>
+                        <strong>{team.name}</strong>
+                        <p>{team.members.length} members - created {relativeTime(team.createdAt)}</p>
+                      </div>
+                    </div>
+                    {team.members.map((member) => (
+                      <div className="member-row" key={`${team.id}-${member.userId}`}>
+                        <span>{displayUserName(member.userId, me)}</span>
+                        <strong>{member.role}</strong>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+        </section>
+        <SectionTitle icon={<Save size={22} />} title="Board secrets" />
+        <section className="panel form-panel">
+          <div className="settings-inline">
+            <div>
+              <strong>{board.name}</strong>
+              <p>Secret values are written to Kubernetes Secrets. RDO only stores metadata and never returns saved values.</p>
+            </div>
+          </div>
+          <form className="secret-form" onSubmit={(event) => void saveSecret(event)}>
+            <label>Key<input value={secretKey} onChange={(event) => setSecretKey(event.target.value)} placeholder="NPM_TOKEN" /></label>
+            <label>Value<input value={secretValue} onChange={(event) => setSecretValue(event.target.value)} placeholder="Stored once, never shown again" type="password" /></label>
+            <label>Scope<select value={secretRepositoryId} onChange={(event) => setSecretRepositoryId(event.target.value)}>
+              <option value="">Board-wide</option>
+              {boardRepositories.map((entry) => <option key={entry.repositoryId} value={entry.repositoryId}>{repositoryLabel(entry.repository)}</option>)}
+            </select></label>
+            <button className="primary-action" disabled={!canSaveSecret} type="submit"><Save size={16} />Save secret</button>
+          </form>
+          {boardSecrets.length === 0
+            ? <p className="provider-status">No board secrets configured.</p>
+            : (
+              <div className="settings-list">
+                {boardSecrets.map((secret) => {
+                  const repository = repositories.find((entry) => entry.id === secret.repositoryId) ?? boardRepositories.find((entry) => entry.repositoryId === secret.repositoryId)?.repository;
+                  return (
+                    <div className="settings-row" key={secret.id}>
+                      <div>
+                        <strong>{secret.key}</strong>
+                        <p>{repository ? repositoryLabel(repository) : 'Board-wide'} - updated {relativeTime(secret.updatedAt)}{secret.lastUsedAt ? ` - last used ${relativeTime(secret.lastUsedAt)}` : ''}</p>
+                      </div>
+                      <button className="danger-button" onClick={() => confirm(`Delete ${secret.key}?`) && void actions.deleteBoardSecret(board.id, secret.id)} type="button"><Trash2 size={16} />Delete</button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+        </section>
+        <SectionTitle icon={<GitPullRequest size={22} />} title="Board repositories" />
+        <section className="panel form-panel">
+          <div className="settings-list">
+            {boardRepositories.length === 0
+              ? <p className="provider-status">No repositories are linked to this board.</p>
+              : boardRepositories.map((entry) => (
+                <div className="settings-row" key={entry.repositoryId}>
+                  <div>
+                    <strong>{repositoryLabel(entry.repository)}</strong>
+                    <p>{entry.repository.provider} - {entry.repository.defaultBranch} - {profileLabel(entry.implementationProfile)}</p>
+                  </div>
+                  <span className={entry.isPrimary ? 'state-good' : 'state-muted'}>{entry.isPrimary ? 'Primary' : 'Linked'}</span>
+                </div>
+              ))}
+          </div>
         </section>
         <SectionTitle icon={<ExternalLink size={22} />} title="Preview environments" />
         <section className="panel form-panel">
@@ -2196,11 +2432,25 @@ function repositoryLabel(repository: RepositoryDto) {
   return repository.owner ? `${repository.owner}/${repository.name}` : repository.name;
 }
 
+function boardRepositorySummary(board: Board) {
+  const repositories = board.repositories?.length
+    ? board.repositories
+    : board.repository ? [{ repository: board.repository, implementationProfile: board.repository.implementationProfile, isPrimary: true }] : [];
+  const primary = repositories.find((entry) => entry.isPrimary) ?? repositories[0];
+  if (!primary) return 'No repository linked';
+  const extraCount = repositories.length > 1 ? ` + ${repositories.length - 1} linked` : '';
+  return `${primary.repository.provider} / ${repositoryLabel(primary.repository)} - ${primary.repository.defaultBranch} - ${profileLabel(primary.implementationProfile)}${extraCount}`;
+}
+
 function profileLabel(profile?: string | null) {
   if (profile === 'react-preview') return 'React preview';
   if (profile === 'code-repo') return 'Code repo';
   if (profile === 'unity') return 'Unity';
   return profile || 'React preview';
+}
+
+function displayUserName(userId: string, me: UserDto) {
+  return userId === me.id ? `${me.displayName} (you)` : userId.slice(0, 8);
 }
 
 function latestImplementationRun(runs?: ImplementationRunDto[] | null) {
