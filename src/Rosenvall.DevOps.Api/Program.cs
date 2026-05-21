@@ -99,6 +99,8 @@ if (!string.IsNullOrWhiteSpace(authority))
 app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github) =>
     Results.Content(github.RenderManifestStartPage(), "text/html; charset=utf-8"));
 
+app.MapPost("/integrations/github/webhook", () => Results.Ok());
+
 app.MapGet("/integrations/github/callback", async (string? code, long? installation_id, string? setup_action, string? state, DevOpsStore store, GitHubRepositoryClient github, PipelineJobOrchestrator jobs, CancellationToken cancellationToken) =>
 {
     if (!string.IsNullOrWhiteSpace(code))
@@ -2485,6 +2487,7 @@ namespace Rosenvall.DevOps.Api
             {
                 name = configuration["GitHub:AppName"] ?? "Rosenvall DevOps",
                 url = baseUrl,
+                hook_attributes = new { url = $"{baseUrl}/integrations/github/webhook" },
                 redirect_url = callbackUrl,
                 callback_urls = new[] { callbackUrl },
                 @public = false,
