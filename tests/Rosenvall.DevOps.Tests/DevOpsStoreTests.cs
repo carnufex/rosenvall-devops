@@ -838,6 +838,30 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Codex_preview_source_provider_rejects_unchanged_seed_placeholder()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+        var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "cv hemsida", "skapa en hemsida som erbjuder CV mallar", "Todo", "High", null));
+        var run = fixture.Store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build a CV template editor.")!;
+        run.Approve("crille");
+        var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+        var fakeCodex = CreateFakeCodexNoopScript(exitCode: 0);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:Path"] = fakeCodex,
+                ["Ai:Codex:Home"] = Path.Combine(Path.GetTempPath(), $"codex-home-{Guid.NewGuid():N}")
+            })
+            .Build();
+        var provider = new CodexCliPreviewSourceProvider(configuration, NullLogger<CodexCliPreviewSourceProvider>.Instance);
+
+        var error = await Assert.ThrowsAsync<AiPlanProviderUnavailableException>(() => provider.GenerateSourceAsync("gpt-5.4", run, context, null, CancellationToken.None));
+
+        Assert.Contains("seeded placeholder app unchanged", error.Message);
+    }
+
+    [Fact]
     public async Task Codex_cli_provider_reports_login_required_without_creating_a_plan()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -1084,6 +1108,27 @@ exit {{exitCode}}
 @echo off
 if not exist src mkdir src
 > src\App.tsx echo {escapedSource}
+exit /b {exitCode}
+""");
+        return scriptPath;
+    }
+
+    private static string CreateFakeCodexNoopScript(int exitCode)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            var unixScriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-noop-{Guid.NewGuid():N}.sh");
+            File.WriteAllText(unixScriptPath, $$"""
+#!/usr/bin/env sh
+exit {{exitCode}}
+""");
+            File.SetUnixFileMode(unixScriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return unixScriptPath;
+        }
+
+        var scriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-noop-{Guid.NewGuid():N}.cmd");
+        File.WriteAllText(scriptPath, $"""
+@echo off
 exit /b {exitCode}
 """);
         return scriptPath;

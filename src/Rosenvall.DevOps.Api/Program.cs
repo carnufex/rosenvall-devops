@@ -2181,6 +2181,12 @@ namespace Rosenvall.DevOps.Api
                     throw new AiPlanProviderUnavailableException("Codex preview source generation did not produce src/App.tsx; no preview was deployed.");
                 }
 
+                var appSource = sourceFiles.First(file => string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)).Content;
+                if (LooksLikeSeededPlaceholder(appSource))
+                {
+                    throw new AiPlanProviderUnavailableException("Codex preview source generation left the seeded placeholder app unchanged; no preview was deployed.");
+                }
+
                 await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
                 return sourceFiles;
             }
@@ -2322,6 +2328,12 @@ namespace Rosenvall.DevOps.Api
             return string.IsNullOrWhiteSpace(key) ? "source-file" : key;
         }
 
+        private static bool LooksLikeSeededPlaceholder(string source) =>
+            source.Contains("React, TypeScript and Tailwind are ready for this ticket slice.", StringComparison.OrdinalIgnoreCase) ||
+            (source.Contains("\"Plan\"", StringComparison.Ordinal) &&
+             source.Contains("\"Build\"", StringComparison.Ordinal) &&
+             source.Contains("\"Preview\"", StringComparison.Ordinal));
+
         private static void TryKill(Process process)
         {
             try
@@ -2353,6 +2365,11 @@ namespace Rosenvall.DevOps.Api
               Do not install packages, do not run external services, and do not remove the Vite allowedHosts configuration for .rosenvall.se.
               Keep dependencies limited to the packages already present in package.json.
               Implement the approved AI plan as actual interactive React source, not a placeholder summary.
+              You must replace the seeded Plan/Build/Preview placeholder UI with a domain-specific product UI for the work item.
+              Do not leave any card that says "React, TypeScript and Tailwind are ready for this ticket slice."
+              The first viewport must demonstrate the requested product or tool, not project status.
+              If the request needs save/export behavior, implement the best browser-only version using existing dependencies and Web APIs.
+              If a requested feature cannot be fully implemented without new packages or backend services, still build a convincing interactive frontend approximation and clearly preserve the requested labels, fields, and flow.
               Preserve concrete language, visual, behavior, and content requirements from the work item and comments.
 
               Work item: {{context.Item.Key}} {{context.Item.Title}}
@@ -2370,6 +2387,9 @@ namespace Rosenvall.DevOps.Api
               Required result:
               - Update source files in this workspace.
               - The app must compile with the seeded Vite React TypeScript project.
+              - `src/App.tsx` must contain a real implementation of the requested app, including meaningful state and interactions when the work item asks for a tool or workflow.
+              - The UI copy should follow the language of the work item unless the plan explicitly says otherwise.
+              - Do not add explanatory implementation notes to the rendered UI.
               - Return only a short implementation summary in your final message; the server reads source files from disk.
               """;
     }
