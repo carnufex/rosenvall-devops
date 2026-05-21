@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -227,6 +228,102 @@ public sealed class DevOpsStoreTests
         Assert.Equal(12, metrics.CodeDeleted);
         Assert.Equal(1, metrics.PipelineRuns);
         Assert.Contains(store.GetTimeline(board.Id), entry => entry.Kind == "Pipeline" && entry.Message.Contains("submitted by crille", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void GitHub_repository_picker_normalizes_repositories_for_code_repo_boards()
+    {
+        using var document = JsonDocument.Parse("""
+        [
+          {
+            "name": "Gatebound",
+            "clone_url": "https://github.com/carnufex/Gatebound.git",
+            "html_url": "https://github.com/carnufex/Gatebound",
+            "default_branch": "main",
+            "owner": { "login": "carnufex" }
+          }
+        ]
+        """);
+
+        var repositories = GitHubRepositoryClient.NormalizeRepositories(document.RootElement);
+
+        var repository = Assert.Single(repositories);
+        Assert.Equal("GitHub", repository.Provider);
+        Assert.Equal("carnufex", repository.Owner);
+        Assert.Equal("Gatebound", repository.Name);
+        Assert.Equal("main", repository.DefaultBranch);
+        Assert.Equal("https://github.com/carnufex/Gatebound.git", repository.RemoteUrl);
+        Assert.Equal("https://github.com/carnufex/Gatebound", repository.WebUrl);
+        Assert.Equal("code-repo", repository.ImplementationProfile);
+    }
+
+    [Fact]
+    public void Code_repo_implementation_run_renders_kubernetes_job_without_inline_tokens()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "GitHub",
+            "Gatebound",
+            "https://github.com/carnufex/Gatebound.git",
+            "main",
+            "https://github.com/carnufex/Gatebound",
+            "carnufex",
+            "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Gatebound", repository.Id, null, null, null, null, null));
+        Assert.NotNull(board);
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add dash ability", "Implement a small player dash.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Inspect the Unity project and add a focused dash implementation.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille"));
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:Model"] = "gpt-5.4",
+                ["GitHub:Token"] = "ghp_secret_that_must_not_render",
+                ["GitHub:TokenSecretName"] = "rosenvall-devops-github"
+            })
+            .Build();
+
+        var manifest = store.RenderImplementationRunManifest(implementationRun!.Id, configuration);
+
+        Assert.NotNull(manifest);
+        Assert.Equal("unity", repository.ImplementationProfile);
+        Assert.Equal("Queued", implementationRun.Status);
+        Assert.Contains("kind: Job", manifest);
+        Assert.Contains("codex exec", manifest);
+        Assert.Contains("secretKeyRef:", manifest);
+        Assert.Contains("rosenvall-devops-github", manifest);
+        Assert.Contains("rdo/task-", manifest);
+        Assert.Contains("/tmp/rosenvall-workspace", manifest);
+        Assert.DoesNotContain("mkdir -p /workspace", manifest);
+        Assert.DoesNotContain("ghp_secret_that_must_not_render", manifest);
+    }
+
+    [Fact]
+    public void React_preview_boards_do_not_start_repository_implementation_runs()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Preview board",
+            null,
+            "local",
+            "preview",
+            "local://preview",
+            null,
+            "main",
+            null,
+            "react-preview"));
+        Assert.NotNull(board);
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Demo page", "Build a preview page.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build a React preview.")!;
+
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille"));
+
+        Assert.Null(implementationRun);
+        Assert.Empty(store.GetImplementationRuns(item.Id));
     }
 
     [Fact]

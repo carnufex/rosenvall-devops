@@ -72,6 +72,8 @@ type RepositoryDto = {
   webUrl?: string | null;
   defaultBranch: string;
   createdAt: string;
+  owner?: string | null;
+  implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
 };
 
 type BoardColumn = {
@@ -100,6 +102,7 @@ type WorkItemDetail = {
   comments: CommentDto[];
   preview?: PreviewDto | null;
   development?: DevelopmentDto | null;
+  implementationRuns?: ImplementationRunDto[] | null;
 };
 
 type CommentDto = {
@@ -135,6 +138,23 @@ type PreviewTerminalLineDto = {
   createdAt: string;
   stream: string;
   message: string;
+};
+
+type ImplementationRunDto = {
+  id: string;
+  repositoryId: string;
+  workItemId: string;
+  aiRunId: string;
+  workItemKey: string;
+  workItemTitle: string;
+  status: 'Queued' | 'Cloning' | 'Implementing' | 'Testing' | 'Pushing' | 'PullRequestReady' | 'Failed' | string;
+  branch: string;
+  pullRequestUrl?: string | null;
+  commitSha?: string | null;
+  failureReason?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  terminalLines?: PreviewTerminalLineDto[] | null;
 };
 
 type PreviewEnvironmentDto = {
@@ -289,8 +309,11 @@ type AssigneeDto = {
 type CreateBoardForm = {
   name: string;
   repositoryProvider: string;
+  repositoryOwner: string;
   repositoryRemoteUrl: string;
+  repositoryWebUrl: string;
   repositoryDefaultBranch: string;
+  implementationProfile: 'react-preview' | 'code-repo' | 'unity';
 };
 
 type ToastMessage = {
@@ -310,9 +333,12 @@ const emptyForm: WorkItemForm = {
 
 const emptyBoardForm: CreateBoardForm = {
   name: '',
-  repositoryProvider: 'Forgejo',
+  repositoryProvider: 'GitHub',
+  repositoryOwner: '',
   repositoryRemoteUrl: '',
-  repositoryDefaultBranch: 'main'
+  repositoryWebUrl: '',
+  repositoryDefaultBranch: 'main',
+  implementationProfile: 'code-repo'
 };
 
 const selectedBoardStorageKey = 'rosenvall-devops:selected-board';
@@ -477,7 +503,11 @@ function App() {
     }
   }, [loadShell, loadWorkItem]);
 
-  const previewPollWorkItemId = selected.status === 'open' && isPreviewPendingStatus(selected.detail.preview?.status)
+  const shouldPollOpenWorkItem = selected.status === 'open' && (
+    isPreviewPendingStatus(selected.detail.preview?.status) ||
+    (selected.detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status))
+  );
+  const previewPollWorkItemId = selected.status === 'open' && shouldPollOpenWorkItem
     ? selected.detail.item.id
     : null;
 
@@ -539,8 +569,10 @@ function App() {
           repositoryProvider: form.repositoryProvider,
           repositoryName: repositoryNameFromRemote(form.repositoryRemoteUrl, form.name),
           repositoryRemoteUrl: form.repositoryRemoteUrl,
-          repositoryWebUrl: webUrlFromRemote(form.repositoryRemoteUrl),
-          repositoryDefaultBranch: form.repositoryDefaultBranch || 'main'
+          repositoryWebUrl: form.repositoryWebUrl || webUrlFromRemote(form.repositoryRemoteUrl),
+          repositoryDefaultBranch: form.repositoryDefaultBranch || 'main',
+          repositoryOwner: form.repositoryOwner || repositoryOwnerFromRemote(form.repositoryRemoteUrl),
+          implementationProfile: form.implementationProfile
         });
         setCreateBoardOpen(false);
         setSelectedBoardId(created.id);
@@ -609,6 +641,19 @@ function App() {
       } catch (approveError) {
         await refreshAfterChange(workItemId);
         addToast('error', approveError instanceof Error ? approveError.message : 'Preview implementation failed to start');
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    startImplementationRun: async (workItemId, aiRunId) => {
+      setBusyAction('Starting repository implementation');
+      try {
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, actor });
+        await refreshAfterChange(workItemId);
+        addToast('info', 'Repository implementation started. Follow the implementation run terminal.');
+      } catch (implementationError) {
+        await refreshAfterChange(workItemId);
+        addToast('error', implementationError instanceof Error ? implementationError.message : 'Repository implementation failed to start');
       } finally {
         setBusyAction(null);
       }
@@ -844,6 +889,7 @@ type BoardActions = {
   deleteCard(id: string): Promise<void>;
   startAiPlan(id: string): Promise<void>;
   approvePlan(runId: string, workItemId: string): Promise<void>;
+  startImplementationRun(workItemId: string, aiRunId: string): Promise<void>;
   discardPlan(runId: string, workItemId: string): Promise<void>;
   approvePullRequest(workItemId: string): Promise<void>;
   startPreview(workItemId: string): Promise<void>;
@@ -1043,7 +1089,7 @@ function BoardView({ board, boards, selectedBoardId, actions }: { board: Board; 
       <div className="page-heading compact-heading">
         <div>
           <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
-          <p>{board.repository ? `${board.repository.provider} / ${board.repository.name} - ${board.repository.defaultBranch}` : 'No repository linked'} - {board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
+          <p>{board.repository ? `${board.repository.provider} / ${repositoryLabel(board.repository)} - ${board.repository.defaultBranch} - ${profileLabel(board.repository.implementationProfile)}` : 'No repository linked'} - {board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
         </div>
         <button className="primary-action" onClick={() => actions.openCreateCard(board.columns[0]?.name ?? 'Todo')}><Plus size={16} />New card</button>
       </div>
@@ -1096,7 +1142,7 @@ function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
       <div className="page-heading compact-heading">
         <div>
           <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
-          <p>{board.repository ? `${board.repository.provider} / ${board.repository.name}` : 'No repository linked'} - {filtered.length} events</p>
+          <p>{board.repository ? `${board.repository.provider} / ${repositoryLabel(board.repository)} - ${profileLabel(board.repository.implementationProfile)}` : 'No repository linked'} - {filtered.length} events</p>
         </div>
         <div className="timeline-filters">
           {filters.map((entry) => (
@@ -1205,6 +1251,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
       setSelectedPlanId(defaultPlan?.id ?? null);
     }
   }, [defaultPlan?.id, selectedPlanId, sortedPlans]);
+  const activeImplementationRun = latestImplementationRun(detail.implementationRuns);
 
   return (
     <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose}>
@@ -1222,7 +1269,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
             <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
             <button className="danger-button" disabled={busy} onClick={() => confirm('Delete this work item and tear down its preview namespace/resources?') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />Delete and clean up</button>
           </div>
-          <AiPlanPanel detail={detail} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
+          <AiPlanPanel detail={detail} board={board} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
           <section className="activity">
             <h2>Activity</h2>
             {detail.comments.length === 0 && <EmptyState>No comments yet.</EmptyState>}
@@ -1267,6 +1314,9 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
               {!detail.development.pullRequestUrl && <button className="secondary side-action" disabled>No PR for local preview</button>}
             </section>
           )}
+          {activeImplementationRun && (
+            <ImplementationRunPanel run={activeImplementationRun} />
+          )}
           {detail.preview && (
             <PreviewPanel preview={detail.preview} busy={busy} onRetry={() => actions.startPreview(detail.item.id)} />
           )}
@@ -1276,8 +1326,9 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   );
 }
 
-function AiPlanPanel({ detail, aiRuns, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
+function AiPlanPanel({ detail, board, aiRuns, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
   detail: WorkItemDetail;
+  board: Board | null;
   aiRuns: AiRun[];
   selectedPlan?: AiRun;
   onSelectPlan: (id: string) => void;
@@ -1287,10 +1338,25 @@ function AiPlanPanel({ detail, aiRuns, selectedPlan, onSelectPlan, busy, busyLab
   aiModel: string | null;
   actions: BoardActions;
 }) {
+  const repositoryProfile = board?.repository?.implementationProfile ?? 'react-preview';
+  const isRepositoryImplementation = repositoryProfile !== 'react-preview';
+  const pendingRun = (detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status));
+  const hasReadyPullRequest = (detail.implementationRuns ?? []).some((run) => run.status === 'PullRequestReady' && !!run.pullRequestUrl);
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
   const previewRunning = detail.preview?.status === 'Running';
   const previewHasGeneratedSource = (detail.preview?.sourceFiles?.length ?? 0) > 0;
-  const canImplementSelected = !!selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && !previewBusy && (!previewRunning || !previewHasGeneratedSource);
+  const canImplementSelected = !!selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && (
+    isRepositoryImplementation
+      ? !pendingRun && !hasReadyPullRequest
+      : !previewBusy && (!previewRunning || !previewHasGeneratedSource)
+  );
+  const implementLabel = isRepositoryImplementation
+    ? repositoryProfile === 'unity'
+      ? 'Implement in Unity repo'
+      : 'Implement in GitHub repo'
+    : selectedPlan?.status === 'Approved'
+      ? 'Rebuild with Codex'
+      : 'Implement plan';
   return (
     <section className="panel ai-plan-panel">
       <PanelHeader icon={<Bot size={20} />} title="AI plans" />
@@ -1320,12 +1386,38 @@ function AiPlanPanel({ detail, aiRuns, selectedPlan, onSelectPlan, busy, busyLab
           )
           : <EmptyState>No AI plans yet.</EmptyState>}
         <div className="approval-row">
-          {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void actions.approvePlan(selectedPlan.id, detail.item.id)}><CheckCircle2 size={16} />{selectedPlan.status === 'Approved' ? 'Rebuild with Codex' : 'Implement plan'}</button>}
+          {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementLabel}</button>}
           {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
         </div>
-        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.</p>}
+        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
         {aiRuns.some((run) => run.status === 'Discarded') && <p>Discarded plans are kept in history but hidden from approval.</p>}
       </div>
+    </section>
+  );
+}
+
+function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
+  const pending = isImplementationRunPendingStatus(run.status);
+  const failed = run.status === 'Failed';
+  const ready = run.status === 'PullRequestReady';
+  const steps = implementationRunSteps(run.status);
+  return (
+    <section className="panel compact-panel implementation-panel">
+      <PanelHeader icon={<GitPullRequest size={20} />} title="Implementation run" />
+      <ol className="preview-stepper implementation-stepper" aria-label="Repository implementation lifecycle">
+        {steps.map((step, index) => (
+          <li className={`stepper-item ${step.state}`} key={step.key}>
+            <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
+            <span className="stepper-body"><strong>{step.title}</strong><span>{step.description}</span></span>
+          </li>
+        ))}
+      </ol>
+      <p className="namespace-note">Branch: <code>{run.branch}</code></p>
+      {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
+      {ready && run.pullRequestUrl && <a className="url-box" href={run.pullRequestUrl} target="_blank" rel="noreferrer">Open pull request <ExternalLink size={16} /></a>}
+      {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
+      <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
+      <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
     </section>
   );
 }
@@ -1441,6 +1533,36 @@ function previewLifecycleSteps(status: string) {
   }));
 }
 
+function implementationRunSteps(status: string) {
+  const steps = [
+    ['Cloning', 'Clone repository', 'The runner checks out the linked repository and creates a task branch.'],
+    ['Implementing', 'Implement with Codex', 'Codex edits the repository according to the selected plan.'],
+    ['Testing', 'Run checks', 'The runner executes lightweight tests or builds when they are discoverable.'],
+    ['Pushing', 'Push branch', 'Changes are committed and pushed to GitHub.'],
+    ['PullRequestReady', 'Pull request ready', 'A GitHub pull request is available for review.']
+  ] as const;
+  const current = status === 'Queued'
+    ? 0
+    : status === 'Failed'
+      ? Math.max(0, steps.findIndex(([key]) => key === 'Implementing'))
+      : Math.max(0, steps.findIndex(([key]) => key === status));
+
+  return steps.map(([key, title, description], index) => ({
+    key,
+    title,
+    description,
+    state: status === 'PullRequestReady'
+      ? 'done'
+      : status === 'Failed' && index === current
+        ? 'blocked'
+        : index < current
+          ? 'done'
+          : index === current
+            ? 'active'
+            : 'pending'
+  }));
+}
+
 function terminalStreamLabel(stream: string) {
   const normalized = stream.toLowerCase();
   if (normalized === 'stderr') return 'agent';
@@ -1458,6 +1580,10 @@ function previewStatusText(preview: PreviewDto) {
 
 function isPreviewPendingStatus(status?: string) {
   return status === 'Implementing' || status === 'Applying' || status === 'Provisioning';
+}
+
+function isImplementationRunPendingStatus(status?: string) {
+  return status === 'Queued' || status === 'Cloning' || status === 'Implementing' || status === 'Testing' || status === 'Pushing';
 }
 
 function developmentStatusText(development: DevelopmentDto) {
@@ -1547,7 +1673,47 @@ function CreateBoardModal({ onCreate, onClose }: {
   onClose: () => void;
 }) {
   const [form, setForm] = React.useState<CreateBoardForm>(emptyBoardForm);
+  const [githubRepos, setGithubRepos] = React.useState<RepositoryDto[]>([]);
+  const [githubStatus, setGithubStatus] = React.useState<'idle' | 'loading' | 'error'>('idle');
+  const [githubError, setGithubError] = React.useState<string | null>(null);
   const normalizedName = form.name.trim();
+  const usesGitHub = form.repositoryProvider === 'GitHub';
+
+  React.useEffect(() => {
+    if (!usesGitHub || githubStatus !== 'idle' || githubRepos.length > 0) return;
+    let cancelled = false;
+    setGithubStatus('loading');
+    api.get<RepositoryDto[]>('/api/integrations/github/repositories')
+      .then((repositories) => {
+        if (cancelled) return;
+        setGithubRepos(repositories);
+        setGithubStatus('idle');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setGithubError(error instanceof Error ? error.message : 'Could not load GitHub repositories');
+        setGithubStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [githubRepos.length, githubStatus, usesGitHub]);
+
+  const selectGitHubRepository = (repoKey: string) => {
+    const repository = githubRepos.find((entry) => `${entry.owner ?? ''}/${entry.name}` === repoKey);
+    if (!repository) return;
+    setForm({
+      ...form,
+      name: form.name || repository.name,
+      repositoryProvider: repository.provider,
+      repositoryOwner: repository.owner ?? '',
+      repositoryRemoteUrl: repository.remoteUrl,
+      repositoryWebUrl: repository.webUrl ?? '',
+      repositoryDefaultBranch: repository.defaultBranch || 'main',
+      implementationProfile: repository.implementationProfile === 'unity' ? 'unity' : 'code-repo'
+    });
+  };
+
   return (
     <ModalFrame title="Add board" onClose={onClose}>
       <form className="create-form" onSubmit={(event) => {
@@ -1557,10 +1723,19 @@ function CreateBoardModal({ onCreate, onClose }: {
       }}>
         <label>Board name<input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Gatewaybound" /></label>
         <div className="form-grid two">
-          <label>Provider<select value={form.repositoryProvider} onChange={(event) => setForm({ ...form, repositoryProvider: event.target.value })}><option>Forgejo</option><option>GitHub</option><option>AzureDevOps</option><option>GenericGit</option></select></label>
+          <label>Provider<select value={form.repositoryProvider} onChange={(event) => setForm({ ...form, repositoryProvider: event.target.value, implementationProfile: event.target.value === 'GitHub' ? 'code-repo' : form.implementationProfile })}><option>GitHub</option><option>Forgejo</option><option>AzureDevOps</option><option>GenericGit</option></select></label>
+          <label>Implementation profile<select value={form.implementationProfile} onChange={(event) => setForm({ ...form, implementationProfile: event.target.value as CreateBoardForm['implementationProfile'] })}><option value="code-repo">Code repo</option><option value="unity">Unity</option><option value="react-preview">React preview</option></select></label>
+          {usesGitHub && (
+            <label>GitHub repository<select value={form.repositoryOwner && form.repositoryRemoteUrl ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : ''} onChange={(event) => selectGitHubRepository(event.target.value)}>
+              <option value="">{githubStatus === 'loading' ? 'Loading repositories...' : 'Select repository...'}</option>
+              {githubRepos.map((repository) => <option key={`${repository.owner}/${repository.name}`} value={`${repository.owner ?? ''}/${repository.name}`}>{repository.owner ? `${repository.owner}/` : ''}{repository.name}</option>)}
+            </select></label>
+          )}
           <label>Default branch<input value={form.repositoryDefaultBranch} onChange={(event) => setForm({ ...form, repositoryDefaultBranch: event.target.value })} /></label>
-          <label>Repository URL<input value={form.repositoryRemoteUrl} onChange={(event) => setForm({ ...form, repositoryRemoteUrl: event.target.value })} placeholder="https://github.com/owner/repo.git" /></label>
+          <label>Repository URL<input value={form.repositoryRemoteUrl} onChange={(event) => setForm({ ...form, repositoryRemoteUrl: event.target.value, repositoryOwner: repositoryOwnerFromRemote(event.target.value) ?? form.repositoryOwner, repositoryWebUrl: webUrlFromRemote(event.target.value) ?? form.repositoryWebUrl })} placeholder="https://github.com/owner/repo.git" /></label>
+          <label>Web URL<input value={form.repositoryWebUrl} onChange={(event) => setForm({ ...form, repositoryWebUrl: event.target.value })} placeholder="https://github.com/owner/repo" /></label>
         </div>
+        {githubError && <p className="provider-status">GitHub repositories: {githubError}</p>}
         <div className="modal-actions">
           <button className="primary-action" disabled={!normalizedName || !form.repositoryRemoteUrl.trim()}><Plus size={16} />Create board</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
@@ -1996,8 +2171,15 @@ function preferredAssignee(options: AssigneeOption[]) {
 
 function repositoryNameFromRemote(remoteUrl: string, boardName: string) {
   const normalized = remoteUrl.trim().replace(/\.git$/i, '');
-  const path = normalized.split(/[/:]/).filter(Boolean).slice(-2).join('/');
-  return path || boardName.trim() || 'repository';
+  const parts = normalized.split(/[/:]/).filter(Boolean);
+  const name = parts.at(-1);
+  return name || boardName.trim() || 'repository';
+}
+
+function repositoryOwnerFromRemote(remoteUrl: string) {
+  const normalized = remoteUrl.trim().replace(/\.git$/i, '');
+  const parts = normalized.split(/[/:]/).filter(Boolean);
+  return parts.length >= 2 ? parts.at(-2) ?? null : null;
 }
 
 function webUrlFromRemote(remoteUrl: string) {
@@ -2008,6 +2190,21 @@ function webUrlFromRemote(remoteUrl: string) {
 
   const sshMatch = normalized.match(/^ssh:\/\/git@([^/]+)\/(.+)$/i) ?? normalized.match(/^git@([^:]+):(.+)$/i);
   return sshMatch ? `https://${sshMatch[1]}/${sshMatch[2]}` : null;
+}
+
+function repositoryLabel(repository: RepositoryDto) {
+  return repository.owner ? `${repository.owner}/${repository.name}` : repository.name;
+}
+
+function profileLabel(profile?: string | null) {
+  if (profile === 'react-preview') return 'React preview';
+  if (profile === 'code-repo') return 'Code repo';
+  if (profile === 'unity') return 'Unity';
+  return profile || 'React preview';
+}
+
+function latestImplementationRun(runs?: ImplementationRunDto[] | null) {
+  return [...(runs ?? [])].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 }
 
 function initials(value: string) {

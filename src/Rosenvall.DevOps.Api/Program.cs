@@ -16,6 +16,7 @@ builder.Services.AddProblemDetails();
 builder.Services.AddHealthChecks();
 builder.Services.AddSignalR();
 builder.Services.AddHttpClient<OllamaPlanProvider>();
+builder.Services.AddHttpClient<GitHubRepositoryClient>();
 builder.Services.AddTransient<IAiPlanProvider>(services => services.GetRequiredService<OllamaPlanProvider>());
 builder.Services.AddSingleton<IAiPlanProvider, CodexCliPlanProvider>();
 builder.Services.AddSingleton<AiPlanProviderRouter>();
@@ -41,6 +42,7 @@ builder.Services.AddSingleton<DevOpsStore>();
 builder.Services.AddSingleton<PreviewEnvironmentOrchestrator>();
 builder.Services.AddSingleton<PipelineJobOrchestrator>();
 builder.Services.AddHostedService<PreviewHealthMonitor>();
+builder.Services.AddHostedService<ImplementationRunMonitor>();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("frontend", policy =>
@@ -125,6 +127,9 @@ api.MapPost("/repositories", (CreateRepositoryRequest request, DevOpsStore store
     var repository = store.CreateRepository(request);
     return Results.Created($"/api/repositories/{repository.Id}", repository);
 });
+
+api.MapGet("/integrations/github/repositories", async (GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+    Results.Ok(await github.GetRepositoriesAsync(cancellationToken)));
 
 api.MapGet("/work-items", (DevOpsStore store) => store.GetWorkItems());
 api.MapPost("/work-items", async (CreateWorkItemRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
@@ -416,6 +421,43 @@ api.MapPost("/pipeline-runs/{pipelineRunId:guid}/execute", async (Guid pipelineR
 api.MapGet("/pipeline-runs/{pipelineRunId:guid}/manifest", (Guid pipelineRunId, DevOpsStore store) =>
     store.RenderPipelineJobManifest(pipelineRunId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
 
+api.MapGet("/implementation-runs", (Guid? workItemId, DevOpsStore store) => store.GetImplementationRuns(workItemId));
+
+api.MapGet("/implementation-runs/{implementationRunId:guid}", (Guid implementationRunId, DevOpsStore store) =>
+    store.GetImplementationRun(implementationRunId) is { } run ? Results.Ok(run) : Results.NotFound());
+
+api.MapGet("/implementation-runs/{implementationRunId:guid}/manifest", (Guid implementationRunId, DevOpsStore store, IConfiguration configuration) =>
+    store.RenderImplementationRunManifest(implementationRunId, configuration) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
+
+api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid workItemId, StartImplementationRunRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    var run = store.StartImplementationRun(workItemId, request);
+    if (run is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("implementationRunChanged", run);
+    var manifest = store.RenderImplementationRunManifest(run.Id, configuration);
+    if (manifest is null)
+    {
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Implementation manifest could not be rendered.");
+        return Results.Problem(failed?.FailureReason ?? "Implementation manifest could not be rendered.", statusCode: StatusCodes.Status409Conflict);
+    }
+
+    var apply = await jobs.ApplyAsync(manifest, cancellationToken);
+    if (!apply.Succeeded)
+    {
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, apply.Message);
+        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
+    await hub.Clients.All.SendAsync("implementationRunChanged", updated);
+    return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
+});
+
 api.MapGet("/previews/{workItemId:guid}/manifest", (Guid workItemId, DevOpsStore store) =>
     store.RenderPreviewManifest(workItemId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
 
@@ -494,11 +536,11 @@ namespace Rosenvall.DevOps.Api
     public sealed class DevOpsHub : Hub;
 
     public sealed record WorkspaceDto(Guid Id, string Name, string EnvironmentName, string Region, int ActiveProjects, int OpenPullRequests, int SuccessfulAiImplementations, int ComputeUsagePercent);
-    public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt);
+    public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt, string? Owner = null, string ImplementationProfile = "react-preview");
     public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
-    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development);
+    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
     public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
@@ -506,6 +548,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record PreviewTerminalLineDto(DateTimeOffset CreatedAt, string Stream, string Message);
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
+    public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record TimelineEventDto(Guid Id, Guid? BoardId, Guid? RepositoryId, Guid? WorkItemId, string Kind, string Title, string Message, string Actor, string? Url, DateTimeOffset CreatedAt);
     public sealed record DevelopmentDto(string Repository, string Branch, string? PullRequestUrl, string ChecksStatus, string? PullRequestApprovedBy = null, DateTimeOffset? PullRequestApprovedAt = null);
     public sealed record SettingsDto(GitHubSettingsDto GitHub, AiSettingsDto Ai, PreviewSettingsDto Preview, RepositoryHostingSettingsDto Repositories, AuthentikSettingsDto Authentik);
@@ -519,8 +562,8 @@ namespace Rosenvall.DevOps.Api
     public sealed record AssigneeDto(string Id, string DisplayName, string Email, string Source);
 
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
-    public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null);
-    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch);
+    public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null, string? Owner = null, string? ImplementationProfile = null);
+    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null);
     public sealed record CreateWorkItemRequest(Guid BoardId, string Type, string Title, string Description, string Status, string Priority, string? Assignee);
     public sealed record UpdateWorkItemRequest(string Title, string Description, string Type, string Status, string Priority, string? Assignee);
     public sealed record MoveWorkItemRequest(string Status, int SortOrder);
@@ -533,6 +576,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record PreviewActionRequest(string Actor);
     public sealed record RecordPipelineRunRequest(Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record ExecutePipelineRunRequest(string Actor);
+    public sealed record StartImplementationRunRequest(Guid AiRunId, string Actor);
     public sealed record GitHubCallbackRequest(Guid WorkItemId, string Repository, string Branch, string? PullRequestUrl, string Image, string ChecksStatus, string? StaticHtml = null);
 
     public class AiPlanProviderUnavailableException(string message) : InvalidOperationException(message);
@@ -603,6 +647,159 @@ namespace Rosenvall.DevOps.Api
 
             return safe.Length <= 52 ? safe : safe[..52].Trim('-');
         }
+    }
+
+    public static class RepositoryImplementationJobManifestRenderer
+    {
+        public static string JobName(ImplementationRunDto run, WorkItemDetailDto context) =>
+            SafeName($"impl-{context.Item.Key}-{run.Id:N}");
+
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string githubSecretName = "rosenvall-devops-github")
+        {
+            var jobName = JobName(run, context);
+            var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
+            var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, aiRun, context)));
+            return $$"""
+                   apiVersion: batch/v1
+                   kind: Job
+                   metadata:
+                     name: {{jobName}}
+                     namespace: rosenvall-devops-pipelines
+                     labels:
+                       app.kubernetes.io/part-of: rosenvall-devops-implementation
+                       rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
+                   spec:
+                     backoffLimit: 0
+                     template:
+                       metadata:
+                         labels:
+                           app.kubernetes.io/name: {{jobName}}
+                       spec:
+                         restartPolicy: Never
+                         securityContext:
+                           runAsNonRoot: true
+                           runAsUser: 1000
+                           runAsGroup: 1000
+                           fsGroup: 1000
+                           seccompProfile:
+                             type: RuntimeDefault
+                         volumes:
+                           - name: codex-home
+                             persistentVolumeClaim:
+                               claimName: rosenvall-devops-codex-home
+                         containers:
+                           - name: runner
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               allowPrivilegeEscalation: false
+                               capabilities:
+                                 drop:
+                                   - ALL
+                             volumeMounts:
+                               - name: codex-home
+                                 mountPath: /app/codex-home
+                             env:
+                               - name: GITHUB_TOKEN
+                                 valueFrom:
+                                   secretKeyRef:
+                                     name: {{githubSecretName}}
+                                     key: token
+                               - name: CODEX_HOME
+                                 value: /app/codex-home
+                               - name: CODEX_MODEL
+                                 value: "{{Escape(model)}}"
+                               - name: ROSENVALL_REPOSITORY_URL
+                                 value: "{{Escape(repository.RemoteUrl)}}"
+                               - name: ROSENVALL_REPOSITORY
+                                 value: "{{Escape(ownerRepo)}}"
+                               - name: ROSENVALL_DEFAULT_BRANCH
+                                 value: "{{Escape(repository.DefaultBranch)}}"
+                               - name: ROSENVALL_BRANCH
+                                 value: "{{Escape(run.Branch)}}"
+                               - name: ROSENVALL_PROMPT_B64
+                                 value: "{{prompt}}"
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 workspace="/tmp/rosenvall-workspace"
+                                 mkdir -p "$workspace"
+                                 echo "RDO_STEP=Cloning"
+                                 auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${GITHUB_TOKEN}@github.com/#")"
+                                 git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 cd "$workspace/repo"
+                                 git config user.name "Rosenvall DevOps"
+                                 git config user.email "devops@rosenvall.se"
+                                 git switch -c "$ROSENVALL_BRANCH"
+                                 printf '%s' "$ROSENVALL_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
+                                 echo "RDO_STEP=Implementing"
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C "$workspace/repo" -m "$CODEX_MODEL" - < "$workspace/prompt.md"
+                                 echo "RDO_STEP=Testing"
+                                 if [ -f package.json ]; then npm test -- --runInBand || npm run build || true; fi
+                                 if ls *.sln *.slnx >/dev/null 2>&1; then dotnet test --no-restore || true; fi
+                                 if git diff --quiet && [ -z "$(git status --porcelain)" ]; then echo "RDO_FAILURE=No changes produced"; exit 20; fi
+                                 git status --short
+                                 git add -A
+                                 git commit -m "Implement {{Escape(context.Item.Key)}} {{Escape(context.Item.Title)}}"
+                                 commit="$(git rev-parse HEAD)"
+                                 echo "RDO_COMMIT=$commit"
+                                 echo "RDO_STEP=Pushing"
+                                 git push --set-upstream origin "$ROSENVALL_BRANCH"
+                                 echo "RDO_STEP=PullRequestReady"
+                                 pr_payload="$(printf '{"title":"Implement %s %s","head":"%s","base":"%s","body":"Generated by Rosenvall DevOps."}' "{{Escape(context.Item.Key)}}" "{{Escape(context.Item.Title)}}" "$ROSENVALL_BRANCH" "$ROSENVALL_DEFAULT_BRANCH")"
+                                 pr_url="$(curl -fsS -X POST "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$pr_payload" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                                 if [ -z "$pr_url" ]; then echo "RDO_FAILURE=Pull request was created or requested, but no PR URL was returned"; exit 21; fi
+                                 echo "RDO_PULL_REQUEST_URL=$pr_url"
+                   """;
+        }
+
+        private static string BuildPrompt(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context)
+        {
+            var unityGuidance = string.Equals(repository.ImplementationProfile, "unity", StringComparison.OrdinalIgnoreCase)
+                ? "This repository is a Unity project. Respect Unity folder conventions, avoid destructive scene or asset rewrites, and document any change that requires Unity Editor/MCP validation."
+                : "Follow the repository's existing stack and style. Make the smallest coherent production change.";
+            return $$"""
+                   You are implementing a Rosenvall DevOps work item directly in a Git repository.
+
+                   Work item: {{context.Item.Key}} {{context.Item.Title}}
+                   Priority: {{context.Item.Priority}}
+                   Description:
+                   {{context.Description}}
+
+                   Approved AI plan #{{aiRun.SequenceNumber}}:
+                   {{aiRun.Plan}}
+
+                   Repository: {{repository.Provider}} / {{repository.Owner}}/{{repository.Name}}
+                   Implementation profile: {{repository.ImplementationProfile}}
+
+                   {{unityGuidance}}
+
+                   Requirements:
+                   - Inspect the repository before editing.
+                   - Modify source files in the checked-out repository.
+                   - Do not build a standalone React preview unless the repository itself is a React app and the work item requires it.
+                   - Run the relevant lightweight tests or build command if discoverable.
+                   - Leave a focused diff suitable for a pull request.
+                   """;
+        }
+
+        private static string SafeName(string value)
+        {
+            var chars = value.ToLowerInvariant()
+                .Select(c => char.IsLetterOrDigit(c) ? c : '-')
+                .ToArray();
+            var normalized = new string(chars).Trim('-');
+            while (normalized.Contains("--", StringComparison.Ordinal))
+            {
+                normalized = normalized.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return string.IsNullOrWhiteSpace(normalized) ? "implementation-run" : normalized[..Math.Min(normalized.Length, 63)].Trim('-');
+        }
+
+        private static string Escape(string? value) => (value ?? "").Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
     }
 
     public sealed record PreviewCleanupResult(bool Succeeded, string Message)
@@ -955,6 +1152,54 @@ namespace Rosenvall.DevOps.Api
         public Task<PreviewCleanupResult> ApplyAsync(string manifest, CancellationToken cancellationToken) =>
             RunKubectlAsync("apply -f -", manifest, cancellationToken);
 
+        public Task<PreviewCleanupResult> GetOutputAsync(string command, CancellationToken cancellationToken) =>
+            RunKubectlOutputAsync(command, cancellationToken);
+
+        private async Task<PreviewCleanupResult> RunKubectlOutputAsync(string command, CancellationToken cancellationToken)
+        {
+            var kubectlPath = configuration["Pipelines:KubectlPath"] ?? configuration["Preview:KubectlPath"] ?? "kubectl";
+            var kubeconfigPath = ResolveKubeconfigPath(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
+            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            {
+                return PreviewCleanupResult.Failed($"Pipeline job command failed: Configured kubeconfig was not found: {kubeconfigPath}");
+            }
+
+            var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
+                ? command
+                : $"--kubeconfig \"{kubeconfigPath}\" {command}";
+
+            try
+            {
+                using var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = kubectlPath,
+                        Arguments = arguments,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+
+                process.Start();
+                var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+                await process.WaitForExitAsync(cancellationToken);
+                var output = (await outputTask).Trim();
+                var error = (await errorTask).Trim();
+                return process.ExitCode == 0
+                    ? PreviewCleanupResult.Ok(output)
+                    : PreviewCleanupResult.Failed(string.IsNullOrWhiteSpace(error) ? output : error);
+            }
+            catch (Exception ex) when (PreviewEnvironmentOrchestrator.IsRecoverableKubectlException(ex))
+            {
+                logger.LogWarning(ex, "Pipeline job command failed.");
+                return PreviewCleanupResult.Failed(ex.Message);
+            }
+        }
+
         private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Pipelines:KubectlPath"] ?? configuration["Preview:KubectlPath"] ?? "kubectl";
@@ -1115,6 +1360,132 @@ namespace Rosenvall.DevOps.Api
                     _startedAt.Remove(preview.Id);
                 }
             }
+        }
+    }
+
+    public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrchestrator jobs, IHubContext<DevOpsHub> hub, ILogger<ImplementationRunMonitor> logger) : BackgroundService
+    {
+        private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(8);
+
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await CheckImplementationRunsAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Implementation run monitor failed.");
+                }
+
+                await Task.Delay(PollInterval, stoppingToken);
+            }
+        }
+
+        private async Task CheckImplementationRunsAsync(CancellationToken cancellationToken)
+        {
+            foreach (var run in store.GetImplementationRunsAwaitingStatus())
+            {
+                var detail = store.GetWorkItemDetail(run.WorkItemId);
+                if (detail is null)
+                {
+                    continue;
+                }
+
+                var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, detail);
+                var logsResult = await jobs.GetOutputAsync($"logs -n rosenvall-devops-pipelines job/{jobName} --all-containers --tail=220", cancellationToken);
+                var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
+                var nextStatus = StatusFromLogs(logs, run.Status);
+
+                var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n rosenvall-devops-pipelines -o json", cancellationToken);
+                if (jobResult.Succeeded)
+                {
+                    using var document = JsonDocument.Parse(jobResult.Message);
+                    var succeeded = StatusInt(document.RootElement, "succeeded");
+                    var failed = StatusInt(document.RootElement, "failed");
+                    if (succeeded > 0)
+                    {
+                        nextStatus = "PullRequestReady";
+                    }
+                    else if (failed > 0)
+                    {
+                        nextStatus = "Failed";
+                    }
+                }
+                else if (run.Status is not "Queued")
+                {
+                    logs = string.IsNullOrWhiteSpace(logs) ? jobResult.Message : logs;
+                    nextStatus = "Failed";
+                }
+
+                var failureReason = nextStatus == "Failed"
+                    ? FirstMarkerValue(logs, "RDO_FAILURE=") ?? "Repository implementation job failed."
+                    : null;
+                var updated = store.UpdateImplementationRun(run.Id, nextStatus, logs, failureReason);
+                if (updated is not null)
+                {
+                    await hub.Clients.All.SendAsync("implementationRunChanged", updated, cancellationToken);
+                }
+            }
+        }
+
+        private static int StatusInt(JsonElement root, string property)
+        {
+            if (root.TryGetProperty("status", out var status) &&
+                status.TryGetProperty(property, out var value) &&
+                value.TryGetInt32(out var number))
+            {
+                return number;
+            }
+
+            return 0;
+        }
+
+        private static string StatusFromLogs(string logs, string currentStatus)
+        {
+            if (logs.Contains("RDO_STEP=PullRequestReady", StringComparison.OrdinalIgnoreCase))
+            {
+                return "PullRequestReady";
+            }
+
+            if (logs.Contains("RDO_STEP=Pushing", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Pushing";
+            }
+
+            if (logs.Contains("RDO_STEP=Testing", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Testing";
+            }
+
+            if (logs.Contains("RDO_STEP=Implementing", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Implementing";
+            }
+
+            if (logs.Contains("RDO_STEP=Cloning", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Cloning";
+            }
+
+            return currentStatus;
+        }
+
+        private static string? FirstMarkerValue(string? logs, string marker)
+        {
+            if (string.IsNullOrWhiteSpace(logs))
+            {
+                return null;
+            }
+
+            return logs
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Trim())
+                .Where(line => line.StartsWith(marker, StringComparison.Ordinal))
+                .Select(line => line[marker.Length..].Trim())
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
         }
     }
 
@@ -1787,6 +2158,67 @@ namespace Rosenvall.DevOps.Api
         }
     }
 
+    public sealed class GitHubRepositoryClient(HttpClient httpClient, IConfiguration configuration)
+    {
+        public async Task<IReadOnlyList<RepositoryDto>> GetRepositoriesAsync(CancellationToken cancellationToken)
+        {
+            var token = configuration["GitHub:Token"];
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return [];
+            }
+
+            var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user/repos?per_page=100&sort=updated");
+            request.Headers.UserAgent.ParseAdd("rosenvall-devops");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Trim());
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return [];
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return NormalizeRepositories(document.RootElement);
+        }
+
+        public static IReadOnlyList<RepositoryDto> NormalizeRepositories(JsonElement root)
+        {
+            if (root.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            var repositories = new List<RepositoryDto>();
+            foreach (var item in root.EnumerateArray())
+            {
+                var fullName = GetString(item, "full_name");
+                var name = GetString(item, "name");
+                var owner = item.TryGetProperty("owner", out var ownerElement) ? GetString(ownerElement, "login") : fullName.Split('/').FirstOrDefault() ?? "";
+                var cloneUrl = GetString(item, "clone_url");
+                var htmlUrl = GetString(item, "html_url");
+                var defaultBranch = NormalizeTextValue(GetString(item, "default_branch"), "main");
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(cloneUrl))
+                {
+                    continue;
+                }
+
+                repositories.Add(new RepositoryDto(Guid.Empty, "GitHub", name, cloneUrl, htmlUrl, defaultBranch, DateTimeOffset.UtcNow, owner, "code-repo"));
+            }
+
+            return repositories;
+        }
+
+        private static string GetString(JsonElement element, string propertyName) =>
+            element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+                ? property.GetString() ?? ""
+                : "";
+
+        private static string NormalizeTextValue(string? value, string fallback) =>
+            string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+    }
+
     public sealed class OllamaPlanProvider(HttpClient httpClient, IConfiguration configuration) : IAiPlanProvider
     {
         public string ProviderName => "ollama";
@@ -2414,6 +2846,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<DevelopmentDtoRecord> _development = [];
         private readonly List<PreviewEventDto> _previewEvents = [];
         private readonly List<PipelineRunDto> _pipelineRuns = [];
+        private readonly List<ImplementationRunDto> _implementationRuns = [];
         private readonly List<TimelineEventDto> _timelineEvents = [];
         private int _nextTaskNumber = 4821;
 
@@ -2486,7 +2919,9 @@ namespace Rosenvall.DevOps.Api
                     NormalizeText(request.RemoteUrl, "ssh://git.rosenvall.se/repository.git"),
                     string.IsNullOrWhiteSpace(request.WebUrl) ? null : request.WebUrl.Trim(),
                     NormalizeText(request.DefaultBranch, "main"),
-                    DateTimeOffset.UtcNow);
+                    DateTimeOffset.UtcNow,
+                    string.IsNullOrWhiteSpace(request.Owner) ? OwnerFromRepositoryName(request.Name) : request.Owner.Trim(),
+                    NormalizeImplementationProfile(request.ImplementationProfile));
                 _repositories.Add(repository);
                 Persist();
                 return repository;
@@ -2644,7 +3079,8 @@ namespace Rosenvall.DevOps.Api
                     item.Description,
                     _comments.Where(c => c.WorkItemId == item.Id).OrderBy(c => c.CreatedAt).ToArray(),
                     _previews.SingleOrDefault(p => p.WorkItemId == item.Id),
-                    _development.SingleOrDefault(d => d.WorkItemId == item.Id)?.Development);
+                    _development.SingleOrDefault(d => d.WorkItemId == item.Id)?.Development,
+                    _implementationRuns.Where(run => run.WorkItemId == item.Id).OrderByDescending(run => run.CreatedAt).ToArray());
             }
         }
 
@@ -2739,6 +3175,171 @@ namespace Rosenvall.DevOps.Api
                 AddTimelineEvent(run.BoardId, run.RepositoryId, run.WorkItemId, "Pipeline", run.Stage, run.Message, "system", run.Url, now);
                 Persist();
                 return run;
+            }
+        }
+
+        public ImplementationRunDto? StartImplementationRun(Guid workItemId, StartImplementationRunRequest request)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                var aiRun = _aiRuns.SingleOrDefault(run => run.Id == request.AiRunId && run.WorkItemId == workItemId);
+                if (item is null || aiRun is null)
+                {
+                    return null;
+                }
+
+                var repositoryId = RepositoryIdForBoard(item.BoardId);
+                var repository = repositoryId is null ? null : _repositories.SingleOrDefault(entry => entry.Id == repositoryId.Value);
+                if (repository is null || string.Equals(repository.ImplementationProfile, "react-preview", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
+                if (aiRun.Status != AiRunStatus.Approved)
+                {
+                    aiRun.Approve(NormalizeText(request.Actor, "system"));
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var branch = $"rdo/{item.Key.ToLowerInvariant()}-{SlugifyRepositoryName(item.Title)}";
+                var runDto = new ImplementationRunDto(
+                    Guid.NewGuid(),
+                    repository.Id,
+                    item.Id,
+                    aiRun.Id,
+                    item.Key,
+                    item.Title,
+                    "Queued",
+                    branch,
+                    null,
+                    null,
+                    null,
+                    now,
+                    now,
+                    [
+                        new PreviewTerminalLineDto(now, "system", $"Queued repository implementation for {item.Key}."),
+                        new PreviewTerminalLineDto(now, "system", $"Repository: {repository.Provider} / {repository.Owner}/{repository.Name}.")
+                    ]);
+                _implementationRuns.Add(runDto);
+                item.AiStatus = "ImplementationRunning";
+                item.Status = "AI Planning";
+                AddTimelineForItem(item, "ImplementationRunQueued", item.Key, $"Repository implementation queued for {repository.Name}.", request.Actor, repository.WebUrl);
+                Persist();
+                return runDto;
+            }
+        }
+
+        public IReadOnlyList<ImplementationRunDto> GetImplementationRuns(Guid? workItemId = null)
+        {
+            lock (_lock)
+            {
+                return _implementationRuns
+                    .Where(run => workItemId is null || run.WorkItemId == workItemId)
+                    .OrderByDescending(run => run.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public ImplementationRunDto? GetImplementationRun(Guid implementationRunId)
+        {
+            lock (_lock)
+            {
+                return _implementationRuns.SingleOrDefault(run => run.Id == implementationRunId);
+            }
+        }
+
+        public IReadOnlyList<ImplementationRunDto> GetImplementationRunsAwaitingStatus()
+        {
+            lock (_lock)
+            {
+                return _implementationRuns
+                    .Where(run => run.Status is "Queued" or "Cloning" or "Implementing" or "Testing" or "Pushing")
+                    .ToArray();
+            }
+        }
+
+        public ImplementationRunDto? UpdateImplementationRun(Guid implementationRunId, string status, string? logs = null, string? failureReason = null)
+        {
+            lock (_lock)
+            {
+                var index = _implementationRuns.FindIndex(run => run.Id == implementationRunId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _implementationRuns[index];
+                var lines = string.IsNullOrWhiteSpace(logs)
+                    ? existing.TerminalLines ?? []
+                    : logs.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", line.TrimEnd()))
+                        .TakeLast(200)
+                        .ToArray();
+                var pullRequestUrl = FirstMarkerValue(logs, "RDO_PULL_REQUEST_URL=") ?? existing.PullRequestUrl;
+                var commitSha = FirstMarkerValue(logs, "RDO_COMMIT=") ?? existing.CommitSha;
+                var updated = existing with
+                {
+                    Status = NormalizeText(status, existing.Status),
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    PullRequestUrl = string.IsNullOrWhiteSpace(pullRequestUrl) ? existing.PullRequestUrl : pullRequestUrl,
+                    CommitSha = string.IsNullOrWhiteSpace(commitSha) ? existing.CommitSha : commitSha,
+                    FailureReason = string.IsNullOrWhiteSpace(failureReason) ? existing.FailureReason : failureReason,
+                    TerminalLines = lines
+                };
+                _implementationRuns[index] = updated;
+
+                if (updated.Status is "PullRequestReady" or "Failed")
+                {
+                    var item = _items.SingleOrDefault(entry => entry.Id == updated.WorkItemId);
+                    if (item is not null)
+                    {
+                        item.AiStatus = updated.Status == "PullRequestReady" ? "Completed" : "Failed";
+                        item.Status = updated.Status == "PullRequestReady" ? "Review" : item.Status;
+                        if (!string.IsNullOrWhiteSpace(updated.PullRequestUrl))
+                        {
+                            item.PullRequestUrl = updated.PullRequestUrl;
+                        }
+                        if (updated.Status == "PullRequestReady")
+                        {
+                            var repository = _repositories.SingleOrDefault(entry => entry.Id == updated.RepositoryId);
+                            _development.RemoveAll(entry => entry.WorkItemId == item.Id);
+                            _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto(
+                                repository?.Name ?? updated.RepositoryId.ToString(),
+                                updated.Branch,
+                                updated.PullRequestUrl,
+                                "Pull request ready")));
+                        }
+                        AddTimelineForItem(item, updated.Status == "PullRequestReady" ? "PullRequest" : "ImplementationFailed", item.Key, updated.Status == "PullRequestReady" ? $"Pull request ready for {item.Key}." : updated.FailureReason ?? "Implementation failed.", "runner", updated.PullRequestUrl);
+                    }
+                }
+
+                Persist();
+                return updated;
+            }
+        }
+
+        public string? RenderImplementationRunManifest(Guid implementationRunId, IConfiguration configuration)
+        {
+            lock (_lock)
+            {
+                var run = _implementationRuns.SingleOrDefault(entry => entry.Id == implementationRunId);
+                if (run is null)
+                {
+                    return null;
+                }
+
+                var repository = _repositories.SingleOrDefault(entry => entry.Id == run.RepositoryId);
+                var aiRun = _aiRuns.SingleOrDefault(entry => entry.Id == run.AiRunId);
+                var context = GetWorkItemDetail(run.WorkItemId);
+                if (repository is null || aiRun is null || context is null)
+                {
+                    return null;
+                }
+
+                var model = configuration["Ai:Codex:Model"] ?? "gpt-5.4";
+                var secret = configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github";
+                return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, secret);
             }
         }
 
@@ -3629,7 +4230,9 @@ namespace Rosenvall.DevOps.Api
                 NormalizeText(request.RepositoryRemoteUrl, $"ssh://git.rosenvall.se/{SlugifyRepositoryName(request.RepositoryName ?? request.Name)}.git"),
                 string.IsNullOrWhiteSpace(request.RepositoryWebUrl) ? null : request.RepositoryWebUrl.Trim(),
                 NormalizeText(request.RepositoryDefaultBranch, "main"),
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow,
+                string.IsNullOrWhiteSpace(request.RepositoryOwner) ? OwnerFromRepositoryName(request.RepositoryName) : request.RepositoryOwner.Trim(),
+                NormalizeImplementationProfile(request.ImplementationProfile));
             _repositories.Add(repository);
             return repository;
         }
@@ -3649,7 +4252,9 @@ namespace Rosenvall.DevOps.Api
                 "ssh://git.rosenvall.se/local/vite-react-tailwind.git",
                 "https://git.rosenvall.se/local/vite-react-tailwind",
                 "main",
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow,
+                "local",
+                "react-preview");
             _repositories.Add(repository);
             return repository;
         }
@@ -3722,6 +4327,25 @@ namespace Rosenvall.DevOps.Api
 
         private static string NormalizeText(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+        private static string NormalizeImplementationProfile(string? value)
+        {
+            var normalized = NormalizeText(value, "react-preview").ToLowerInvariant();
+            return normalized is "code-repo" or "unity" or "react-preview" ? normalized : "react-preview";
+        }
+
+        private static string? OwnerFromRepositoryName(string? repositoryName)
+        {
+            var normalized = NormalizeText(repositoryName, "");
+            var slash = normalized.IndexOf('/', StringComparison.Ordinal);
+            return slash > 0 ? normalized[..slash] : null;
+        }
+
+        private static string? FirstMarkerValue(string? logs, string marker) =>
+            logs?.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(line => line.StartsWith(marker, StringComparison.Ordinal))
+                .Select(line => line[marker.Length..].Trim())
+                .LastOrDefault();
 
         private static void EnsureEditableHumanComment(CommentDto comment, string actor)
         {
@@ -3841,7 +4465,7 @@ namespace Rosenvall.DevOps.Api
         private void Seed()
         {
             var workspace = new WorkspaceDto(Guid.Parse("3a469909-9487-4bf5-9fd4-5bd2e4d59fb5"), "Frontend Re-architecture", "Production Environment", "us-east-1", 14, 32, 847, 64);
-            var repository = new RepositoryDto(Guid.Parse("8a5bca6d-69d1-4a58-bb4f-a629243a9337"), "GitHub", "rosenvall/auth-service", "https://github.com/rosenvall/auth-service.git", "https://github.com/rosenvall/auth-service", "main", DateTimeOffset.UtcNow.AddDays(-7));
+            var repository = new RepositoryDto(Guid.Parse("8a5bca6d-69d1-4a58-bb4f-a629243a9337"), "GitHub", "auth-service", "https://github.com/rosenvall/auth-service.git", "https://github.com/rosenvall/auth-service", "main", DateTimeOffset.UtcNow.AddDays(-7), "rosenvall", "code-repo");
             var board = new BoardRecord(Guid.Parse("6942aca6-5c36-4498-aeaa-c3a2ebe4e8db"), workspace.Id, "Sprint 42", ["Todo", "In Progress", "AI Planning", "Review", "Done"], repository.Id);
             var task = new WorkItemRecord(Guid.Parse("4f55f9a2-3f05-4ff5-bfd8-a43740bebccb"), board.Id, "TASK-4821", "Feature", "Implement OAuth2 Flow for Partner API Integrations", "Upgrade the current API authentication to support full OAuth2 authorization code flow for third-party partner integrations.", "In Progress", "High", "Sarah J.", 0);
             var aiTask = new WorkItemRecord(Guid.Parse("9d81428e-f407-4689-a0c8-20e6e48175bb"), board.Id, "FE-901", "Feature", "Generate Unit Tests for Auth Module", "Generate a focused suite for authentication edge cases.", "AI Planning", "Medium", null, 0)
@@ -3912,6 +4536,7 @@ namespace Rosenvall.DevOps.Api
             _development.AddRange(snapshot.Development.Select(development => new DevelopmentDtoRecord(development.WorkItemId, development.Development)));
             _previewEvents.AddRange(snapshot.PreviewEvents ?? []);
             _pipelineRuns.AddRange(snapshot.PipelineRuns ?? []);
+            _implementationRuns.AddRange(snapshot.ImplementationRuns ?? []);
             _timelineEvents.AddRange(snapshot.TimelineEvents ?? []);
             _nextTaskNumber = Math.Max(snapshot.NextTaskNumber, NextTaskNumberFromItems());
             return true;
@@ -3931,7 +4556,8 @@ namespace Rosenvall.DevOps.Api
                 _previewEvents.ToArray(),
                 _repositories.ToArray(),
                 _pipelineRuns.ToArray(),
-                _timelineEvents.ToArray());
+                _timelineEvents.ToArray(),
+                _implementationRuns.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
 
             using var db = _dbFactory.CreateDbContext();
@@ -3977,7 +4603,7 @@ namespace Rosenvall.DevOps.Api
     }
 
     internal sealed record DevelopmentDtoRecord(Guid WorkItemId, DevelopmentDto Development);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null);

@@ -55,6 +55,14 @@ spec:
               value: gpt-5.4
             - name: Ai__Codex__AvailableModels__1
               value: gpt-5.3-codex
+            - name: GitHub__Token
+              valueFrom:
+                secretKeyRef:
+                  name: rosenvall-devops-github
+                  key: token
+                  optional: true
+            - name: GitHub__TokenSecretName
+              value: rosenvall-devops-github
             - name: Repositories__Provider
               value: Forgejo
             - name: Repositories__Mode
