@@ -407,6 +407,32 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Custom_url_boards_are_public_clone_only_and_do_not_start_repository_pr_runs()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Public demo",
+            null,
+            "GenericGit",
+            "public-demo",
+            "https://github.com/rosenvall/public-demo.git",
+            "https://github.com/rosenvall/public-demo",
+            "main",
+            ImplementationProfile: "code-repo",
+            ProviderMode: "CustomUrl",
+            CustomRepositoryUrl: "https://github.com/rosenvall/public-demo.git"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Update demo", "Change public repo.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Update demo.")!;
+
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille"));
+
+        Assert.Null(implementationRun);
+        Assert.Empty(store.GetImplementationRuns(item.Id));
+    }
+
+    [Fact]
     public void Users_teams_and_roles_are_persisted_for_board_authorization()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -416,12 +442,31 @@ public sealed class DevOpsStoreTests
         var team = store.CreateTeam(new CreateTeamRequest("Gatebound"), user.Subject);
 
         var updated = store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(user.Id, "Admin"));
+        store.UpsertBoardTeamAccess(board.Id, team.Id, "Member");
         var reopened = fixture.Reopen();
 
         Assert.NotNull(updated);
         Assert.Contains(reopened.GetUsers(), entry => entry.Subject == "authentik|crille");
         Assert.Contains(reopened.GetTeams(), entry => entry.Name == "Gatebound" && entry.Members.Any(member => member.UserId == user.Id && member.Role == "Admin"));
         Assert.True(reopened.CanMutateBoard(board.Id, user.Subject));
+    }
+
+    [Fact]
+    public void Team_membership_does_not_mutate_unassigned_boards()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Unassigned", null, "GenericGit", "public-demo", "https://github.com/rosenvall/public-demo.git", "https://github.com/rosenvall/public-demo", "main"))!;
+        var user = store.GetOrCreateUser(new UserIdentityRequest("authentik|guest", "Guest User", "guest@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("External"), user.Subject);
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(user.Id, "Admin"));
+
+        Assert.False(store.CanMutateBoard(board.Id, user.Subject));
+
+        store.UpsertBoardTeamAccess(board.Id, team.Id, "Member");
+
+        Assert.True(store.CanMutateBoard(board.Id, user.Subject));
     }
 
     [Fact]
@@ -486,7 +531,7 @@ public sealed class DevOpsStoreTests
         var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
         var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Gatebound", repository.Id, null, null, null, null, null))!;
         var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add inventory", "Implement inventory.", "Todo", "Medium", null));
-        var first = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Plan inventory.")!;
+        var first = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Plan inventory.", "high")!;
         var firstSession = store.GetAiSession(item.Id)!;
         store.SetAiSessionProviderSession(item.Id, "11111111-1111-1111-1111-111111111111");
         var second = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Revise inventory plan.")!;
@@ -501,8 +546,11 @@ public sealed class DevOpsStoreTests
         Assert.Equal("11111111-1111-1111-1111-111111111111", secondSession.ProviderSessionId);
         Assert.Contains("codex exec resume", manifest);
         Assert.Contains("ROSENVALL_CODEX_SESSION_ID", manifest);
+        Assert.Contains("CODEX_REASONING_EFFORT", manifest);
+        Assert.Contains("model_reasoning_effort=$CODEX_REASONING_EFFORT", manifest);
         Assert.Equal(2, reopened.GetAiRuns(item.Id).Count);
         Assert.Equal(secondSession.Id, reopened.GetAiSession(item.Id)!.Id);
+        Assert.Equal("high", reopened.GetAiRuns(item.Id).First().ReasoningEffort);
         Assert.NotEqual(first.Id, second.Id);
     }
 
@@ -1214,6 +1262,7 @@ public sealed class DevOpsStoreTests
                 ["Ai:AvailableModels:2"] = " ",
                 ["Ai:AvailableModels:3"] = "llama3.1:8b",
                 ["Ai:Codex:Model"] = "gpt-5.4",
+                ["Ai:Codex:ReasoningEffort"] = "xhigh",
                 ["Ai:Codex:AvailableModels:0"] = "gpt-5.4",
                 ["Ai:Codex:AvailableModels:1"] = "gpt-5.3-codex"
             })
@@ -1225,6 +1274,11 @@ public sealed class DevOpsStoreTests
         Assert.Equal(["qwen3.5:latest", "llama3.1:8b"], settings.Ai.AvailableModels);
         Assert.Contains(settings.Ai.AvailableProviders, provider => provider.Provider == "ollama" && provider.Status == "Ready");
         Assert.Contains(settings.Ai.AvailableProviders, provider => provider.Provider == "codex" && provider.ActiveModel == "gpt-5.4");
+        var codex = settings.Ai.AvailableProviders.Single(provider => provider.Provider == "codex");
+        Assert.Contains("gpt-5.5", codex.AvailableModels);
+        Assert.Contains("gpt-5.3-codex-spark", codex.AvailableModels);
+        Assert.Equal(["low", "medium", "high", "xhigh"], codex.AvailableReasoningEfforts);
+        Assert.Equal("xhigh", codex.DefaultReasoningEffort);
     }
 
     [Fact]
@@ -1335,10 +1389,12 @@ public sealed class DevOpsStoreTests
         public string ProviderName => providerName;
 
         public string? LastModel { get; private set; }
+        public string? LastReasoningEffort { get; private set; }
 
-        public Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken)
+        public Task<string> GeneratePlanAsync(string model, string? reasoningEffort, WorkItemDetailDto context, CancellationToken cancellationToken)
         {
             LastModel = model;
+            LastReasoningEffort = reasoningEffort;
             return Task.FromResult(plan);
         }
     }

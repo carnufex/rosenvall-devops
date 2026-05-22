@@ -65,7 +65,7 @@ public enum AiRunStatus
 
 public sealed class AiRun
 {
-    private AiRun(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy, int sequenceNumber, DateTimeOffset createdAt)
+    private AiRun(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy, int sequenceNumber, DateTimeOffset createdAt, string? reasoningEffort)
     {
         Id = id;
         WorkItemId = workItemId;
@@ -76,6 +76,7 @@ public sealed class AiRun
         ApprovedBy = approvedBy;
         SequenceNumber = sequenceNumber;
         CreatedAt = createdAt;
+        ReasoningEffort = string.IsNullOrWhiteSpace(reasoningEffort) ? null : reasoningEffort.Trim();
     }
 
     public Guid Id { get; }
@@ -87,8 +88,9 @@ public sealed class AiRun
     public string? ApprovedBy { get; private set; }
     public int SequenceNumber { get; }
     public DateTimeOffset CreatedAt { get; }
+    public string? ReasoningEffort { get; }
 
-    public static AiRun Start(Guid workItemId, string provider, string model, int sequenceNumber = 1, DateTimeOffset? createdAt = null)
+    public static AiRun Start(Guid workItemId, string provider, string model, int sequenceNumber = 1, DateTimeOffset? createdAt = null, string? reasoningEffort = null)
     {
         if (workItemId == Guid.Empty)
         {
@@ -110,10 +112,10 @@ public sealed class AiRun
             throw new ArgumentOutOfRangeException(nameof(sequenceNumber), "Sequence number must be positive.");
         }
 
-        return new AiRun(Guid.NewGuid(), workItemId, provider.Trim(), model.Trim(), AiRunStatus.Planning, null, null, sequenceNumber, createdAt ?? DateTimeOffset.UtcNow);
+        return new AiRun(Guid.NewGuid(), workItemId, provider.Trim(), model.Trim(), AiRunStatus.Planning, null, null, sequenceNumber, createdAt ?? DateTimeOffset.UtcNow, reasoningEffort);
     }
 
-    public static AiRun Restore(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy, int sequenceNumber = 1, DateTimeOffset? createdAt = null)
+    public static AiRun Restore(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy, int sequenceNumber = 1, DateTimeOffset? createdAt = null, string? reasoningEffort = null)
     {
         if (id == Guid.Empty)
         {
@@ -125,7 +127,7 @@ public sealed class AiRun
             throw new ArgumentException("Work item id is required.", nameof(workItemId));
         }
 
-        return new AiRun(id, workItemId, provider, model, status, plan, approvedBy, Math.Max(1, sequenceNumber), createdAt ?? DateTimeOffset.UtcNow);
+        return new AiRun(id, workItemId, provider, model, status, plan, approvedBy, Math.Max(1, sequenceNumber), createdAt ?? DateTimeOffset.UtcNow, reasoningEffort);
     }
 
     public void PostPlan(string plan)

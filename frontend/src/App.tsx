@@ -44,7 +44,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-type View = 'dashboard' | 'board' | 'timeline' | 'settings';
+type View = 'dashboard' | 'board' | 'timeline' | 'teams' | 'settings';
 
 type Workspace = {
   id: string;
@@ -64,6 +64,7 @@ type Board = {
   columns: BoardColumn[];
   repository?: RepositoryDto | null;
   repositories?: BoardRepositoryDto[] | null;
+  teamAccess?: BoardTeamAccessDto[] | null;
 };
 
 type RepositoryDto = {
@@ -84,6 +85,13 @@ type BoardRepositoryDto = {
   isPrimary: boolean;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
   repository: RepositoryDto;
+};
+
+type BoardTeamAccessDto = {
+  boardId: string;
+  teamId: string;
+  teamName: string;
+  role: string;
 };
 
 type BoardColumn = {
@@ -179,6 +187,7 @@ type AiSessionDto = {
   repositoryId?: string | null;
   lastRunId?: string | null;
   contextSummary?: string | null;
+  reasoningEffort?: string | null;
 };
 
 type UserDto = {
@@ -192,6 +201,9 @@ type UserDto = {
 type TeamMemberDto = {
   userId: string;
   role: string;
+  displayName?: string | null;
+  email?: string | null;
+  status?: string | null;
 };
 
 type TeamDto = {
@@ -338,6 +350,8 @@ type AiProviderSettingsDto = {
   endpoint: string;
   activeModel: string;
   availableModels: string[];
+  availableReasoningEfforts?: string[] | null;
+  defaultReasoningEffort?: string | null;
 };
 
 type AiRun = {
@@ -350,6 +364,7 @@ type AiRun = {
   approvedBy?: string | null;
   sequenceNumber: number;
   createdAt: string;
+  reasoningEffort?: string | null;
 };
 
 type WorkItemForm = {
@@ -376,12 +391,22 @@ type AssigneeDto = {
 
 type CreateBoardForm = {
   name: string;
-  repositoryProvider: string;
+  repositoryProvider: 'GitHub' | 'GenericGit' | string;
+  providerMode: 'GitHub' | 'CustomUrl';
+  repositoryId?: string | null;
   repositoryOwner: string;
   repositoryRemoteUrl: string;
   repositoryWebUrl: string;
   repositoryDefaultBranch: string;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity';
+  teamIds: string[];
+};
+
+type GitHubRepositoryPickerDto = {
+  status: 'Loading' | 'Loaded' | 'Empty' | 'Error' | string;
+  message?: string | null;
+  repositories: RepositoryDto[];
+  activeInstallationId?: number | null;
 };
 
 type ToastMessage = {
@@ -402,16 +427,20 @@ const emptyForm: WorkItemForm = {
 const emptyBoardForm: CreateBoardForm = {
   name: '',
   repositoryProvider: 'GitHub',
+  providerMode: 'GitHub',
+  repositoryId: null,
   repositoryOwner: '',
   repositoryRemoteUrl: '',
   repositoryWebUrl: '',
   repositoryDefaultBranch: 'main',
-  implementationProfile: 'code-repo'
+  implementationProfile: 'code-repo',
+  teamIds: []
 };
 
 const selectedBoardStorageKey = 'rosenvall-devops:selected-board';
 const selectedAiProviderStorageKey = 'rosenvall-devops:selected-ai-provider';
 const selectedAiModelStorageKey = 'rosenvall-devops:selected-ai-model';
+const selectedAiReasoningStorageKey = 'rosenvall-devops:selected-ai-reasoning';
 
 const api = {
   async get<T>(path: string): Promise<T> {
@@ -486,15 +515,22 @@ function App() {
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
   const [selectedAiProvider, setSelectedAiProviderState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiProviderStorageKey));
   const [selectedAiModel, setSelectedAiModelState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiModelStorageKey));
+  const [selectedAiReasoning, setSelectedAiReasoningState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiReasoningStorageKey));
   const setSelectedAiProvider = React.useCallback((provider: string) => {
     setSelectedAiProviderState(provider);
     setSelectedAiModelState(null);
+    setSelectedAiReasoningState(null);
     window.localStorage.setItem(selectedAiProviderStorageKey, provider);
     window.localStorage.removeItem(selectedAiModelStorageKey);
+    window.localStorage.removeItem(selectedAiReasoningStorageKey);
   }, []);
   const setSelectedAiModel = React.useCallback((model: string) => {
     setSelectedAiModelState(model);
     window.localStorage.setItem(selectedAiModelStorageKey, model);
+  }, []);
+  const setSelectedAiReasoning = React.useCallback((reasoning: string) => {
+    setSelectedAiReasoningState(reasoning);
+    window.localStorage.setItem(selectedAiReasoningStorageKey, reasoning);
   }, []);
   const [selectedBoardId, setSelectedBoardIdState] = React.useState<string | null>(() => window.localStorage.getItem(selectedBoardStorageKey));
   const selectedBoardIdRef = React.useRef<string | null>(selectedBoardId);
@@ -645,14 +681,18 @@ function App() {
         if (shell.status !== 'ready') return;
         const created = await api.post<Board>(`/api/workspaces/${shell.workspace.id}/boards`, {
           name: form.name,
-          repositoryId: null,
+          repositoryId: form.repositoryId ?? null,
           repositoryProvider: form.repositoryProvider,
           repositoryName: repositoryNameFromRemote(form.repositoryRemoteUrl, form.name),
           repositoryRemoteUrl: form.repositoryRemoteUrl,
           repositoryWebUrl: form.repositoryWebUrl || webUrlFromRemote(form.repositoryRemoteUrl),
           repositoryDefaultBranch: form.repositoryDefaultBranch || 'main',
           repositoryOwner: form.repositoryOwner || repositoryOwnerFromRemote(form.repositoryRemoteUrl),
-          implementationProfile: form.implementationProfile
+          implementationProfile: form.implementationProfile,
+          providerMode: form.providerMode === 'CustomUrl' ? 'CustomUrl' : 'GitHub',
+          customRepositoryUrl: form.providerMode === 'CustomUrl' ? form.repositoryRemoteUrl : null,
+          gitHubRepositoryId: form.providerMode === 'GitHub' ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : null,
+          teamIds: form.teamIds
         });
         setCreateBoardOpen(false);
         setSelectedBoardId(created.id);
@@ -707,7 +747,8 @@ function App() {
         const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: provider.provider,
-          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel)
+          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
+          reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
         });
         await refreshAfterChange(id);
       });
@@ -715,7 +756,7 @@ function App() {
     approvePlan: async (runId, workItemId) => {
       setBusyAction('Starting preview implementation');
       try {
-        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor });
+        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
         await refreshAfterChange(workItemId);
         addToast('info', 'Preview implementation started. Follow the terminal log in the preview panel.');
       } catch (approveError) {
@@ -728,7 +769,7 @@ function App() {
     startImplementationRun: async (workItemId, aiRunId, repositoryId) => {
       setBusyAction('Starting repository implementation');
       try {
-        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, actor, repositoryId });
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, actor, repositoryId, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
         await refreshAfterChange(workItemId);
         addToast('info', 'Repository implementation started. Follow the implementation run terminal.');
       } catch (implementationError) {
@@ -804,7 +845,8 @@ function App() {
         await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: provider.provider,
-          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel)
+          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
+          reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
         });
         await refreshAfterChange(id);
       });
@@ -819,6 +861,30 @@ function App() {
       await runAction('Deleting comment', async () => {
         await api.delete(`/api/comments/${commentId}?actor=${encodeURIComponent(actor)}`);
         await refreshAfterChange(workItemId);
+      });
+    },
+    createTeam: async (name) => {
+      await runAction('Creating team', async () => {
+        await api.post<TeamDto>('/api/teams', { name });
+        await refreshAfterChange();
+      });
+    },
+    inviteTeamMember: async (teamId, email, role) => {
+      await runAction('Adding team member', async () => {
+        await api.post<TeamDto>(`/api/teams/${teamId}/members`, { email, role });
+        await refreshAfterChange();
+      });
+    },
+    assignTeamToBoard: async (boardId, teamId, role) => {
+      await runAction('Assigning team to board', async () => {
+        await api.put<BoardTeamAccessDto>(`/api/boards/${boardId}/teams/${teamId}`, { role });
+        await refreshAfterChange();
+      });
+    },
+    removeTeamFromBoard: async (boardId, teamId) => {
+      await runAction('Removing team from board', async () => {
+        await api.delete(`/api/boards/${boardId}/teams/${teamId}`);
+        await refreshAfterChange();
       });
     },
     moveCard: async (id, status, sortOrder) => {
@@ -856,7 +922,8 @@ function App() {
             {view === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
             {view === 'board' && <BoardView board={board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} actions={actions} />}
             {view === 'timeline' && <TimelineView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} timeline={shell.timeline} actions={actions} />}
-            {view === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onBack={() => setView('board')} />}
+            {view === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
+            {view === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -887,6 +954,8 @@ function App() {
       )}
       {createBoardOpen && shell.status === 'ready' && (
         <CreateBoardModal
+          teams={shell.teams}
+          actions={actions}
           onCreate={actions.createBoard}
           onClose={() => setCreateBoardOpen(false)}
         />
@@ -1018,13 +1087,17 @@ type BoardActions = {
   addCommentAndAskAi(id: string, body: string): Promise<void>;
   updateComment(commentId: string, workItemId: string, body: string): Promise<void>;
   deleteComment(commentId: string, workItemId: string): Promise<void>;
+  createTeam(name: string): Promise<void>;
+  inviteTeamMember(teamId: string, email: string, role: string): Promise<void>;
+  assignTeamToBoard(boardId: string, teamId: string, role: string): Promise<void>;
+  removeTeamFromBoard(boardId: string, teamId: string): Promise<void>;
   moveCard(id: string, status: string, sortOrder: number): Promise<void>;
 };
 
 function useStateFromHash(): [View, (view: View) => void] {
   const readHash = () => {
     const next = (window.location.hash.replace('#', '') as View) || 'board';
-    return ['dashboard', 'board', 'timeline', 'settings'].includes(next) ? next : 'board';
+    return ['dashboard', 'board', 'timeline', 'teams', 'settings'].includes(next) ? next : 'board';
   };
   const [view, setViewState] = React.useState<View>(readHash);
   React.useEffect(() => {
@@ -1054,6 +1127,7 @@ function Sidebar({ view, onChange, onNewCard }: { view: View; onChange: (view: V
         <NavButton active={view === 'board'} icon={<PanelLeft size={20} />} label="Board" onClick={() => onChange('board')} />
         <NavButton active={view === 'timeline'} icon={<History size={20} />} label="Timeline" onClick={() => onChange('timeline')} />
         <NavButton active={view === 'dashboard'} icon={<LayoutDashboard size={20} />} label="Dashboard" onClick={() => onChange('dashboard')} />
+        <NavButton active={view === 'teams'} icon={<Users size={20} />} label="Teams" onClick={() => onChange('teams')} />
         <NavButton active={view === 'settings'} icon={<Settings size={20} />} label="Settings" onClick={() => onChange('settings')} />
       </nav>
     </aside>
@@ -1470,6 +1544,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const targetRepository = boardRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? boardRepositories.find((entry) => entry.isPrimary) ?? boardRepositories[0];
   const repositoryProfile = targetRepository?.implementationProfile ?? board?.repository?.implementationProfile ?? 'react-preview';
   const isRepositoryImplementation = repositoryProfile !== 'react-preview';
+  const repositoryCanRunImplementation = !isRepositoryImplementation || targetRepository?.repository.provider === 'GitHub';
   const pendingRun = (detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status));
   const hasReadyPullRequest = (detail.implementationRuns ?? []).some((run) => run.status === 'PullRequestReady' && !!run.pullRequestUrl);
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
@@ -1477,7 +1552,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const previewHasGeneratedSource = (detail.preview?.sourceFiles?.length ?? 0) > 0;
   const canImplementSelected = !!selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && (
     isRepositoryImplementation
-      ? !pendingRun && !hasReadyPullRequest
+      ? repositoryCanRunImplementation && !pendingRun && !hasReadyPullRequest
       : !previewBusy && (!previewRunning || !previewHasGeneratedSource)
   );
   const implementLabel = isRepositoryImplementation
@@ -1525,7 +1600,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
           {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementLabel}</button>}
           {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
         </div>
-        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
+        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? repositoryCanRunImplementation ? 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Custom URL boards are public clone-only in v1. Connect the repository through the GitHub App to run implementation jobs and create pull requests.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
         {aiRuns.some((run) => run.status === 'Discarded') && <p>Discarded plans are kept in history but hidden from approval.</p>}
       </div>
     </section>
@@ -1804,37 +1879,46 @@ function ToastStack({ busyAction, toasts, onDismiss }: {
   );
 }
 
-function CreateBoardModal({ onCreate, onClose }: {
+function CreateBoardModal({ teams, actions, onCreate, onClose }: {
+  teams: TeamDto[];
+  actions: BoardActions;
   onCreate: (form: CreateBoardForm) => Promise<void>;
   onClose: () => void;
 }) {
-  const [form, setForm] = React.useState<CreateBoardForm>(emptyBoardForm);
+  const defaultTeamIds = React.useMemo(() => teams.filter((team) => team.members.some((member) => ['Owner', 'Admin', 'Member'].includes(member.role))).slice(0, 1).map((team) => team.id), [teams]);
+  const [form, setForm] = React.useState<CreateBoardForm>({ ...emptyBoardForm, teamIds: defaultTeamIds });
   const [githubRepos, setGithubRepos] = React.useState<RepositoryDto[]>([]);
-  const [githubStatus, setGithubStatus] = React.useState<'idle' | 'loading' | 'error'>('idle');
+  const [githubStatus, setGithubStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'empty' | 'error'>('idle');
   const [githubError, setGithubError] = React.useState<string | null>(null);
   const normalizedName = form.name.trim();
-  const usesGitHub = form.repositoryProvider === 'GitHub';
+  const usesGitHub = form.providerMode === 'GitHub';
+  const canCreate = normalizedName.length > 0 && (usesGitHub ? form.repositoryRemoteUrl.trim().length > 0 : isPublicGitUrl(form.repositoryRemoteUrl));
+
+  const loadGithubRepositories = React.useCallback(async () => {
+    setGithubStatus('loading');
+    setGithubError(null);
+    try {
+      const result = await api.get<GitHubRepositoryPickerDto>('/api/integrations/github/repository-picker');
+      setGithubRepos(result.repositories ?? []);
+      const status = result.status.toLowerCase();
+      setGithubStatus(status === 'loaded' ? 'loaded' : status === 'empty' ? 'empty' : status === 'error' ? 'error' : 'loaded');
+      setGithubError(result.message ?? (result.repositories.length === 0 ? 'No repositories were returned by GitHub.' : null));
+    } catch (error) {
+      setGithubStatus('error');
+      setGithubError(error instanceof Error ? error.message : 'Could not load GitHub repositories');
+    }
+  }, []);
 
   React.useEffect(() => {
-    if (!usesGitHub || githubStatus !== 'idle' || githubRepos.length > 0) return;
+    if (!usesGitHub || githubStatus !== 'idle') return;
     let cancelled = false;
-    setGithubStatus('loading');
-    api.get<RepositoryDto[]>('/api/integrations/github/repositories')
-      .then((repositories) => {
-        if (cancelled) return;
-        setGithubRepos(repositories);
-        setGithubError(repositories.length === 0 ? 'No GitHub repositories are available yet. Sync or install the GitHub App from Settings and grant repository access.' : null);
-        setGithubStatus('idle');
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setGithubError(error instanceof Error ? error.message : 'Could not load GitHub repositories');
-        setGithubStatus('error');
-      });
+    void loadGithubRepositories().finally(() => {
+      if (cancelled) return;
+    });
     return () => {
       cancelled = true;
     };
-  }, [githubRepos.length, githubStatus, usesGitHub]);
+  }, [githubStatus, loadGithubRepositories, usesGitHub]);
 
   const selectGitHubRepository = (repoKey: string) => {
     const repository = githubRepos.find((entry) => `${entry.owner ?? ''}/${entry.name}` === repoKey);
@@ -1842,6 +1926,8 @@ function CreateBoardModal({ onCreate, onClose }: {
     setForm({
       ...form,
       name: form.name || repository.name,
+      repositoryId: repository.id && repository.id !== '00000000-0000-0000-0000-000000000000' ? repository.id : null,
+      providerMode: 'GitHub',
       repositoryProvider: repository.provider,
       repositoryOwner: repository.owner ?? '',
       repositoryRemoteUrl: repository.remoteUrl,
@@ -1855,12 +1941,25 @@ function CreateBoardModal({ onCreate, onClose }: {
     <ModalFrame title="Add board" onClose={onClose}>
       <form className="create-form" onSubmit={(event) => {
         event.preventDefault();
-        if (!normalizedName || !form.repositoryRemoteUrl.trim()) return;
+        if (!canCreate) return;
         void onCreate({ ...form, name: normalizedName });
       }}>
         <label>Board name<input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Gatewaybound" /></label>
         <div className="form-grid two">
-          <label>Provider<select value={form.repositoryProvider} onChange={(event) => setForm({ ...form, repositoryProvider: event.target.value, implementationProfile: event.target.value === 'GitHub' ? 'code-repo' : form.implementationProfile })}><option>GitHub</option><option>Forgejo</option><option>AzureDevOps</option><option>GenericGit</option></select></label>
+          <label>Provider<select value={form.providerMode} onChange={(event) => {
+            const providerMode = event.target.value as CreateBoardForm['providerMode'];
+            setForm({
+              ...form,
+              providerMode,
+              repositoryProvider: providerMode === 'GitHub' ? 'GitHub' : 'GenericGit',
+              repositoryId: null,
+              repositoryRemoteUrl: '',
+              repositoryWebUrl: '',
+              repositoryOwner: '',
+              implementationProfile: providerMode === 'GitHub' ? 'code-repo' : form.implementationProfile
+            });
+            if (providerMode === 'GitHub') setGithubStatus('idle');
+          }}><option value="GitHub">GitHub App</option><option value="CustomUrl">Custom URL</option></select></label>
           <label>Implementation profile<select value={form.implementationProfile} onChange={(event) => setForm({ ...form, implementationProfile: event.target.value as CreateBoardForm['implementationProfile'] })}><option value="code-repo">Code repo</option><option value="unity">Unity</option><option value="react-preview">React preview</option></select></label>
           {usesGitHub && (
             <label>GitHub repository<select value={form.repositoryOwner && form.repositoryRemoteUrl ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : ''} onChange={(event) => selectGitHubRepository(event.target.value)}>
@@ -1869,12 +1968,36 @@ function CreateBoardModal({ onCreate, onClose }: {
             </select></label>
           )}
           <label>Default branch<input value={form.repositoryDefaultBranch} onChange={(event) => setForm({ ...form, repositoryDefaultBranch: event.target.value })} /></label>
-          <label>Repository URL<input value={form.repositoryRemoteUrl} onChange={(event) => setForm({ ...form, repositoryRemoteUrl: event.target.value, repositoryOwner: repositoryOwnerFromRemote(event.target.value) ?? form.repositoryOwner, repositoryWebUrl: webUrlFromRemote(event.target.value) ?? form.repositoryWebUrl })} placeholder="https://github.com/owner/repo.git" /></label>
-          <label>Web URL<input value={form.repositoryWebUrl} onChange={(event) => setForm({ ...form, repositoryWebUrl: event.target.value })} placeholder="https://github.com/owner/repo" /></label>
+          {!usesGitHub && (
+            <>
+              <label>Repository URL<input value={form.repositoryRemoteUrl} onChange={(event) => setForm({ ...form, repositoryRemoteUrl: event.target.value, repositoryOwner: repositoryOwnerFromRemote(event.target.value) ?? form.repositoryOwner, repositoryWebUrl: webUrlFromRemote(event.target.value) ?? form.repositoryWebUrl })} placeholder="https://github.com/owner/repo.git" /></label>
+              <label>Web URL<input value={form.repositoryWebUrl} onChange={(event) => setForm({ ...form, repositoryWebUrl: event.target.value })} placeholder="https://github.com/owner/repo" /></label>
+            </>
+          )}
         </div>
-        {githubError && <p className="provider-status">GitHub repositories: {githubError}</p>}
+        <fieldset className="team-picker">
+          <legend>Teams</legend>
+          {teams.length === 0
+            ? <p className="provider-status">No teams are available yet. You can create teams from the Teams view.</p>
+            : teams.map((team) => (
+              <label className="checkbox-row" key={team.id}>
+                <input type="checkbox" checked={form.teamIds.includes(team.id)} onChange={(event) => setForm({ ...form, teamIds: event.target.checked ? [...form.teamIds, team.id] : form.teamIds.filter((id) => id !== team.id) })} />
+                <span>{team.name}</span>
+              </label>
+            ))}
+        </fieldset>
+        {usesGitHub && githubError && (
+          <div className="provider-status with-actions">
+            <span>GitHub repositories: {githubError}</span>
+            <div className="button-row">
+              <button type="button" className="secondary compact" onClick={() => void actions.syncGitHubIntegration()}><RefreshCw size={14} />Sync</button>
+              <button type="button" className="secondary compact" onClick={() => void loadGithubRepositories()}><RefreshCw size={14} />Retry</button>
+            </div>
+          </div>
+        )}
+        {!usesGitHub && form.repositoryRemoteUrl && !isPublicGitUrl(form.repositoryRemoteUrl) && <p className="provider-status">Custom URL supports public HTTP(S) clone URLs only in v1.</p>}
         <div className="modal-actions">
-          <button className="primary-action" disabled={!normalizedName || !form.repositoryRemoteUrl.trim()}><Plus size={16} />Create board</button>
+          <button className="primary-action" disabled={!canCreate}><Plus size={16} />Create board</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -1882,29 +2005,159 @@ function CreateBoardModal({ onCreate, onClose }: {
   );
 }
 
-function SettingsView({ settings, board, me, teams, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, actions, onProviderChange, onModelChange, onBack }: {
+function TeamsView({ teams, boards, me, actions }: {
+  teams: TeamDto[];
+  boards: Board[];
+  me: UserDto;
+  actions: BoardActions;
+}) {
+  const [selectedTeamId, setSelectedTeamId] = React.useState(() => teams[0]?.id ?? '');
+  const [teamName, setTeamName] = React.useState('');
+  const [inviteEmail, setInviteEmail] = React.useState('');
+  const [inviteRole, setInviteRole] = React.useState('Member');
+  const [boardId, setBoardId] = React.useState('');
+  const [boardRole, setBoardRole] = React.useState('Member');
+  const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
+  const assignedBoards = selectedTeam
+    ? boards.filter((board) => board.teamAccess?.some((access) => access.teamId === selectedTeam.id))
+    : [];
+  const assignableBoards = selectedTeam
+    ? boards.filter((board) => !board.teamAccess?.some((access) => access.teamId === selectedTeam.id))
+    : boards;
+
+  React.useEffect(() => {
+    if (!selectedTeamId && teams[0]) setSelectedTeamId(teams[0].id);
+  }, [selectedTeamId, teams]);
+
+  async function createTeam(event: React.FormEvent) {
+    event.preventDefault();
+    const name = teamName.trim();
+    if (!name) return;
+    await actions.createTeam(name);
+    setTeamName('');
+  }
+
+  async function inviteMember(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selectedTeam || !inviteEmail.trim()) return;
+    await actions.inviteTeamMember(selectedTeam.id, inviteEmail.trim(), inviteRole);
+    setInviteEmail('');
+  }
+
+  async function assignBoard(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selectedTeam || !boardId) return;
+    await actions.assignTeamToBoard(boardId, selectedTeam.id, boardRole);
+    setBoardId('');
+  }
+
+  return (
+    <section className="page teams-page">
+      <div className="page-heading">
+        <div>
+          <h1>Teams</h1>
+          <p>Teams own access to boards and repositories.</p>
+        </div>
+      </div>
+      <div className="teams-layout">
+        <aside className="panel team-list-panel">
+          <form className="compact-form" onSubmit={(event) => void createTeam(event)}>
+            <label>New team<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="Gatebound" /></label>
+            <button className="primary-action" disabled={!teamName.trim()}><Plus size={16} />Create team</button>
+          </form>
+          <div className="settings-list">
+            {teams.map((team) => (
+              <button className={selectedTeam?.id === team.id ? 'team-select active' : 'team-select'} key={team.id} onClick={() => setSelectedTeamId(team.id)}>
+                <strong>{team.name}</strong>
+                <span>{team.members.length} members</span>
+              </button>
+            ))}
+            {teams.length === 0 && <p className="provider-status">No teams yet.</p>}
+          </div>
+        </aside>
+        <section className="panel form-panel">
+          {selectedTeam ? (
+            <>
+              <div className="settings-row">
+                <div>
+                  <strong>{selectedTeam.name}</strong>
+                  <p>{selectedTeam.members.length} members - created {relativeTime(selectedTeam.createdAt)}</p>
+                </div>
+                <span className="state-good">{selectedTeam.members.some((member) => member.userId === me.id) ? 'Your team' : 'Team'}</span>
+              </div>
+              <form className="team-action-form" onSubmit={(event) => void inviteMember(event)}>
+                <label>Email<input value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="person@example.com" /></label>
+                <label>Role<select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}><option>Member</option><option>Admin</option><option>Viewer</option><option>Owner</option></select></label>
+                <button className="secondary" disabled={!inviteEmail.trim()}><Users size={16} />Add member</button>
+              </form>
+              <div className="settings-list">
+                {selectedTeam.members.map((member) => (
+                  <div className="member-row detailed" key={`${selectedTeam.id}-${member.userId}`}>
+                    <span>{member.displayName || member.email || displayUserName(member.userId, me)}<span className="member-meta">{member.email || member.status}</span></span>
+                    <strong>{member.role}</strong>
+                  </div>
+                ))}
+              </div>
+              <form className="team-action-form" onSubmit={(event) => void assignBoard(event)}>
+                <label>Board<select value={boardId} onChange={(event) => setBoardId(event.target.value)}>
+                  <option value="">Select board...</option>
+                  {assignableBoards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}
+                </select></label>
+                <label>Board role<select value={boardRole} onChange={(event) => setBoardRole(event.target.value)}><option>Member</option><option>Admin</option><option>Viewer</option><option>Owner</option></select></label>
+                <button className="secondary" disabled={!boardId}><PanelLeft size={16} />Assign board</button>
+              </form>
+              <div className="settings-list">
+                {assignedBoards.length === 0
+                  ? <p className="provider-status">No boards are assigned to this team.</p>
+                  : assignedBoards.map((board) => {
+                    const access = board.teamAccess?.find((entry) => entry.teamId === selectedTeam.id);
+                    return (
+                      <div className="settings-row" key={board.id}>
+                        <div>
+                          <strong>{board.name}</strong>
+                          <p>{boardRepositorySummary(board)}</p>
+                        </div>
+                        <div className="button-row">
+                          <span className="state-muted">{access?.role ?? 'Member'}</span>
+                          <button className="danger-button compact" type="button" onClick={() => void actions.removeTeamFromBoard(board.id, selectedTeam.id)}><Trash2 size={14} />Remove</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </>
+          ) : <EmptyState>Select or create a team.</EmptyState>}
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function SettingsView({ settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onBack }: {
   settings: SettingsDto;
   board: Board;
   me: UserDto;
-  teams: TeamDto[];
   repositories: RepositoryDto[];
   boardSecrets: BoardSecretDto[];
   githubIntegrations: GitHubIntegrationDto[];
   selectedProvider: string | null;
   selectedModel: string | null;
+  selectedReasoning: string | null;
   actions: BoardActions;
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
+  onReasoningChange: (reasoning: string) => void;
   onBack: () => void;
 }) {
   const activeProvider = resolveActiveAiProvider(settings, selectedProvider);
   const modelOptions = activeProvider.availableModels.length > 0 ? activeProvider.availableModels : [activeProvider.activeModel];
   const activeModel = resolveActiveAiModel(settings, selectedProvider, selectedModel);
+  const reasoningOptions = activeProvider.availableReasoningEfforts?.length ? activeProvider.availableReasoningEfforts : [];
+  const activeReasoning = resolveActiveAiReasoning(settings, selectedProvider, selectedReasoning);
   const [secretKey, setSecretKey] = React.useState('');
   const [secretValue, setSecretValue] = React.useState('');
   const [secretRepositoryId, setSecretRepositoryId] = React.useState('');
   const boardRepositories = board.repositories?.length ? board.repositories : board.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
-  const visibleTeams = teams.length > 0 ? teams : [];
   const canSaveSecret = secretKey.trim().length > 0 && secretValue.length > 0;
   const latestGitHubIntegration = githubIntegrations[0];
   const gitHubConnected = settings.gitHub.connected || githubIntegrations.length > 0;
@@ -1925,7 +2178,7 @@ function SettingsView({ settings, board, me, teams, repositories, boardSecrets, 
       <div className="page-heading">
         <div>
           <h1>Settings</h1>
-          <p>Team, integration, AI and board-level runtime configuration.</p>
+          <p>Integration, AI and board-level runtime configuration.</p>
         </div>
         <button className="secondary" onClick={onBack}>Back to board</button>
       </div>
@@ -1969,35 +2222,15 @@ function SettingsView({ settings, board, me, teams, repositories, boardSecrets, 
         <section className="panel form-panel ai-settings">
           <label>Provider<select value={activeProvider.provider} onChange={(event) => onProviderChange(event.target.value)}>{settings.ai.availableProviders.map((provider) => <option value={provider.provider} key={provider.provider} disabled={provider.status === 'Unavailable'}>{provider.displayName} - {provider.status}</option>)}</select></label>
           <label>Planning model<select value={activeModel} onChange={(event) => onModelChange(event.target.value)}>{modelOptions.map((model) => <option value={model} key={model}>{model}</option>)}</select></label>
+          {reasoningOptions.length > 0 && <label>Reasoning effort<select value={activeReasoning ?? ''} onChange={(event) => onReasoningChange(event.target.value)}>{reasoningOptions.map((effort) => <option value={effort} key={effort}>{effort}</option>)}</select></label>}
           <label>Adapter endpoint<input value={activeProvider.endpoint} readOnly /></label>
           <p className={activeProvider.status === 'Ready' ? 'provider-status ready' : 'provider-status'}>{activeProvider.displayName} status: {activeProvider.status === 'LoginRequired' ? 'Login required on server' : activeProvider.status}.</p>
           <label>Auto review pull requests<input value={settings.ai.autoReviewPullRequests ? 'Enabled' : 'Disabled'} readOnly /></label>
         </section>
-        <SectionTitle icon={<Users size={22} />} title="Team and access" />
+        <SectionTitle icon={<Users size={22} />} title="Current user" />
         <section className="panel form-panel">
           <div className="connected"><Users size={28} /><div><strong>{me.displayName}</strong><p>{me.email || me.subject}</p></div><span>Signed in</span></div>
-          {visibleTeams.length === 0
-            ? <p className="provider-status">No teams are available yet.</p>
-            : (
-              <div className="settings-list">
-                {visibleTeams.map((team) => (
-                  <div className="team-card" key={team.id}>
-                    <div className="settings-row">
-                      <div>
-                        <strong>{team.name}</strong>
-                        <p>{team.members.length} members - created {relativeTime(team.createdAt)}</p>
-                      </div>
-                    </div>
-                    {team.members.map((member) => (
-                      <div className="member-row" key={`${team.id}-${member.userId}`}>
-                        <span>{displayUserName(member.userId, me)}</span>
-                        <strong>{member.role}</strong>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            )}
+          <p className="provider-status">Team membership and board assignment now live in the Teams view.</p>
         </section>
         <SectionTitle icon={<Save size={22} />} title="Board secrets" />
         <section className="panel form-panel">
@@ -2311,6 +2544,21 @@ function resolveActiveAiModel(settings: SettingsDto, selectedProvider: string | 
   const provider = resolveActiveAiProvider(settings, selectedProvider);
   const options = provider.availableModels.length > 0 ? provider.availableModels : [provider.activeModel];
   return selectedModel && options.includes(selectedModel) ? selectedModel : provider.activeModel;
+}
+
+function resolveActiveAiReasoning(settings: SettingsDto | null, selectedProvider: string | null, selectedReasoning: string | null) {
+  if (!settings) return selectedReasoning ?? 'high';
+  const provider = resolveActiveAiProvider(settings, selectedProvider);
+  const options = provider.availableReasoningEfforts ?? [];
+  if (options.length === 0) return null;
+  return selectedReasoning && options.includes(selectedReasoning)
+    ? selectedReasoning
+    : provider.defaultReasoningEffort ?? options[0];
+}
+
+function isPublicGitUrl(value: string) {
+  const normalized = value.trim();
+  return /^https:\/\/.+/i.test(normalized) || /^http:\/\/.+/i.test(normalized);
 }
 
 function planTitle(run: AiRun): string {

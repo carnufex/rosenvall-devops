@@ -152,8 +152,8 @@ api.MapPost("/workspaces", async (CreateWorkspaceRequest request, DevOpsStore st
 api.MapGet("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, DevOpsStore store) =>
     store.GetBoards(workspaceId) is { Count: > 0 } boards ? Results.Ok(boards) : Results.NotFound());
 
-api.MapPost("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, CreateBoardRequest request, DevOpsStore store) =>
-    store.CreateBoard(workspaceId, request) is { } board ? Results.Created($"/api/boards/{board.Id}", board) : Results.NotFound());
+api.MapPost("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, CreateBoardRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+    store.CreateBoard(workspaceId, request, UserIdentityFromClaims(user).Subject) is { } board ? Results.Created($"/api/boards/{board.Id}", board) : Results.NotFound());
 
 api.MapGet("/boards/{boardId:guid}", (Guid boardId, DevOpsStore store) =>
     store.GetBoard(boardId) is { } board ? Results.Ok(board) : Results.NotFound());
@@ -187,6 +187,8 @@ api.MapGet("/teams/{teamId:guid}/members", (Guid teamId, DevOpsStore store) =>
     store.GetTeams().SingleOrDefault(team => team.Id == teamId)?.Members is { } members ? Results.Ok(members) : Results.NotFound());
 api.MapPut("/teams/{teamId:guid}/members/{userId:guid}", (Guid teamId, Guid userId, UpsertTeamMemberRequest request, DevOpsStore store) =>
     store.UpsertTeamMember(teamId, request with { UserId = userId }) is { } team ? Results.Ok(team) : Results.NotFound());
+api.MapPost("/teams/{teamId:guid}/members", (Guid teamId, InviteTeamMemberRequest request, DevOpsStore store) =>
+    store.InviteTeamMember(teamId, request) is { } team ? Results.Ok(team) : Results.NotFound());
 
 api.MapGet("/integrations/github/install-url", (GitHubRepositoryClient github) => Results.Ok(new GitHubInstallUrlDto(github.GetInstallUrl())));
 api.MapGet("/integrations/github/callback", async (long installation_id, string? setup_action, string? account, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
@@ -236,11 +238,59 @@ api.MapGet("/integrations/github/repositories", async (long? installationId, Dev
 
     return Results.Ok(await github.GetRepositoriesAsync(cancellationToken, resolvedInstallationId));
 });
+api.MapGet("/integrations/github/repository-picker", async (long? installationId, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+{
+    if (!github.IsAppConfigured() && string.IsNullOrWhiteSpace(github.ConfiguredToken))
+    {
+        return Results.Ok(new GitHubRepositoryPickerDto(
+            "Error",
+            "GitHub App credentials are not mounted on the API pod.",
+            []));
+    }
+
+    var resolvedInstallationId = installationId ?? store.GetDefaultGitHubInstallationId();
+    if (resolvedInstallationId is null && github.IsAppConfigured())
+    {
+        var installations = await github.GetAppInstallationsAsync(cancellationToken);
+        if (installations.Count > 0)
+        {
+            store.UpsertGitHubIntegrations(installations);
+            resolvedInstallationId = store.GetDefaultGitHubInstallationId();
+        }
+    }
+
+    if (resolvedInstallationId is null && github.IsAppConfigured())
+    {
+        return Results.Ok(new GitHubRepositoryPickerDto(
+            "Empty",
+            "GitHub App credentials are configured, but no installation is visible. Sync the existing installation or reinstall the app.",
+            [],
+            null));
+    }
+
+    var result = await github.GetRepositoriesResultAsync(cancellationToken, resolvedInstallationId);
+    if (!result.Succeeded)
+    {
+        return Results.Ok(new GitHubRepositoryPickerDto("Error", result.Message, [], resolvedInstallationId));
+    }
+
+    return Results.Ok(new GitHubRepositoryPickerDto(
+        result.Repositories.Count == 0 ? "Empty" : "Loaded",
+        result.Repositories.Count == 0 ? "The GitHub App installation has zero granted repositories." : null,
+        result.Repositories,
+        resolvedInstallationId));
+});
 
 api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepositoryRequest request, DevOpsStore store) =>
     store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound());
 api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid boardId, Guid repositoryId, DevOpsStore store) =>
     store.UnlinkRepositoryFromBoard(boardId, repositoryId) ? Results.NoContent() : Results.NotFound());
+api.MapGet("/boards/{boardId:guid}/teams", (Guid boardId, DevOpsStore store) =>
+    store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetBoardTeamAccess(boardId)));
+api.MapPut("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid teamId, UpsertBoardTeamAccessRequest request, DevOpsStore store) =>
+    store.UpsertBoardTeamAccess(boardId, teamId, request.Role) is { } access ? Results.Ok(access) : Results.NotFound());
+api.MapDelete("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid teamId, DevOpsStore store) =>
+    store.RemoveBoardTeamAccess(boardId, teamId) ? Results.NoContent() : Results.NotFound());
 api.MapGet("/boards/{boardId:guid}/secrets", (Guid boardId, DevOpsStore store) => store.GetBoardSecrets(boardId));
 api.MapPost("/boards/{boardId:guid}/secrets", async (Guid boardId, CreateBoardSecretRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
 {
@@ -415,14 +465,14 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     string plan;
     try
     {
-        plan = await planner.GeneratePlanAsync(request.Provider, request.Model, context, cancellationToken);
+        plan = await planner.GeneratePlanAsync(request.Provider, request.Model, request.ReasoningEffort, context, cancellationToken);
     }
     catch (AiPlanProviderUnavailableException ex)
     {
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
-    var run = store.StartAiPlan(workItemId, request.Provider, request.Model, plan);
+    var run = store.StartAiPlan(workItemId, request.Provider, request.Model, plan, request.ReasoningEffort);
     if (run is null)
     {
         return Results.NotFound();
@@ -673,9 +723,11 @@ static async Task RunApprovedPlanImplementationAsync(AiRun run, string approvedB
             return;
         }
 
-        var implementationModel = configuration["Ai:Codex:Model"] ?? "gpt-5.4";
+        var implementationModel = run.Model;
+        var reasoningEffort = run.ReasoningEffort ?? configuration["Ai:Codex:ReasoningEffort"] ?? "high";
         var sourceFiles = await previewSourceProvider.GenerateSourceAsync(
             implementationModel,
+            reasoningEffort,
             run,
             context,
             async line =>
@@ -735,11 +787,12 @@ namespace Rosenvall.DevOps.Api
 
     public sealed record WorkspaceDto(Guid Id, string Name, string EnvironmentName, string Region, int ActiveProjects, int OpenPullRequests, int SuccessfulAiImplementations, int ComputeUsagePercent);
     public sealed record UserDto(Guid Id, string DisplayName, string Email, string Subject, string? AvatarUrl = null);
-    public sealed record TeamMemberDto(Guid UserId, string Role);
+    public sealed record TeamMemberDto(Guid UserId, string Role, string? DisplayName = null, string? Email = null, string? Status = null);
     public sealed record TeamDto(Guid Id, string Name, IReadOnlyList<TeamMemberDto> Members, DateTimeOffset CreatedAt);
     public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt, string? Owner = null, string ImplementationProfile = "react-preview");
     public sealed record BoardRepositoryDto(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, RepositoryDto Repository);
-    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null);
+    public sealed record BoardTeamAccessDto(Guid BoardId, Guid TeamId, string TeamName, string Role);
+    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
     public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null);
@@ -754,41 +807,44 @@ namespace Rosenvall.DevOps.Api
     public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt);
     public sealed record GitHubManifestAppDto(long Id, string Slug, string Name, string Pem);
     public sealed record BoardSecretDto(Guid Id, Guid BoardId, Guid? RepositoryId, string Key, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastUsedAt = null);
-    public sealed record AiSessionDto(Guid Id, Guid WorkItemId, string Provider, string Model, string? ProviderSessionId, string Status, DateTimeOffset LastPromptAt, Guid? RepositoryId = null, Guid? LastRunId = null, string? ContextSummary = null);
+    public sealed record AiSessionDto(Guid Id, Guid WorkItemId, string Provider, string Model, string? ProviderSessionId, string Status, DateTimeOffset LastPromptAt, Guid? RepositoryId = null, Guid? LastRunId = null, string? ContextSummary = null, string? ReasoningEffort = null);
     public sealed record TimelineEventDto(Guid Id, Guid? BoardId, Guid? RepositoryId, Guid? WorkItemId, string Kind, string Title, string Message, string Actor, string? Url, DateTimeOffset CreatedAt);
     public sealed record DevelopmentDto(string Repository, string Branch, string? PullRequestUrl, string ChecksStatus, string? PullRequestApprovedBy = null, DateTimeOffset? PullRequestApprovedAt = null);
     public sealed record SettingsDto(GitHubSettingsDto GitHub, AiSettingsDto Ai, PreviewSettingsDto Preview, RepositoryHostingSettingsDto Repositories, AuthentikSettingsDto Authentik);
     public sealed record GitHubSettingsDto(string Account, string TargetRepository, string BranchWatchPatterns, bool Connected, bool AppConfigured, string? InstallUrl, bool SyncAvailable);
     public sealed record AiSettingsDto(string Provider, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels, bool AutoReviewPullRequests, IReadOnlyList<AiProviderSettingsDto> AvailableProviders);
-    public sealed record AiProviderSettingsDto(string Provider, string DisplayName, string Status, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels);
+    public sealed record AiProviderSettingsDto(string Provider, string DisplayName, string Status, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels, IReadOnlyList<string>? AvailableReasoningEfforts = null, string? DefaultReasoningEffort = null);
     public sealed record PreviewSettingsDto(string Domain, int DefaultTtlDays, string Namespace);
     public sealed record RepositoryHostingSettingsDto(string Provider, string Mode, string ApiBaseUrl, bool CanCreateRepositories);
     public sealed record AuthentikSettingsDto(bool Enabled, string Authority, string UsersEndpoint);
     public sealed record MetricsDto(Guid? BoardId, int TokensUsed, int CodeAdded, int CodeDeleted, int PipelineRuns);
     public sealed record AssigneeDto(string Id, string DisplayName, string Email, string Source);
     public sealed record GitHubInstallUrlDto(string Url);
+    public sealed record GitHubRepositoryPickerDto(string Status, string? Message, IReadOnlyList<RepositoryDto> Repositories, long? ActiveInstallationId = null);
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);
     public sealed record CreateTeamRequest(string Name);
     public sealed record UpsertTeamMemberRequest(Guid UserId, string Role);
+    public sealed record InviteTeamMemberRequest(string Email, string Role);
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
     public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null, string? Owner = null, string? ImplementationProfile = null);
-    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null);
+    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null);
     public sealed record LinkBoardRepositoryRequest(Guid RepositoryId, bool IsPrimary, string? ImplementationProfile = null);
+    public sealed record UpsertBoardTeamAccessRequest(string Role);
     public sealed record CreateBoardSecretRequest(string Key, string Value, Guid? RepositoryId = null);
     public sealed record CreateWorkItemRequest(Guid BoardId, string Type, string Title, string Description, string Status, string Priority, string? Assignee);
     public sealed record UpdateWorkItemRequest(string Title, string Description, string Type, string Status, string Priority, string? Assignee);
     public sealed record MoveWorkItemRequest(string Status, int SortOrder);
     public sealed record AddCommentRequest(string Author, string Kind, string Body);
     public sealed record UpdateCommentRequest(string Actor, string Body);
-    public sealed record StartAiPlanRequest(string Provider, string Model);
-    public sealed record ApproveAiRunRequest(string ApprovedBy);
+    public sealed record StartAiPlanRequest(string Provider, string Model, string? ReasoningEffort = null);
+    public sealed record ApproveAiRunRequest(string ApprovedBy, string? ReasoningEffort = null);
     public sealed record DiscardAiRunRequest(string DiscardedBy);
     public sealed record ApprovePullRequestRequest(string ApprovedBy);
     public sealed record PreviewActionRequest(string Actor);
     public sealed record RecordPipelineRunRequest(Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record ExecutePipelineRunRequest(string Actor);
-    public sealed record StartImplementationRunRequest(Guid AiRunId, string Actor, Guid? RepositoryId = null);
+    public sealed record StartImplementationRunRequest(Guid AiRunId, string Actor, Guid? RepositoryId = null, string? ReasoningEffort = null);
     public sealed record GitHubIntegrationCallbackRequest(long InstallationId, string AccountLogin, string AccountType, string InstalledBy, int RepositoriesCount = 0, string Status = "Installed");
     public sealed record UpdateAiSessionProviderRequest(string ProviderSessionId);
     public sealed record GitHubCallbackRequest(Guid WorkItemId, string Repository, string Branch, string? PullRequestUrl, string Image, string ChecksStatus, string? StaticHtml = null);
@@ -886,15 +942,15 @@ namespace Rosenvall.DevOps.Api
                 token: "{{Escape(token)}}"
               """;
 
-        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string githubSecretName = "rosenvall-devops-github", AiSessionDto? aiSession = null, IReadOnlyList<BoardSecretDto>? boardSecrets = null)
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName = "rosenvall-devops-github", AiSessionDto? aiSession = null, IReadOnlyList<BoardSecretDto>? boardSecrets = null)
         {
             var jobName = JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, aiRun, context)));
             var secretEnv = RenderSecretEnvironment(boardSecrets ?? []);
             var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
-                ? "codex exec --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m \"$CODEX_MODEL\" - < \"$workspace/prompt.md\""
-                : "codex exec resume --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m \"$CODEX_MODEL\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
+                ? "codex exec --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
+                : "codex exec resume --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -945,6 +1001,8 @@ namespace Rosenvall.DevOps.Api
                                  value: /app/codex-home
                                - name: CODEX_MODEL
                                  value: "{{Escape(model)}}"
+                               - name: CODEX_REASONING_EFFORT
+                                 value: "{{Escape(CodexCliArguments.NormalizeReasoningEffort(reasoningEffort) ?? "high")}}"
                                - name: ROSENVALL_REPOSITORY_URL
                                  value: "{{Escape(repository.RemoteUrl)}}"
                                - name: ROSENVALL_REPOSITORY
@@ -2481,7 +2539,7 @@ namespace Rosenvall.DevOps.Api
     {
         string ProviderName { get; }
 
-        Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken);
+        Task<string> GeneratePlanAsync(string model, string? reasoningEffort, WorkItemDetailDto context, CancellationToken cancellationToken);
     }
 
     public sealed class AiPlanProviderRouter(IEnumerable<IAiPlanProvider> providers)
@@ -2490,19 +2548,26 @@ namespace Rosenvall.DevOps.Api
             .GroupBy(provider => provider.ProviderName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
-        public Task<string> GeneratePlanAsync(string provider, string model, WorkItemDetailDto context, CancellationToken cancellationToken)
+        public Task<string> GeneratePlanAsync(string provider, string model, WorkItemDetailDto context, CancellationToken cancellationToken) =>
+            GeneratePlanAsync(provider, model, null, context, cancellationToken);
+
+        public Task<string> GeneratePlanAsync(string provider, string model, string? reasoningEffort, WorkItemDetailDto context, CancellationToken cancellationToken)
         {
             if (!_providers.TryGetValue(provider, out var planner))
             {
                 throw new AiPlanProviderUnavailableException($"Provider '{provider}' is not configured for planning yet; no plan was created.");
             }
 
-            return planner.GeneratePlanAsync(model, context, cancellationToken);
+            return planner.GeneratePlanAsync(model, reasoningEffort, context, cancellationToken);
         }
     }
 
+    public sealed record GitHubRepositoryFetchResult(bool Succeeded, string? Message, IReadOnlyList<RepositoryDto> Repositories);
+
     public sealed class GitHubRepositoryClient(HttpClient httpClient, IConfiguration configuration)
     {
+        public string? ConfiguredToken => configuration["GitHub:Token"];
+
         public bool IsAppConfigured() =>
             !string.IsNullOrWhiteSpace(configuration["GitHub:AppId"]) &&
             !string.IsNullOrWhiteSpace(configuration["GitHub:AppPrivateKey"]);
@@ -2665,12 +2730,21 @@ namespace Rosenvall.DevOps.Api
 
         public async Task<IReadOnlyList<RepositoryDto>> GetRepositoriesAsync(CancellationToken cancellationToken, long? installationId = null)
         {
+            var result = await GetRepositoriesResultAsync(cancellationToken, installationId);
+            return result.Repositories;
+        }
+
+        public async Task<GitHubRepositoryFetchResult> GetRepositoriesResultAsync(CancellationToken cancellationToken, long? installationId = null)
+        {
             var token = installationId is { } id
                 ? await CreateInstallationTokenAsync(id, cancellationToken)
                 : configuration["GitHub:Token"];
             if (string.IsNullOrWhiteSpace(token))
             {
-                return [];
+                var message = installationId is null
+                    ? "No GitHub token or GitHub App installation is configured."
+                    : $"Could not mint a GitHub installation token for installation {installationId}.";
+                return new GitHubRepositoryFetchResult(false, message, []);
             }
 
             var url = installationId.HasValue
@@ -2683,14 +2757,16 @@ namespace Rosenvall.DevOps.Api
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                return [];
+                var error = await response.Content.ReadAsStringAsync(cancellationToken);
+                return new GitHubRepositoryFetchResult(false, $"GitHub repository list failed with {(int)response.StatusCode} {response.ReasonPhrase}: {TrimError(error)}", []);
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-            return installationId.HasValue && document.RootElement.TryGetProperty("repositories", out var repositories)
-                ? NormalizeRepositories(repositories)
+            var repositories = installationId.HasValue && document.RootElement.TryGetProperty("repositories", out var repositoryElement)
+                ? NormalizeRepositories(repositoryElement)
                 : NormalizeRepositories(document.RootElement);
+            return new GitHubRepositoryFetchResult(true, null, repositories);
         }
 
         public async Task<string?> CreateInstallationTokenAsync(long installationId, CancellationToken cancellationToken)
@@ -2818,6 +2894,12 @@ namespace Rosenvall.DevOps.Api
                 ? property.GetString() ?? ""
                 : "";
 
+        private static string TrimError(string value)
+        {
+            var clean = string.IsNullOrWhiteSpace(value) ? "No response body." : value.Trim();
+            return clean.Length <= 240 ? clean : clean[..240] + "...";
+        }
+
         private static string NormalizeTextValue(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
 
@@ -2859,7 +2941,10 @@ namespace Rosenvall.DevOps.Api
     {
         public string ProviderName => "ollama";
 
-        public async Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken)
+        public Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken) =>
+            GeneratePlanAsync(model, null, context, cancellationToken);
+
+        public async Task<string> GeneratePlanAsync(string model, string? reasoningEffort, WorkItemDetailDto context, CancellationToken cancellationToken)
         {
             httpClient.Timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:RequestTimeoutSeconds", 120));
             var endpoint = configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api";
@@ -2961,7 +3046,10 @@ namespace Rosenvall.DevOps.Api
     {
         public string ProviderName => "codex";
 
-        public async Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken)
+        public Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken) =>
+            GeneratePlanAsync(model, null, context, cancellationToken);
+
+        public async Task<string> GeneratePlanAsync(string model, string? reasoningEffort, WorkItemDetailDto context, CancellationToken cancellationToken)
         {
             var codexPath = CodexExecutableResolver.Resolve(configuration["Ai:Codex:Path"] ?? "codex");
             var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:RequestTimeoutSeconds", configuration.GetValue("Ai:RequestTimeoutSeconds", 120)));
@@ -2970,7 +3058,7 @@ namespace Rosenvall.DevOps.Api
             {
                 using var process = new Process
                 {
-                    StartInfo = BuildStartInfo(codexPath, model, outputPath),
+                    StartInfo = BuildStartInfo(codexPath, model, reasoningEffort, outputPath),
                     EnableRaisingEvents = true
                 };
 
@@ -3047,7 +3135,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        private ProcessStartInfo BuildStartInfo(string codexPath, string model, string outputPath)
+        private ProcessStartInfo BuildStartInfo(string codexPath, string model, string? reasoningEffort, string outputPath)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -3073,6 +3161,7 @@ namespace Rosenvall.DevOps.Api
             startInfo.ArgumentList.Add(outputPath);
             startInfo.ArgumentList.Add("-m");
             startInfo.ArgumentList.Add(model);
+            CodexCliArguments.AddReasoningEffort(startInfo, reasoningEffort);
             startInfo.ArgumentList.Add("-");
 
             var codexHome = configuration["Ai:Codex:Home"];
@@ -3129,6 +3218,32 @@ namespace Rosenvall.DevOps.Api
               """;
     }
 
+    public static class CodexCliArguments
+    {
+        public static void AddReasoningEffort(ProcessStartInfo startInfo, string? reasoningEffort)
+        {
+            var normalized = NormalizeReasoningEffort(reasoningEffort);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return;
+            }
+
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add($"model_reasoning_effort=\"{normalized}\"");
+        }
+
+        public static string? NormalizeReasoningEffort(string? reasoningEffort)
+        {
+            if (string.IsNullOrWhiteSpace(reasoningEffort))
+            {
+                return null;
+            }
+
+            var normalized = reasoningEffort.Trim().ToLowerInvariant();
+            return normalized is "low" or "medium" or "high" or "xhigh" ? normalized : null;
+        }
+    }
+
     public static class CodexExecutableResolver
     {
         private static readonly string[] PreferredWindowsExtensions = [".exe", ".cmd", ".bat", ".com"];
@@ -3182,14 +3297,17 @@ namespace Rosenvall.DevOps.Api
 
     public interface IPreviewSourceProvider
     {
-        Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken);
+        Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, string? reasoningEffort, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken);
     }
 
     public sealed class CodexCliPreviewSourceProvider(IConfiguration configuration, ILogger<CodexCliPreviewSourceProvider> logger) : IPreviewSourceProvider
     {
         private static readonly string[] SkippedDirectories = ["node_modules", "dist", ".git", ".codex"];
 
-        public async Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken) =>
+            GenerateSourceAsync(model, null, run, context, onTerminalLine, cancellationToken);
+
+        public async Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, string? reasoningEffort, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
         {
             var codexPath = CodexExecutableResolver.Resolve(configuration["Ai:Codex:Path"] ?? "codex");
             var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:ImplementationTimeoutSeconds", configuration.GetValue("Ai:Codex:RequestTimeoutSeconds", configuration.GetValue("Ai:RequestTimeoutSeconds", 180))));
@@ -3204,7 +3322,7 @@ namespace Rosenvall.DevOps.Api
 
                 using var process = new Process
                 {
-                    StartInfo = BuildStartInfo(codexPath, model, workspacePath, outputPath),
+                    StartInfo = BuildStartInfo(codexPath, model, reasoningEffort, workspacePath, outputPath),
                     EnableRaisingEvents = true
                 };
 
@@ -3302,7 +3420,7 @@ namespace Rosenvall.DevOps.Api
         private static string StripAnsi(string value) =>
             System.Text.RegularExpressions.Regex.Replace(value, @"\x1B\[[0-?]*[ -/]*[@-~]", "");
 
-        private ProcessStartInfo BuildStartInfo(string codexPath, string model, string workspacePath, string outputPath)
+        private ProcessStartInfo BuildStartInfo(string codexPath, string model, string? reasoningEffort, string workspacePath, string outputPath)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -3338,6 +3456,7 @@ namespace Rosenvall.DevOps.Api
             startInfo.ArgumentList.Add(outputPath);
             startInfo.ArgumentList.Add("-m");
             startInfo.ArgumentList.Add(model);
+            CodexCliArguments.AddReasoningEffort(startInfo, reasoningEffort);
             startInfo.ArgumentList.Add("-");
 
             var codexHome = configuration["Ai:Codex:Home"];
@@ -3487,6 +3606,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<UserDto> _users = [];
         private readonly List<TeamDto> _teams = [];
         private readonly List<BoardAccessDtoRecord> _boardAccess = [];
+        private readonly List<BoardTeamAccessRecord> _boardTeamAccess = [];
         private readonly List<BoardRepositoryLinkRecord> _boardRepositoryLinks = [];
         private readonly List<GitHubIntegrationDto> _githubIntegrations = [];
         private readonly List<BoardSecretDto> _boardSecrets = [];
@@ -3551,6 +3671,25 @@ namespace Rosenvall.DevOps.Api
                     return existing;
                 }
 
+                var email = NormalizeEmail(request.Email);
+                var pendingIndex = _users.FindIndex(user =>
+                    user.Subject.StartsWith("pending:", StringComparison.OrdinalIgnoreCase) &&
+                    user.Email.Equals(email, StringComparison.OrdinalIgnoreCase));
+                if (pendingIndex >= 0)
+                {
+                    var pending = _users[pendingIndex];
+                    var linked = pending with
+                    {
+                        Subject = subject,
+                        DisplayName = NormalizeText(request.DisplayName, request.Email),
+                        Email = NormalizeText(request.Email, $"{subject}@local"),
+                        AvatarUrl = string.IsNullOrWhiteSpace(request.AvatarUrl) ? pending.AvatarUrl : request.AvatarUrl.Trim()
+                    };
+                    _users[pendingIndex] = linked;
+                    Persist();
+                    return linked;
+                }
+
                 var user = new UserDto(
                     Guid.NewGuid(),
                     NormalizeText(request.DisplayName, request.Email),
@@ -3581,7 +3720,7 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
-                return _teams.OrderBy(team => team.Name).ToArray();
+                return _teams.Select(EnrichTeam).OrderBy(team => team.Name).ToArray();
             }
         }
 
@@ -3594,7 +3733,7 @@ namespace Rosenvall.DevOps.Api
                 var team = new TeamDto(Guid.NewGuid(), NormalizeText(request.Name, "Team"), [new TeamMemberDto(actor.Id, "Owner")], DateTimeOffset.UtcNow);
                 _teams.Add(team);
                 Persist();
-                return team;
+                return EnrichTeam(team);
             }
         }
 
@@ -3613,7 +3752,28 @@ namespace Rosenvall.DevOps.Api
                 var updated = team with { Members = members };
                 _teams[index] = updated;
                 Persist();
-                return updated;
+                return EnrichTeam(updated);
+            }
+        }
+
+        public TeamDto? InviteTeamMember(Guid teamId, InviteTeamMemberRequest request)
+        {
+            lock (_lock)
+            {
+                var email = NormalizeEmail(request.Email);
+                if (string.IsNullOrWhiteSpace(email))
+                {
+                    return null;
+                }
+
+                var user = _users.SingleOrDefault(entry => entry.Email.Equals(email, StringComparison.OrdinalIgnoreCase));
+                if (user is null)
+                {
+                    user = new UserDto(Guid.NewGuid(), email, email, $"pending:{email}");
+                    _users.Add(user);
+                }
+
+                return UpsertTeamMember(teamId, new UpsertTeamMemberRequest(user.Id, request.Role));
             }
         }
 
@@ -3632,7 +3792,51 @@ namespace Rosenvall.DevOps.Api
                     return true;
                 }
 
-                return _teams.SelectMany(team => team.Members).Any(member => member.UserId == user.Id && IsMutatingRole(member.Role));
+                return _boardTeamAccess.Any(access =>
+                {
+                    var team = _teams.SingleOrDefault(entry => entry.Id == access.TeamId);
+                    var member = team?.Members.SingleOrDefault(entry => entry.UserId == user.Id);
+                    return access.BoardId == boardId &&
+                        member is not null &&
+                        IsMutatingRole(MostRestrictiveRole(access.Role, member.Role));
+                });
+            }
+        }
+
+        public IReadOnlyList<BoardTeamAccessDto> GetBoardTeamAccess(Guid boardId)
+        {
+            lock (_lock)
+            {
+                return BoardTeamAccessFor(boardId);
+            }
+        }
+
+        public BoardTeamAccessDto? UpsertBoardTeamAccess(Guid boardId, Guid teamId, string role)
+        {
+            lock (_lock)
+            {
+                if (_boards.All(board => board.Id != boardId) || _teams.All(team => team.Id != teamId))
+                {
+                    return null;
+                }
+
+                UpsertBoardTeamAccessWithoutLock(boardId, teamId, role);
+                Persist();
+                return BoardTeamAccessFor(boardId).Single(access => access.TeamId == teamId);
+            }
+        }
+
+        public bool RemoveBoardTeamAccess(Guid boardId, Guid teamId)
+        {
+            lock (_lock)
+            {
+                var removed = _boardTeamAccess.RemoveAll(access => access.BoardId == boardId && access.TeamId == teamId) > 0;
+                if (removed)
+                {
+                    Persist();
+                }
+
+                return removed;
             }
         }
 
@@ -3667,7 +3871,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public BoardDto? CreateBoard(Guid workspaceId, CreateBoardRequest request)
+        public BoardDto? CreateBoard(Guid workspaceId, CreateBoardRequest request, string? actorSubject = null)
         {
             lock (_lock)
             {
@@ -3687,6 +3891,22 @@ namespace Rosenvall.DevOps.Api
                 if (repository is not null)
                 {
                     UpsertBoardRepositoryLinkWithoutLock(board.Id, repository.Id, true, repository.ImplementationProfile);
+                }
+                var teamIds = request.TeamIds?.Where(teamId => _teams.Any(team => team.Id == teamId)).Distinct().ToArray() ?? [];
+                if (teamIds.Length == 0 && !string.IsNullOrWhiteSpace(actorSubject))
+                {
+                    var actor = _users.FirstOrDefault(user => user.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+                    teamIds = actor is null
+                        ? []
+                        : _teams
+                            .Where(team => team.Members.Any(member => member.UserId == actor.Id && IsMutatingRole(member.Role)))
+                            .Select(team => team.Id)
+                            .Take(1)
+                            .ToArray();
+                }
+                foreach (var teamId in teamIds)
+                {
+                    UpsertBoardTeamAccessWithoutLock(board.Id, teamId, "Owner");
                 }
                 AddTimelineEvent(board.Id, repository?.Id, null, "BoardCreated", board.Name, repository is null ? "Board created." : $"Board created for {repository.Name}.", "system", repository?.WebUrl);
                 Persist();
@@ -3919,7 +4139,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public AiSessionDto? EnsureAiSession(Guid workItemId, string provider, string model, Guid? repositoryId = null)
+        public AiSessionDto? EnsureAiSession(Guid workItemId, string provider, string model, Guid? repositoryId = null, string? reasoningEffort = null)
         {
             lock (_lock)
             {
@@ -3941,14 +4161,15 @@ namespace Rosenvall.DevOps.Api
                         RepositoryId = repositoryId ?? existing.RepositoryId,
                         LastPromptAt = now,
                         Status = "Active",
-                        ContextSummary = BuildAiSessionContext(item)
+                        ContextSummary = BuildAiSessionContext(item),
+                        ReasoningEffort = CodexCliArguments.NormalizeReasoningEffort(reasoningEffort) ?? existing.ReasoningEffort
                     };
                     _aiSessions[existingIndex] = updated;
                     Persist();
                     return updated;
                 }
 
-                var session = new AiSessionDto(Guid.NewGuid(), workItemId, NormalizeText(provider, "codex"), NormalizeText(model, "gpt-5.4"), null, "Active", now, repositoryId, null, BuildAiSessionContext(item));
+                var session = new AiSessionDto(Guid.NewGuid(), workItemId, NormalizeText(provider, "codex"), NormalizeText(model, "gpt-5.4"), null, "Active", now, repositoryId, null, BuildAiSessionContext(item), CodexCliArguments.NormalizeReasoningEffort(reasoningEffort));
                 _aiSessions.Add(session);
                 Persist();
                 return session;
@@ -4215,7 +4436,8 @@ namespace Rosenvall.DevOps.Api
                 var repository = repositoryId is null ? null : _repositories.SingleOrDefault(entry => entry.Id == repositoryId.Value);
                 if (repository is null ||
                     !BoardRepositoriesFor(item.BoardId).Any(link => link.RepositoryId == repository.Id) ||
-                    string.Equals(repository.ImplementationProfile, "react-preview", StringComparison.OrdinalIgnoreCase))
+                    string.Equals(repository.ImplementationProfile, "react-preview", StringComparison.OrdinalIgnoreCase) ||
+                    !repository.Provider.Equals("GitHub", StringComparison.OrdinalIgnoreCase))
                 {
                     return null;
                 }
@@ -4246,7 +4468,7 @@ namespace Rosenvall.DevOps.Api
                         new PreviewTerminalLineDto(now, "system", $"Repository: {repository.Provider} / {repository.Owner}/{repository.Name}.")
                     ]);
                 _implementationRuns.Add(runDto);
-                EnsureAiSession(item.Id, aiRun.Provider, aiRun.Model, repository.Id);
+                EnsureAiSession(item.Id, aiRun.Provider, aiRun.Model, repository.Id, request.ReasoningEffort ?? aiRun.ReasoningEffort);
                 item.AiStatus = "ImplementationRunning";
                 item.Status = "AI Planning";
                 AddTimelineForItem(item, "ImplementationRunQueued", item.Key, $"Repository implementation queued for {repository.Name}.", request.Actor, repository.WebUrl);
@@ -4371,7 +4593,9 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                var model = configuration["Ai:Codex:Model"] ?? "gpt-5.4";
+                var aiSession = _aiSessions.SingleOrDefault(session => session.WorkItemId == run.WorkItemId);
+                var model = aiRun.Model;
+                var reasoningEffort = aiRun.ReasoningEffort ?? aiSession?.ReasoningEffort ?? configuration["Ai:Codex:ReasoningEffort"] ?? "high";
                 var secret = string.IsNullOrWhiteSpace(githubSecretName)
                     ? configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github"
                     : githubSecretName.Trim();
@@ -4392,9 +4616,8 @@ namespace Rosenvall.DevOps.Api
                     }
                 }
 
-                var aiSession = _aiSessions.SingleOrDefault(session => session.WorkItemId == run.WorkItemId);
                 Persist();
-                return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, secret, aiSession, boardSecrets);
+                return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, reasoningEffort, secret, aiSession, boardSecrets);
             }
         }
 
@@ -4593,7 +4816,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public AiRun? StartAiPlan(Guid workItemId, string provider, string model, string? plan = null)
+        public AiRun? StartAiPlan(Guid workItemId, string provider, string model, string? plan = null, string? reasoningEffort = null)
         {
             lock (_lock)
             {
@@ -4605,13 +4828,14 @@ namespace Rosenvall.DevOps.Api
 
                 item.Status = "AI Planning";
                 item.AiStatus = "Planning";
-                var session = EnsureAiSession(workItemId, provider, model, RepositoryIdForBoard(item.BoardId));
+                var normalizedReasoningEffort = CodexCliArguments.NormalizeReasoningEffort(reasoningEffort);
+                var session = EnsureAiSession(workItemId, provider, model, RepositoryIdForBoard(item.BoardId), normalizedReasoningEffort);
                 var sequenceNumber = _aiRuns
                     .Where(existing => existing.WorkItemId == workItemId)
                     .Select(existing => existing.SequenceNumber)
                     .DefaultIfEmpty(0)
                     .Max() + 1;
-                var run = AiRun.Start(workItemId, provider, model, sequenceNumber, DateTimeOffset.UtcNow);
+                var run = AiRun.Start(workItemId, provider, model, sequenceNumber, DateTimeOffset.UtcNow, normalizedReasoningEffort);
                 run.PostPlan(string.IsNullOrWhiteSpace(plan) ? BuildPlan(item) : plan);
                 _aiRuns.Add(run);
                 _comments.Add(new CommentDto(Guid.NewGuid(), workItemId, "Rosenvall AI", "Result", $"Created plan #{run.SequenceNumber}: {item.Title}.", run.CreatedAt));
@@ -5135,11 +5359,14 @@ namespace Rosenvall.DevOps.Api
                 .ToArray();
             var codexActiveModel = NormalizeText(configuration["Ai:Codex:Model"], "gpt-5.4");
             var codexModels = new[] { codexActiveModel }
+                .Concat(["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "codex-auto-review"])
                 .Concat(configuration.GetSection("Ai:Codex:AvailableModels").Get<string[]>() ?? [])
                 .Where(model => !string.IsNullOrWhiteSpace(model))
                 .Select(model => model.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+            var codexReasoningEffort = CodexCliArguments.NormalizeReasoningEffort(configuration["Ai:Codex:ReasoningEffort"]) ?? "high";
+            var codexReasoningEfforts = new[] { "low", "medium", "high", "xhigh" };
             var codexPath = configuration["Ai:Codex:Path"] ?? "codex";
             var configuredCodexHome = configuration["Ai:Codex:Home"];
             var codexHome = !string.IsNullOrWhiteSpace(configuredCodexHome)
@@ -5154,14 +5381,18 @@ namespace Rosenvall.DevOps.Api
                     "Ready",
                     configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api",
                     activeModel,
-                    availableModels),
+                    availableModels,
+                    [],
+                    null),
                 new AiProviderSettingsDto(
                     "codex",
                     "Codex",
                     codexStatus,
                     codexPath,
                     codexActiveModel,
-                    codexModels)
+                    codexModels,
+                    codexReasoningEfforts,
+                    codexReasoningEffort)
             };
 
             var githubIntegration = _githubIntegrations.OrderByDescending(integration => integration.CreatedAt).FirstOrDefault();
@@ -5274,7 +5505,35 @@ namespace Rosenvall.DevOps.Api
             new(board.Id, board.WorkspaceId, board.Name,
                 board.Columns.Select(column => new BoardColumnDto(column, _items.Where(i => i.BoardId == board.Id && i.Status == column).OrderBy(i => i.SortOrder).ThenBy(i => i.Key).Select(ToSummary).ToArray())).ToArray(),
                 RepositoryIdForBoard(board.Id) is { } repositoryId ? _repositories.SingleOrDefault(repository => repository.Id == repositoryId) : null,
-                BoardRepositoriesFor(board.Id));
+                BoardRepositoriesFor(board.Id),
+                BoardTeamAccessFor(board.Id));
+
+        private TeamDto EnrichTeam(TeamDto team) =>
+            team with
+            {
+                Members = team.Members
+                    .Select(member =>
+                    {
+                        var user = _users.SingleOrDefault(entry => entry.Id == member.UserId);
+                        return member with
+                        {
+                            DisplayName = user?.DisplayName,
+                            Email = user?.Email,
+                            Status = user?.Subject.StartsWith("pending:", StringComparison.OrdinalIgnoreCase) == true ? "Pending" : "Active"
+                        };
+                    })
+                    .OrderBy(member => member.DisplayName ?? member.Email ?? member.UserId.ToString())
+                    .ToArray()
+            };
+
+        private IReadOnlyList<BoardTeamAccessDto> BoardTeamAccessFor(Guid boardId) =>
+            _boardTeamAccess
+                .Where(access => access.BoardId == boardId)
+                .Select(access => (access, team: _teams.SingleOrDefault(team => team.Id == access.TeamId)))
+                .Where(entry => entry.team is not null)
+                .Select(entry => new BoardTeamAccessDto(entry.access.BoardId, entry.access.TeamId, entry.team!.Name, entry.access.Role))
+                .OrderBy(access => access.TeamName)
+                .ToArray();
 
         private WorkItemSummaryDto ToSummary(WorkItemRecord item)
         {
@@ -5297,20 +5556,37 @@ namespace Rosenvall.DevOps.Api
                 return _repositories.SingleOrDefault(repository => repository.Id == repositoryId);
             }
 
-            if (string.IsNullOrWhiteSpace(request.RepositoryRemoteUrl) && string.IsNullOrWhiteSpace(request.RepositoryName))
+            var remoteUrl = !string.IsNullOrWhiteSpace(request.CustomRepositoryUrl)
+                ? request.CustomRepositoryUrl
+                : request.RepositoryRemoteUrl;
+            var provider = string.Equals(request.ProviderMode, "CustomUrl", StringComparison.OrdinalIgnoreCase)
+                ? "GenericGit"
+                : NormalizeText(request.RepositoryProvider, "Forgejo");
+            var name = NormalizeText(request.RepositoryName, NormalizeText(request.Name, "repository"));
+            var owner = string.IsNullOrWhiteSpace(request.RepositoryOwner) ? OwnerFromRepositoryName(name) : request.RepositoryOwner.Trim();
+            if (string.IsNullOrWhiteSpace(remoteUrl) && string.IsNullOrWhiteSpace(request.RepositoryName))
             {
                 return null;
             }
 
+            var existing = _repositories.FirstOrDefault(repository =>
+                repository.Provider.Equals(provider, StringComparison.OrdinalIgnoreCase) &&
+                repository.Name.Equals(name, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(repository.Owner ?? "", owner ?? "", StringComparison.OrdinalIgnoreCase));
+            if (existing is not null)
+            {
+                return existing;
+            }
+
             var repository = new RepositoryDto(
                 Guid.NewGuid(),
-                NormalizeText(request.RepositoryProvider, "Forgejo"),
-                NormalizeText(request.RepositoryName, NormalizeText(request.Name, "repository")),
-                NormalizeText(request.RepositoryRemoteUrl, $"ssh://git.rosenvall.se/{SlugifyRepositoryName(request.RepositoryName ?? request.Name)}.git"),
+                provider,
+                name,
+                NormalizeText(remoteUrl, $"ssh://git.rosenvall.se/{SlugifyRepositoryName(request.RepositoryName ?? request.Name)}.git"),
                 string.IsNullOrWhiteSpace(request.RepositoryWebUrl) ? null : request.RepositoryWebUrl.Trim(),
                 NormalizeText(request.RepositoryDefaultBranch, "main"),
                 DateTimeOffset.UtcNow,
-                string.IsNullOrWhiteSpace(request.RepositoryOwner) ? OwnerFromRepositoryName(request.RepositoryName) : request.RepositoryOwner.Trim(),
+                owner,
                 NormalizeImplementationProfile(request.ImplementationProfile));
             _repositories.Add(repository);
             return repository;
@@ -5379,6 +5655,34 @@ namespace Rosenvall.DevOps.Api
 
             _boardRepositoryLinks.RemoveAll(link => link.BoardId == boardId && link.RepositoryId == repositoryId);
             _boardRepositoryLinks.Add(new BoardRepositoryLinkRecord(boardId, repositoryId, isPrimary, NormalizeImplementationProfile(implementationProfile)));
+        }
+
+        private void UpsertBoardTeamAccessWithoutLock(Guid boardId, Guid teamId, string role)
+        {
+            _boardTeamAccess.RemoveAll(access => access.BoardId == boardId && access.TeamId == teamId);
+            _boardTeamAccess.Add(new BoardTeamAccessRecord(boardId, teamId, NormalizeRole(role)));
+        }
+
+        private void BackfillBoardTeamAccessWithoutLock()
+        {
+            if (_boardTeamAccess.Count > 0 || _teams.Count == 0)
+            {
+                return;
+            }
+
+            var defaultTeam = _teams
+                .OrderByDescending(team => team.Members.Any(member => NormalizeRole(member.Role) == "Owner"))
+                .ThenBy(team => team.Name)
+                .FirstOrDefault();
+            if (defaultTeam is null)
+            {
+                return;
+            }
+
+            foreach (var board in _boards)
+            {
+                _boardTeamAccess.Add(new BoardTeamAccessRecord(board.Id, defaultTeam.Id, "Owner"));
+            }
         }
 
         private Guid? ResolveRepositoryForDevelopment(Guid boardId, string repositoryName)
@@ -5465,7 +5769,28 @@ namespace Rosenvall.DevOps.Api
         private static bool IsMutatingRole(string? role) =>
             NormalizeRole(role) is "Owner" or "Admin" or "Member";
 
-        private bool HasAnyTeamOrAccess() => _teams.Count > 0 || _boardAccess.Count > 0;
+        private static int RoleRank(string? role) =>
+            NormalizeRole(role) switch
+            {
+                "Owner" => 3,
+                "Admin" => 2,
+                "Member" => 1,
+                _ => 0
+            };
+
+        private static string RoleFromRank(int rank) =>
+            rank >= 3 ? "Owner" :
+            rank == 2 ? "Admin" :
+            rank == 1 ? "Member" :
+            "Viewer";
+
+        private static string MostRestrictiveRole(string? left, string? right) =>
+            RoleFromRank(Math.Min(RoleRank(left), RoleRank(right)));
+
+        private bool HasAnyTeamOrAccess() => _teams.Count > 0 || _boardAccess.Count > 0 || _boardTeamAccess.Count > 0;
+
+        private static string NormalizeEmail(string? value) =>
+            NormalizeText(value, "").ToLowerInvariant();
 
         private static string NormalizeSecretKey(string? value)
         {
@@ -5623,6 +5948,7 @@ namespace Rosenvall.DevOps.Api
             var owner = new UserDto(Guid.Parse("4c1097a1-7f25-4ae2-a9e4-6851cf5cf435"), "Christopher Rosenvall", "christopher.rosenvall@gmail.com", "local-dev");
             _users.Add(owner);
             _teams.Add(new TeamDto(Guid.Parse("5d067d32-142e-4435-b6c6-d96278be6225"), "Rosenvall", [new TeamMemberDto(owner.Id, "Owner")], DateTimeOffset.UtcNow));
+            _boardTeamAccess.Add(new BoardTeamAccessRecord(board.Id, Guid.Parse("5d067d32-142e-4435-b6c6-d96278be6225"), "Owner"));
             _items.AddRange([
                 task,
                 aiTask,
@@ -5678,7 +6004,8 @@ namespace Rosenvall.DevOps.Api
                         run.Plan,
                         run.ApprovedBy,
                         run.SequenceNumber > 0 ? run.SequenceNumber : index + 1,
-                        run.CreatedAt ?? DateTimeOffset.UtcNow.AddTicks(index)))));
+                    run.CreatedAt ?? DateTimeOffset.UtcNow.AddTicks(index),
+                    run.ReasoningEffort))));
             _previews.AddRange(snapshot.Previews.Select(preview => preview with { Status = NormalizePreviewStatus(preview.Status) }));
             _development.AddRange(snapshot.Development.Select(development => new DevelopmentDtoRecord(development.WorkItemId, development.Development)));
             _previewEvents.AddRange(snapshot.PreviewEvents ?? []);
@@ -5688,7 +6015,9 @@ namespace Rosenvall.DevOps.Api
             _users.AddRange(snapshot.Users ?? []);
             _teams.AddRange(snapshot.Teams ?? []);
             _boardAccess.AddRange(snapshot.BoardAccess ?? []);
+            _boardTeamAccess.AddRange(snapshot.BoardTeamAccess ?? []);
             _boardRepositoryLinks.AddRange(snapshot.BoardRepositoryLinks ?? []);
+            BackfillBoardTeamAccessWithoutLock();
             foreach (var board in _boards.Where(board => board.RepositoryId is not null && _boardRepositoryLinks.All(link => link.BoardId != board.Id)))
             {
                 var repository = _repositories.SingleOrDefault(entry => entry.Id == board.RepositoryId);
@@ -5711,7 +6040,7 @@ namespace Rosenvall.DevOps.Api
                 _boards.Select(board => new BoardSnapshot(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId)).ToArray(),
                 _items.Select(item => new WorkItemSnapshot(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.AiStatus, item.PullRequestUrl, item.SortOrder)).ToArray(),
                 _comments.ToArray(),
-                _aiRuns.Select(run => new AiRunSnapshot(run.Id, run.WorkItemId, run.Provider, run.Model, run.Status, run.Plan, run.ApprovedBy, run.SequenceNumber, run.CreatedAt)).ToArray(),
+                _aiRuns.Select(run => new AiRunSnapshot(run.Id, run.WorkItemId, run.Provider, run.Model, run.Status, run.Plan, run.ApprovedBy, run.SequenceNumber, run.CreatedAt, run.ReasoningEffort)).ToArray(),
                 _previews.ToArray(),
                 _development.Select(development => new DevelopmentSnapshot(development.WorkItemId, development.Development)).ToArray(),
                 _nextTaskNumber,
@@ -5723,6 +6052,7 @@ namespace Rosenvall.DevOps.Api
                 _users.ToArray(),
                 _teams.ToArray(),
                 _boardAccess.ToArray(),
+                _boardTeamAccess.ToArray(),
                 _boardRepositoryLinks.ToArray(),
                 _githubIntegrations.ToArray(),
                 _boardSecrets.ToArray(),
@@ -5780,10 +6110,11 @@ namespace Rosenvall.DevOps.Api
 
     internal sealed record DevelopmentDtoRecord(Guid WorkItemId, DevelopmentDto Development);
     internal sealed record BoardAccessDtoRecord(Guid BoardId, Guid UserId, string Role);
+    internal sealed record BoardTeamAccessRecord(Guid BoardId, Guid TeamId, string Role);
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
-    internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null);
+    internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);
     internal sealed record DevelopmentSnapshot(Guid WorkItemId, DevelopmentDto Development);
 }

@@ -276,16 +276,30 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .connected span { margin-left: auto; color: var(--secondary); font-weight: 700; }
 .provider-status { margin: -4px 0 0; color: #fcd34d; font-size: 13px; }
 .provider-status.ready { color: var(--secondary); }
+.provider-status.with-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .settings-inline { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--surface-high); border: 1px solid var(--line); padding: 14px; border-radius: 8px; }
 .settings-inline p { margin-top: 4px; }
 .button-row { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .settings-list { display: grid; gap: 10px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--line); background: #121314; padding: 12px 14px; border-radius: 8px; }
 .settings-row p { margin-top: 4px; overflow-wrap: anywhere; }
+.teams-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 18px; align-items: start; }
+.team-list-panel { display: grid; gap: 14px; }
+.compact-form, .team-action-form { display: grid; gap: 12px; }
+.team-action-form { grid-template-columns: minmax(0, 1fr) 160px auto; align-items: end; border-top: 1px solid var(--line); padding-top: 14px; }
+.team-select { text-align: left; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #121314; border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 11px 12px; }
+.team-select.active { border-color: var(--secondary); }
+.team-select span { color: var(--muted); font-size: 13px; }
 .team-card { display: grid; gap: 8px; border: 1px solid var(--line); background: #121314; padding: 12px; border-radius: 8px; }
 .team-card .settings-row { border: 0; background: transparent; padding: 0 0 8px; border-bottom: 1px solid var(--line); border-radius: 0; }
 .member-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted-strong); font-size: 13px; }
 .member-row strong { color: var(--secondary); }
+.member-row.detailed { border: 1px solid var(--line); background: #121314; padding: 10px 12px; border-radius: 8px; }
+.member-row.detailed > span { display: grid; gap: 3px; }
+.member-meta { color: var(--muted); font-size: 12px; }
+.team-picker { border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: grid; gap: 8px; }
+.team-picker legend { padding: 0 6px; color: var(--muted-strong); font-weight: 700; }
+.checkbox-row { display: flex; align-items: center; gap: 8px; color: var(--muted-strong); }
 .secret-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(180px, 0.7fr) auto; gap: 12px; align-items: end; }
 .session-line { color: var(--secondary); font-size: 13px; }
 .target-repo-select { display: grid; gap: 8px; max-width: 420px; }
@@ -326,7 +340,8 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
   h1 { font-size: 26px; line-height: 34px; }
   .metrics, .dashboard-grid, .modal-grid, .form-grid, .form-grid.two { grid-template-columns: 1fr; }
   .secret-form { grid-template-columns: 1fr; }
-  .settings-inline, .settings-row { align-items: stretch; flex-direction: column; }
+  .settings-inline, .settings-row, .provider-status.with-actions { align-items: stretch; flex-direction: column; }
+  .teams-layout, .team-action-form { grid-template-columns: 1fr; }
   .form-grid.two > label:first-child, .form-grid.two > label:nth-child(2) { grid-column: 1 / -1; }
   .board { grid-template-columns: repeat(5, 300px); }
   .modal-backdrop { padding: 12px; place-items: start center; }

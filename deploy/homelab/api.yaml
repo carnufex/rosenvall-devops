@@ -50,11 +50,23 @@ spec:
             - name: Ai__Codex__ImplementationBypassSandbox
               value: "true"
             - name: Ai__Codex__Model
-              value: gpt-5.4
+              value: gpt-5.5
+            - name: Ai__Codex__ReasoningEffort
+              value: high
             - name: Ai__Codex__AvailableModels__0
-              value: gpt-5.4
+              value: gpt-5.5
             - name: Ai__Codex__AvailableModels__1
+              value: gpt-5.4
+            - name: Ai__Codex__AvailableModels__2
+              value: gpt-5.4-mini
+            - name: Ai__Codex__AvailableModels__3
               value: gpt-5.3-codex
+            - name: Ai__Codex__AvailableModels__4
+              value: gpt-5.3-codex-spark
+            - name: Ai__Codex__AvailableModels__5
+              value: gpt-5.2
+            - name: Ai__Codex__AvailableModels__6
+              value: codex-auto-review
             - name: GitHub__Token
               valueFrom:
                 secretKeyRef:
