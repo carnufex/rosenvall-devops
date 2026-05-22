@@ -122,6 +122,7 @@ type WorkItemDetail = {
   development?: DevelopmentDto | null;
   implementationRuns?: ImplementationRunDto[] | null;
   aiSession?: AiSessionDto | null;
+  previewEvents?: PreviewEventDto[] | null;
 };
 
 type CommentDto = {
@@ -1520,6 +1521,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           {detail.preview && (
             <PreviewPanel preview={detail.preview} busy={busy} onRetry={() => actions.startPreview(detail.item.id)} />
           )}
+          <PreviewHistoryPanel detail={detail} aiRuns={sortedPlans} />
         </aside>
       </div>
     </ModalFrame>
@@ -1638,11 +1640,14 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
   const running = status === 'Running';
   const failed = status === 'Failed';
   const waiting = !running && !failed;
-  const actionLabel = failed ? 'Preview failed' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
-  const steps = previewLifecycleSteps(status);
+  const implementing = status === 'Implementing';
+  const canRetrySetup = failed && ((preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml);
+  const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
+  const steps = previewLifecycleSteps(preview);
   return (
     <section className="panel compact-panel preview-panel">
       <PanelHeader icon={<ExternalLink size={20} />} title="Preview environment" />
+      {implementing && <div className="implementation-banner"><Sparkles size={16} /><span>Implementing plan...</span></div>}
       {running
         ? <a className="demo-link" href={preview.url} target="_blank" rel="noreferrer">Open demo environment <ExternalLink size={16} /></a>
         : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
@@ -1662,7 +1667,74 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
-      {failed && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />Retry preview setup</button>}
+      {failed && canRetrySetup && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />Retry preview setup</button>}
+      {failed && !canRetrySetup && <p className="namespace-note">Source generation did not finish, so there is no Kubernetes preview manifest to retry.</p>}
+    </section>
+  );
+}
+
+type PreviewHistoryEntry = {
+  id: string;
+  createdAt: string;
+  label: string;
+  title: string;
+  detail?: string | null;
+};
+
+function PreviewHistoryPanel({ detail, aiRuns }: { detail: WorkItemDetail; aiRuns: AiRun[] }) {
+  const entries = React.useMemo<PreviewHistoryEntry[]>(() => {
+    const previewLines = detail.preview?.terminalLines ?? [];
+    return [
+      ...aiRuns.map((run) => ({
+        id: `run-${run.id}`,
+        createdAt: run.createdAt,
+        label: 'AI',
+        title: `Plan #${run.sequenceNumber} ${run.status}`,
+        detail: run.model
+      })),
+      ...(detail.previewEvents ?? []).map((event) => ({
+        id: `preview-${event.id}`,
+        createdAt: event.createdAt,
+        label: 'Preview',
+        title: event.eventType,
+        detail: event.message
+      })),
+      ...detail.comments
+        .filter((comment) => comment.author === 'Rosenvall AI' || comment.kind !== 'Comment')
+        .map((comment) => ({
+          id: `comment-${comment.id}`,
+          createdAt: comment.createdAt,
+          label: comment.kind,
+          title: comment.author,
+          detail: comment.body
+        })),
+      ...previewLines.slice(-4).map((line, index) => ({
+        id: `terminal-${line.createdAt}-${index}`,
+        createdAt: line.createdAt,
+        label: terminalStreamLabel(line.stream),
+        title: 'Implementation log',
+        detail: line.message
+      }))
+    ].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 10);
+  }, [aiRuns, detail.comments, detail.preview?.terminalLines, detail.previewEvents]);
+
+  if (entries.length === 0) return null;
+
+  return (
+    <section className="panel compact-panel preview-history-panel">
+      <PanelHeader icon={<History size={20} />} title="Preview history" />
+      <ol className="preview-history-list">
+        {entries.map((entry) => (
+          <li key={entry.id}>
+            <time>{relativeTime(entry.createdAt)}</time>
+            <div>
+              <strong>{entry.label}</strong>
+              <span>{entry.title}</span>
+              {entry.detail && <p>{compactHistoryText(entry.detail)}</p>}
+            </div>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -1717,15 +1789,21 @@ function TerminalLog({ lines, expanded = false, terminalRef }: { lines: PreviewT
   );
 }
 
-function previewLifecycleSteps(status: string) {
+function previewLifecycleSteps(preview: PreviewDto) {
+  const status = preview.status;
   const steps = [
     ['Implementing', 'Implementing preview source', 'Codex generates the React/Tailwind files.'],
     ['Applying', 'Applying Kubernetes resources', 'The API submits namespace, ConfigMap, Deployment, Service and route.'],
     ['Provisioning', 'Waiting for pod readiness', 'Kubernetes starts the preview pod and health checks it.'],
     ['Running', 'Running', 'The deployment is available and the demo link is enabled.']
   ] as const;
+  const failedIndex = ['ImplementationFailed', 'ServerRestart', 'ManifestMissing'].includes(preview.failureReason ?? '')
+    ? 0
+    : preview.failureReason === 'ApplyFailed'
+      ? 1
+      : 2;
   const current = status === 'Failed'
-    ? 2
+    ? failedIndex
     : Math.max(0, steps.findIndex(([key]) => key === status));
 
   return steps.map(([key, title, description], index) => ({
@@ -1784,9 +1862,14 @@ function terminalStreamLabel(stream: string) {
 function previewStatusText(preview: PreviewDto) {
   if (preview.status === 'Running') return 'Preview is healthy and ready.';
   if (preview.status === 'Failed') return 'Preview setup failed. Review the reason below and retry after fixing the issue.';
-  if (preview.status === 'Implementing') return 'Generating local React/Tailwind source from the card context.';
+  if (preview.status === 'Implementing') return 'Codex is generating React/Tailwind source from the approved plan.';
   if (preview.status === 'Applying') return 'Applying Kubernetes resources.';
   return 'Kubernetes resources are applied. Waiting for a healthy preview pod.';
+}
+
+function compactHistoryText(value: string) {
+  const compacted = value.replace(/\s+/g, ' ').trim();
+  return compacted.length > 140 ? `${compacted.slice(0, 137).trimEnd()}...` : compacted;
 }
 
 function isPreviewPendingStatus(status?: string) {

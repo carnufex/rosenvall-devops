@@ -859,7 +859,7 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Implementing_preview_is_checked_for_health_recovery()
+    public void Implementing_preview_is_not_checked_until_source_has_been_generated_and_applied()
     {
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
@@ -872,7 +872,46 @@ public sealed class DevOpsStoreTests
 
         var awaiting = store.GetPreviewsAwaitingHealthCheck();
 
-        Assert.Contains(awaiting, preview => preview.WorkItemId == item.Id && preview.Status == "Implementing");
+        Assert.DoesNotContain(awaiting, preview => preview.WorkItemId == item.Id && preview.Status == "Implementing");
+    }
+
+    [Fact]
+    public void Pending_or_failed_preview_implementation_without_source_does_not_render_placeholder_manifest()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "gör en hemsida med en klocka och en knapp så att man kan växla mellan digital och analogt ur.", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement a Swedish clock page with a digital/analog toggle.")!;
+        store.ApproveAiRun(run.Id, "crille");
+
+        store.BeginPreviewImplementation(item.Id, "codex");
+        var pendingManifest = store.RenderPreviewManifest(item.Id);
+        store.RecordImplementationFailure(item.Id, "crille", "Codex preview source generation failed.");
+        var failedManifest = store.RenderPreviewManifest(item.Id);
+
+        Assert.Null(pendingManifest);
+        Assert.Null(failedManifest);
+    }
+
+    [Fact]
+    public void Work_item_detail_includes_preview_history_for_implementation_attempts()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "hamburgare", "Skapa en demo for tva hamburgare.", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement two burger cards.")!;
+        store.ApproveAiRun(run.Id, "crille");
+
+        store.BeginPreviewImplementation(item.Id, "codex");
+        store.AppendPreviewTerminalLine(item.Id, "stdout", "OpenAI Codex v0.131.0");
+        store.RecordImplementationFailure(item.Id, "crille", "Codex preview source generation failed.");
+        var detail = store.GetWorkItemDetail(item.Id)!;
+
+        Assert.Contains(detail.PreviewEvents!, entry => entry.EventType == "Implementing");
+        Assert.Contains(detail.PreviewEvents!, entry => entry.EventType == "ImplementationFailed");
+        Assert.Contains(detail.Preview!.TerminalLines!, line => line.Message.Contains("OpenAI Codex", StringComparison.Ordinal));
     }
 
     [Fact]

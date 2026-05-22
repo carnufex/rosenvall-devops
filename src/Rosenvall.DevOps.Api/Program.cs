@@ -795,7 +795,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
-    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null);
+    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
     public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
@@ -4323,7 +4323,8 @@ namespace Rosenvall.DevOps.Api
                     _previews.SingleOrDefault(p => p.WorkItemId == item.Id),
                     _development.SingleOrDefault(d => d.WorkItemId == item.Id)?.Development,
                     _implementationRuns.Where(run => run.WorkItemId == item.Id).OrderByDescending(run => run.CreatedAt).ToArray(),
-                    _aiSessions.SingleOrDefault(session => session.WorkItemId == item.Id));
+                    _aiSessions.SingleOrDefault(session => session.WorkItemId == item.Id),
+                    _previewEvents.Where(entry => entry.WorkItemId == item.Id).OrderBy(entry => entry.CreatedAt).ToArray());
             }
         }
 
@@ -5053,9 +5054,9 @@ namespace Rosenvall.DevOps.Api
                         FailureLog = message,
                         TerminalLines = failedLines
                     });
+                    AddPreviewEvent(item, preview, "ImplementationFailed", actor, message);
                 }
                 _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Preview source implementation failed: {message}", DateTimeOffset.UtcNow));
-                AddTimelineForItem(item, "AiImplementationFailed", item.Key, message, actor);
                 Persist();
             }
         }
@@ -5282,8 +5283,7 @@ namespace Rosenvall.DevOps.Api
             {
                 return _previews
                     .Where(preview => preview.WorkItemId != Guid.Empty &&
-                        (string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
-                         string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase) ||
+                        (string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase) ||
                          (string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
@@ -5457,9 +5457,19 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                var sourceFiles = preview.SourceFiles is { Count: > 0 }
-                    ? preview.SourceFiles
-                    : string.Equals(preview.Image, LocalReactPreviewProject.Image, StringComparison.OrdinalIgnoreCase)
+                var hasStoredSourceFiles = preview.SourceFiles is { Count: > 0 };
+                var isLocalReactPreview = string.Equals(preview.Image, LocalReactPreviewProject.Image, StringComparison.OrdinalIgnoreCase);
+                if (!hasStoredSourceFiles &&
+                    isLocalReactPreview &&
+                    preview.StaticHtml is null &&
+                    RequiresGeneratedPreviewSource(preview))
+                {
+                    return null;
+                }
+
+                var sourceFiles = hasStoredSourceFiles
+                    ? preview.SourceFiles!
+                    : isLocalReactPreview
                         ? LocalReactPreviewProject.ForWorkItem(
                             item.Key,
                             item.Title,
@@ -5480,6 +5490,14 @@ namespace Rosenvall.DevOps.Api
                 return PreviewManifestRenderer.Render(resources);
             }
         }
+
+        private static bool RequiresGeneratedPreviewSource(PreviewDto preview) =>
+            string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
+            (string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
+             (string.Equals(preview.FailureReason, "ImplementationFailed", StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(preview.FailureReason, "ServerRestart", StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(preview.FailureReason, "ManifestMissing", StringComparison.OrdinalIgnoreCase)));
 
         public string? RenderPipelineJobManifest(Guid pipelineRunId)
         {
