@@ -504,7 +504,7 @@ function App() {
 
   React.useEffect(() => {
     setAuthSession(auth.status === 'ready'
-      ? { getAccessToken: () => auth.accessToken, refreshAccessToken: auth.refreshAccessToken, handleUnauthorized: auth.handleUnauthorized }
+      ? { getAccessToken: () => latestAccessToken(auth), refreshAccessToken: auth.refreshAccessToken, handleUnauthorized: auth.handleUnauthorized }
       : { getAccessToken: () => null });
   }, [auth]);
 
@@ -949,6 +949,17 @@ function useAuth(): AuthState {
   React.useEffect(() => {
     if (!authSettings.enabled) return;
     let cancelled = false;
+    const removeUserLoaded = userManager?.events.addUserLoaded((user) => {
+      if (!cancelled) {
+        setAuth(toReadyAuthState(user, refreshAccessToken, handleUnauthorized));
+      }
+    });
+    const removeAccessTokenExpiring = userManager?.events.addAccessTokenExpiring(() => {
+      void refreshAccessToken();
+    });
+    const removeAccessTokenExpired = userManager?.events.addAccessTokenExpired(() => {
+      void refreshAccessToken();
+    });
 
     initializeAuth()
       .then((user) => {
@@ -962,6 +973,9 @@ function useAuth(): AuthState {
 
     return () => {
       cancelled = true;
+      removeUserLoaded?.();
+      removeAccessTokenExpiring?.();
+      removeAccessTokenExpired?.();
     };
   }, [handleUnauthorized, refreshAccessToken]);
 
@@ -978,6 +992,15 @@ function toReadyAuthState(user: User, refreshAccessToken: () => Promise<string |
     refreshAccessToken,
     handleUnauthorized
   };
+}
+
+async function latestAccessToken(auth: Extract<AuthState, { status: 'ready' }>): Promise<string | null> {
+  const latestUser = await userManager?.getUser();
+  if (latestUser && !latestUser.expired) {
+    return latestUser.access_token;
+  }
+
+  return auth.accessToken;
 }
 
 const authSettings = {

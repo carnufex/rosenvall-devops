@@ -31,6 +31,21 @@ test('retries a 401 response once with a refreshed access token', async () => {
   assert.deepEqual(authorizations, ['Bearer stale-token', 'Bearer fresh-token']);
 });
 
+test('awaits the access token provider before sending a request', async () => {
+  const authorizations: Array<string | null> = [];
+  const client = createApiClient({
+    fetch: async (_path, init) => {
+      authorizations.push(new Headers(init?.headers).get('Authorization'));
+      return Response.json({ ok: true });
+    },
+    getAccessToken: async () => 'stored-fresh-token'
+  });
+
+  await client.get('/api/workspaces');
+
+  assert.deepEqual(authorizations, ['Bearer stored-fresh-token']);
+});
+
 test('does not retry a 401 response when token refresh is unavailable', async () => {
   const client = createApiClient({
     fetch: async () => Response.json({ detail: 'expired' }, { status: 401, statusText: 'Unauthorized' }),

@@ -1,5 +1,5 @@
 export type AuthSession = {
-  getAccessToken: () => string | null;
+  getAccessToken: () => string | null | Promise<string | null>;
   refreshAccessToken?: () => Promise<string | null>;
   handleUnauthorized?: () => Promise<void>;
 };
@@ -21,11 +21,11 @@ export function createApiClient(options: ApiClientOptions) {
   };
 
   const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-    let response = await fetchImpl(path, withAuth(init, options.getAccessToken));
+    let response = await fetchImpl(path, await withAuth(init, options.getAccessToken));
     if (response.status === 401) {
       const refreshedToken = await refreshOnce();
       if (refreshedToken) {
-        response = await fetchImpl(path, withAuth(init, () => refreshedToken));
+        response = await fetchImpl(path, await withAuth(init, () => refreshedToken));
       }
       if (response.status === 401) {
         await options.handleUnauthorized?.();
@@ -62,9 +62,9 @@ function jsonRequest(method: string, body: unknown): RequestInit {
   };
 }
 
-function withAuth(init: RequestInit | undefined, getAccessToken: () => string | null): RequestInit {
+async function withAuth(init: RequestInit | undefined, getAccessToken: () => string | null | Promise<string | null>): Promise<RequestInit> {
   const headers = new Headers(init?.headers);
-  const token = getAccessToken();
+  const token = await getAccessToken();
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   } else {
