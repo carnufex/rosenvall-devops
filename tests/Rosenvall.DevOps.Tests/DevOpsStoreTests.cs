@@ -859,6 +859,34 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Applying_preview_with_generated_source_recovers_as_provisioning_after_restart()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        const string description = "gör en hemsida med en klocka och en knapp så att man kan växla mellan digital och analogt ur.";
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klockhemsida", description, "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement a Swedish clock page with a digital/analog toggle.")!;
+        store.ApproveAiRun(run.Id, "crille");
+        var generatedSource = LocalReactPreviewProject.ForWorkItem(item.Key, item.Title, description)
+            .Select(file => file.Path == "src/App.tsx"
+                ? new PreviewSourceFile(file.Key, file.Path, "export default function App() { return <main>Klocka</main>; }")
+                : file)
+            .ToArray();
+        store.CompletePreviewImplementation(item.Id, generatedSource, "codex");
+        store.MarkPreviewApplying(item.Id, "kubectl apply started.");
+
+        var reopened = fixture.Reopen();
+        var restored = reopened.GetWorkItemDetail(item.Id)!;
+        var awaiting = reopened.GetPreviewsAwaitingHealthCheck();
+
+        Assert.Equal("Provisioning", restored.Preview?.Status);
+        Assert.Equal("Waiting for pod readiness.", restored.Preview?.Phase);
+        Assert.Null(restored.Preview?.FailureReason);
+        Assert.Contains(awaiting, preview => preview.WorkItemId == item.Id && preview.Status == "Provisioning");
+    }
+
+    [Fact]
     public void Implementing_preview_is_not_checked_until_source_has_been_generated_and_applied()
     {
         using var fixture = DevOpsStoreFixture.Create();

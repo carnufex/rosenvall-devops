@@ -5860,6 +5860,28 @@ namespace Rosenvall.DevOps.Api
                     continue;
                 }
 
+                if (string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) &&
+                    (preview.SourceFiles is { Count: > 0 } || preview.StaticHtml is not null))
+                {
+                    var applyingRecoveryMessage = "API restarted while Kubernetes resources were being applied. Continuing preview readiness checks.";
+                    var applyingTerminalLines = (preview.TerminalLines ?? [])
+                        .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "system", applyingRecoveryMessage)])
+                        .TakeLast(200)
+                        .ToArray();
+                    _previews[index] = preview with
+                    {
+                        Status = "Provisioning",
+                        Phase = "Waiting for pod readiness.",
+                        Message = applyingRecoveryMessage,
+                        LastCheckedAt = DateTimeOffset.UtcNow,
+                        FailureReason = null,
+                        FailureLog = null,
+                        TerminalLines = applyingTerminalLines
+                    };
+                    recovered = true;
+                    continue;
+                }
+
                 var message = "Preview implementation was interrupted by an API restart. Retry the plan implementation to start a fresh Codex session.";
                 var terminalLines = (preview.TerminalLines ?? [])
                     .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", message)])

@@ -1,5 +1,6 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
+import { createApiClient, type AuthSession } from './apiClient';
 import {
   Activity,
   Bot,
@@ -443,66 +444,16 @@ const selectedAiProviderStorageKey = 'rosenvall-devops:selected-ai-provider';
 const selectedAiModelStorageKey = 'rosenvall-devops:selected-ai-model';
 const selectedAiReasoningStorageKey = 'rosenvall-devops:selected-ai-reasoning';
 
-const api = {
-  async get<T>(path: string): Promise<T> {
-    const response = await fetch(path, { headers: authHeaders() });
-    return parseResponse<T>(response);
-  },
-  async post<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetch(path, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body)
-    });
-    return parseResponse<T>(response);
-  },
-  async patch<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetch(path, {
-      method: 'PATCH',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body)
-    });
-    return parseResponse<T>(response);
-  },
-  async delete(path: string): Promise<void> {
-    const response = await fetch(path, { method: 'DELETE', headers: authHeaders() });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-  },
-  async put<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetch(path, {
-      method: 'PUT',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body)
-    });
-    return parseResponse<T>(response);
-  }
-};
+let authSession: AuthSession = { getAccessToken: () => null };
 
-let accessTokenProvider: () => string | null = () => null;
-
-function setAccessTokenProvider(provider: () => string | null) {
-  accessTokenProvider = provider;
+function setAuthSession(session: AuthSession) {
+  authSession = session;
 }
 
-function authHeaders(base?: HeadersInit): HeadersInit {
-  const token = accessTokenProvider();
-  return token ? { ...base, Authorization: `Bearer ${token}` } : { ...base };
-}
-
-async function parseResponse<T>(response: Response): Promise<T> {
-  if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`;
-    try {
-      const payload = await response.json() as { detail?: string; title?: string };
-      message = payload.detail || payload.title || message;
-    } catch {
-      // Keep status text when the server did not return JSON problem details.
-    }
-    throw new Error(message);
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json();
-}
+const api = createApiClient({
+  getAccessToken: () => authSession.getAccessToken(),
+  refreshAccessToken: () => authSession.refreshAccessToken?.() ?? Promise.resolve(null)
+});
 
 function App() {
   const auth = useAuth();
@@ -551,7 +502,9 @@ function App() {
   );
 
   React.useEffect(() => {
-    setAccessTokenProvider(() => auth.status === 'ready' ? auth.accessToken : null);
+    setAuthSession(auth.status === 'ready'
+      ? { getAccessToken: () => auth.accessToken, refreshAccessToken: auth.refreshAccessToken }
+      : { getAccessToken: () => null });
   }, [auth]);
 
   const addToast = React.useCallback((kind: ToastMessage['kind'], message: string) => {
@@ -969,11 +922,24 @@ function App() {
 type AuthState =
   | { status: 'checking' }
   | { status: 'disabled' }
-  | { status: 'ready'; accessToken: string; userName: string; userEmail?: string }
+  | { status: 'ready'; accessToken: string; userName: string; userEmail?: string; refreshAccessToken: () => Promise<string | null> }
   | { status: 'error'; message: string };
 
 function useAuth(): AuthState {
   const [auth, setAuth] = React.useState<AuthState>(() => authSettings.enabled ? { status: 'checking' } : { status: 'disabled' });
+  const refreshAccessToken = React.useCallback(async () => {
+    if (!userManager) return null;
+    try {
+      const renewed = await userManager.signinSilent();
+      if (!renewed || renewed.expired) return null;
+      setAuth(toReadyAuthState(renewed, refreshAccessToken));
+      return renewed.access_token;
+    } catch {
+      await userManager.removeUser();
+      setAuth({ status: 'error', message: 'Authentication expired. Refresh the sign-in session to continue.' });
+      return null;
+    }
+  }, []);
 
   React.useEffect(() => {
     if (!authSettings.enabled) return;
@@ -982,13 +948,7 @@ function useAuth(): AuthState {
     initializeAuth()
       .then((user) => {
         if (!cancelled) {
-          const userEmail = typeof user.profile.email === 'string' ? user.profile.email : undefined;
-          setAuth({
-            status: 'ready',
-            accessToken: user.access_token,
-            userName: user.profile.name || user.profile.preferred_username || userEmail || 'Authenticated',
-            userEmail
-          });
+          setAuth(toReadyAuthState(user, refreshAccessToken));
         }
       })
       .catch((error) => {
@@ -998,9 +958,20 @@ function useAuth(): AuthState {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshAccessToken]);
 
   return auth;
+}
+
+function toReadyAuthState(user: User, refreshAccessToken: () => Promise<string | null>): AuthState {
+  const userEmail = typeof user.profile.email === 'string' ? user.profile.email : undefined;
+  return {
+    status: 'ready',
+    accessToken: user.access_token,
+    userName: user.profile.name || user.profile.preferred_username || userEmail || 'Authenticated',
+    userEmail,
+    refreshAccessToken
+  };
 }
 
 const authSettings = {
