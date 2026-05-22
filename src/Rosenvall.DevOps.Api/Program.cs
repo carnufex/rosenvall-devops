@@ -43,6 +43,8 @@ builder.Services.AddDbContextFactory<DevOpsStateDbContext>(options =>
 builder.Services.AddSingleton<DevOpsStore>();
 builder.Services.AddSingleton<PreviewEnvironmentOrchestrator>();
 builder.Services.AddSingleton<PipelineJobOrchestrator>();
+builder.Services.AddSingleton<PreviewImplementationRunner>();
+builder.Services.AddHostedService<PreviewImplementationRecoveryService>();
 builder.Services.AddHostedService<PreviewHealthMonitor>();
 builder.Services.AddHostedService<ImplementationRunMonitor>();
 builder.Services.AddCors(options =>
@@ -482,7 +484,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     return Results.Accepted($"/api/ai-runs/{run.Id}", run);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, DevOpsStore store, CodexCliPreviewSourceProvider previewSourceProvider, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, ILoggerFactory loggerFactory) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IHubContext<DevOpsHub> hub) =>
 {
     AiRun? result;
     try
@@ -507,7 +509,7 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     }
 
     await hub.Clients.All.SendAsync("previewChanged", preview);
-    _ = Task.Run(() => RunApprovedPlanImplementationAsync(result, request.ApprovedBy, store, previewSourceProvider, previews, configuration, hub, loggerFactory.CreateLogger("PreviewImplementation")), CancellationToken.None);
+    _ = Task.Run(() => previewImplementationRunner.RunAsync(result, request.ApprovedBy, CancellationToken.None), CancellationToken.None);
 
     var detail = store.GetWorkItemDetail(result.WorkItemId);
     return Results.Accepted($"/api/ai-runs/{aiRunId}", detail ?? (object)result);
@@ -713,74 +715,6 @@ static UserIdentityRequest UserIdentityFromClaims(ClaimsPrincipal user)
     return new UserIdentityRequest(subject, displayName, email, avatar);
 }
 
-static async Task RunApprovedPlanImplementationAsync(AiRun run, string approvedBy, DevOpsStore store, CodexCliPreviewSourceProvider previewSourceProvider, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, ILogger logger)
-{
-    try
-    {
-        var context = store.GetWorkItemDetail(run.WorkItemId);
-        if (context is null)
-        {
-            return;
-        }
-
-        var implementationModel = run.Model;
-        var reasoningEffort = run.ReasoningEffort ?? configuration["Ai:Codex:ReasoningEffort"] ?? "high";
-        var sourceFiles = await previewSourceProvider.GenerateSourceAsync(
-            implementationModel,
-            reasoningEffort,
-            run,
-            context,
-            async line =>
-            {
-                var updated = store.AppendPreviewTerminalLine(run.WorkItemId, line.Stream, line.Message, line.CreatedAt);
-                if (updated is not null)
-                {
-                    await hub.Clients.All.SendAsync("previewChanged", updated.Preview);
-                }
-            },
-            CancellationToken.None);
-
-        store.AppendPreviewTerminalLine(run.WorkItemId, "system", $"Codex generated {sourceFiles.Count} source files.");
-        var implementation = store.CompletePreviewImplementation(run.WorkItemId, sourceFiles, "codex");
-        await hub.Clients.All.SendAsync("previewChanged", implementation?.Preview);
-
-        var manifest = store.RenderPreviewManifest(run.WorkItemId);
-        if (manifest is null)
-        {
-            store.RecordPreviewFailure(run.WorkItemId, "ManifestMissing", approvedBy, "Preview manifest could not be rendered.");
-            await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
-            return;
-        }
-
-        store.MarkPreviewApplying(run.WorkItemId, "Applying Kubernetes resources.");
-        store.AppendPreviewTerminalLine(run.WorkItemId, "system", "kubectl apply started.");
-        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
-
-        var apply = await previews.ApplyAsync(manifest, CancellationToken.None);
-        store.AppendPreviewTerminalLine(run.WorkItemId, apply.Succeeded ? "system" : "stderr", apply.Message);
-        if (!apply.Succeeded)
-        {
-            store.RecordPreviewFailure(run.WorkItemId, "ApplyFailed", approvedBy, apply.Message);
-            await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
-            return;
-        }
-
-        store.MarkPreviewProvisioning(run.WorkItemId, apply.Message);
-        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
-    }
-    catch (AiPlanProviderUnavailableException ex)
-    {
-        store.RecordImplementationFailure(run.WorkItemId, approvedBy, ex.Message);
-        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Preview implementation failed for AI run {AiRunId}", run.Id);
-        store.RecordImplementationFailure(run.WorkItemId, approvedBy, $"Unexpected preview implementation failure: {ex.Message}");
-        await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview);
-    }
-}
-
 namespace Rosenvall.DevOps.Api
 {
     public sealed class DevOpsHub : Hub;
@@ -795,7 +729,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
-    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null);
+    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
     public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
@@ -1207,6 +1141,116 @@ namespace Rosenvall.DevOps.Api
     {
         public static PreviewCleanupResult Ok(string message) => new(true, message);
         public static PreviewCleanupResult Failed(string message) => new(false, message);
+    }
+
+    public sealed class PreviewImplementationRunner(
+        DevOpsStore store,
+        CodexCliPreviewSourceProvider previewSourceProvider,
+        PreviewEnvironmentOrchestrator previews,
+        IConfiguration configuration,
+        IHubContext<DevOpsHub> hub,
+        ILogger<PreviewImplementationRunner> logger)
+    {
+        public async Task RunAsync(AiRun run, string approvedBy, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var context = store.GetWorkItemDetail(run.WorkItemId);
+                if (context is null)
+                {
+                    return;
+                }
+
+                var implementationModel = run.Model;
+                var reasoningEffort = run.ReasoningEffort ?? configuration["Ai:Codex:ReasoningEffort"] ?? "high";
+                var sourceFiles = await previewSourceProvider.GenerateSourceAsync(
+                    implementationModel,
+                    reasoningEffort,
+                    run,
+                    context,
+                    async line =>
+                    {
+                        var updated = store.AppendPreviewTerminalLine(run.WorkItemId, line.Stream, line.Message, line.CreatedAt);
+                        if (updated is not null)
+                        {
+                            await hub.Clients.All.SendAsync("previewChanged", updated.Preview, cancellationToken);
+                        }
+                    },
+                    cancellationToken);
+
+                store.AppendPreviewTerminalLine(run.WorkItemId, "system", $"Codex generated {sourceFiles.Count} source files.");
+                var implementation = store.CompletePreviewImplementation(run.WorkItemId, sourceFiles, "codex");
+                await hub.Clients.All.SendAsync("previewChanged", implementation?.Preview, cancellationToken);
+
+                var manifest = store.RenderPreviewManifest(run.WorkItemId);
+                if (manifest is null)
+                {
+                    store.RecordPreviewFailure(run.WorkItemId, "ManifestMissing", approvedBy, "Preview manifest could not be rendered.");
+                    await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+                    return;
+                }
+
+                store.MarkPreviewApplying(run.WorkItemId, "Applying Kubernetes resources.");
+                store.AppendPreviewTerminalLine(run.WorkItemId, "system", "kubectl apply started.");
+                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+
+                var apply = await previews.ApplyAsync(manifest, cancellationToken);
+                store.AppendPreviewTerminalLine(run.WorkItemId, apply.Succeeded ? "system" : "stderr", apply.Message);
+                if (!apply.Succeeded)
+                {
+                    store.RecordPreviewFailure(run.WorkItemId, "ApplyFailed", approvedBy, apply.Message);
+                    await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+                    return;
+                }
+
+                store.MarkPreviewProvisioning(run.WorkItemId, apply.Message);
+                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                logger.LogInformation("Preview implementation was cancelled for AI run {AiRunId}.", run.Id);
+            }
+            catch (AiPlanProviderUnavailableException ex)
+            {
+                store.RecordImplementationFailure(run.WorkItemId, approvedBy, ex.Message);
+                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Preview implementation failed for AI run {AiRunId}", run.Id);
+                store.RecordImplementationFailure(run.WorkItemId, approvedBy, $"Unexpected preview implementation failure: {ex.Message}");
+                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, CancellationToken.None);
+            }
+        }
+    }
+
+    public sealed class PreviewImplementationRecoveryService(
+        DevOpsStore store,
+        PreviewImplementationRunner runner,
+        IHubContext<DevOpsHub> hub,
+        ILogger<PreviewImplementationRecoveryService> logger) : BackgroundService
+    {
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+                foreach (var run in store.GetPreviewImplementationRunsAwaitingRecovery())
+                {
+                    var detail = store.AppendPreviewTerminalLine(run.WorkItemId, "system", "Restarting Codex preview implementation after API restart.");
+                    await hub.Clients.All.SendAsync("previewChanged", detail?.Preview, stoppingToken);
+                    await runner.RunAsync(run, run.ApprovedBy ?? "system", stoppingToken);
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                logger.LogInformation("Preview implementation recovery stopped.");
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Preview implementation recovery failed.");
+            }
+        }
     }
 
     public sealed record PreviewHealthCheckResult(string Status, string Phase, string Message, string? PodName = null, string? FailureReason = null, string? FailureLog = null)
@@ -4324,7 +4368,8 @@ namespace Rosenvall.DevOps.Api
                     _development.SingleOrDefault(d => d.WorkItemId == item.Id)?.Development,
                     _implementationRuns.Where(run => run.WorkItemId == item.Id).OrderByDescending(run => run.CreatedAt).ToArray(),
                     _aiSessions.SingleOrDefault(session => session.WorkItemId == item.Id),
-                    _previewEvents.Where(entry => entry.WorkItemId == item.Id).OrderBy(entry => entry.CreatedAt).ToArray());
+                    _previewEvents.Where(entry => entry.WorkItemId == item.Id).OrderBy(entry => entry.CreatedAt).ToArray(),
+                    PreviewImplementationRunsAwaitingRecoveryForWorkItem(item.Id));
             }
         }
 
@@ -4336,6 +4381,20 @@ namespace Rosenvall.DevOps.Api
                     .Where(run => run.WorkItemId == workItemId)
                     .OrderBy(run => run.SequenceNumber)
                     .ThenBy(run => run.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public IReadOnlyList<AiRun> GetPreviewImplementationRunsAwaitingRecovery()
+        {
+            lock (_lock)
+            {
+                return _previews
+                    .Where(IsPreviewImplementationAwaitingRecovery)
+                    .Select(preview => PreviewImplementationRunsAwaitingRecoveryForWorkItem(preview.WorkItemId).FirstOrDefault())
+                    .Where(run => run is not null)
+                    .Select(run => run!)
+                    .OrderBy(run => run.CreatedAt)
                     .ToArray();
             }
         }
@@ -5848,13 +5907,34 @@ namespace Rosenvall.DevOps.Api
         private static string NormalizePreviewStatus(string status) =>
             string.Equals(status, "Healthy", StringComparison.OrdinalIgnoreCase) ? "Running" : status;
 
+        private IReadOnlyList<AiRun> PreviewImplementationRunsAwaitingRecoveryForWorkItem(Guid workItemId)
+        {
+            var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
+            if (preview is null || !IsPreviewImplementationAwaitingRecovery(preview))
+            {
+                return [];
+            }
+
+            return _aiRuns
+                .Where(run => run.WorkItemId == workItemId && run.Status == AiRunStatus.Approved)
+                .OrderByDescending(run => run.SequenceNumber)
+                .ThenByDescending(run => run.CreatedAt)
+                .Take(1)
+                .ToArray();
+        }
+
+        private static bool IsPreviewImplementationAwaitingRecovery(PreviewDto preview) =>
+            string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
+            (string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
+             string.Equals(preview.FailureReason, "ServerRestart", StringComparison.OrdinalIgnoreCase));
+
         private void RecoverInterruptedPreviewImplementations()
         {
             var recovered = false;
             for (var index = 0; index < _previews.Count; index++)
             {
                 var preview = _previews[index];
-                if (!string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) &&
+                if (!IsPreviewImplementationAwaitingRecovery(preview) &&
                     !string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
@@ -5882,20 +5962,48 @@ namespace Rosenvall.DevOps.Api
                     continue;
                 }
 
-                var message = "Preview implementation was interrupted by an API restart. Retry the plan implementation to start a fresh Codex session.";
-                var terminalLines = (preview.TerminalLines ?? [])
-                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", message)])
+                if (IsPreviewImplementationAwaitingRecovery(preview))
+                {
+                    var message = "API restarted while Codex was generating preview source. Restarting preview implementation automatically.";
+                    var terminalLines = (preview.TerminalLines ?? [])
+                        .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "system", message)])
+                        .TakeLast(200)
+                        .ToArray();
+                    var recoveredPreview = preview with
+                    {
+                        Status = "Implementing",
+                        Phase = "Restarting preview source",
+                        Message = message,
+                        LastCheckedAt = DateTimeOffset.UtcNow,
+                        FailureReason = null,
+                        FailureLog = null,
+                        TerminalLines = terminalLines
+                    };
+                    _previews[index] = recoveredPreview;
+                    var item = _items.SingleOrDefault(i => i.Id == preview.WorkItemId);
+                    if (item is not null)
+                    {
+                        item.AiStatus = "ImplementationRunning";
+                        AddPreviewEvent(item, recoveredPreview, "ImplementationRestarting", "system", message);
+                    }
+                    recovered = true;
+                    continue;
+                }
+
+                var failedMessage = "Preview implementation was interrupted before Kubernetes resources could be recovered. Retry the plan implementation to start a fresh Codex session.";
+                var failedTerminalLines = (preview.TerminalLines ?? [])
+                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", failedMessage)])
                     .TakeLast(200)
                     .ToArray();
                 _previews[index] = preview with
                 {
                     Status = "Failed",
                     Phase = "Failed",
-                    Message = message,
+                    Message = failedMessage,
                     LastCheckedAt = DateTimeOffset.UtcNow,
                     FailureReason = "ServerRestart",
-                    FailureLog = message,
-                    TerminalLines = terminalLines
+                    FailureLog = failedMessage,
+                    TerminalLines = failedTerminalLines
                 };
                 recovered = true;
             }

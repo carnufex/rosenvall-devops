@@ -124,6 +124,7 @@ type WorkItemDetail = {
   implementationRuns?: ImplementationRunDto[] | null;
   aiSession?: AiSessionDto | null;
   previewEvents?: PreviewEventDto[] | null;
+  previewImplementationRunsAwaitingRecovery?: AiRun[] | null;
 };
 
 type CommentDto = {

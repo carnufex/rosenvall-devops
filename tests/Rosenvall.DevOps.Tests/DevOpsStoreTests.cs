@@ -841,7 +841,7 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Interrupted_preview_implementation_is_recoverable_after_restart()
+    public void Interrupted_preview_implementation_is_requeued_after_restart()
     {
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
@@ -853,9 +853,31 @@ public sealed class DevOpsStoreTests
 
         var restored = fixture.Reopen().GetWorkItemDetail(item.Id)!;
 
-        Assert.Equal("Failed", restored.Preview?.Status);
-        Assert.Equal("ServerRestart", restored.Preview?.FailureReason);
-        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("interrupted", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("Implementing", restored.Preview?.Status);
+        Assert.Null(restored.Preview?.FailureReason);
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("restarting", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("automatically", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(restored.PreviewImplementationRunsAwaitingRecovery!, pending => pending.Id == run.Id);
+    }
+
+    [Fact]
+    public void Previously_failed_server_restart_preview_is_requeued_after_restart()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "gÃ¶r en hemsida med en klocka och en knapp sÃ¥ att man kan vÃ¤xla mellan digital och analogt ur.", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement a Swedish clock page with a digital/analog toggle.")!;
+        store.ApproveAiRun(run.Id, "crille");
+        store.BeginPreviewImplementation(item.Id, "codex");
+        store.RecordPreviewFailure(item.Id, "ServerRestart", "system", "Preview implementation was interrupted by an API restart.");
+
+        var restored = fixture.Reopen().GetWorkItemDetail(item.Id)!;
+
+        Assert.Equal("Implementing", restored.Preview?.Status);
+        Assert.Null(restored.Preview?.FailureReason);
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("restarting", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(restored.PreviewImplementationRunsAwaitingRecovery!, pending => pending.Id == run.Id);
     }
 
     [Fact]
