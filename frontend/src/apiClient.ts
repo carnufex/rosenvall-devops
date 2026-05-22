@@ -1,6 +1,7 @@
 export type AuthSession = {
   getAccessToken: () => string | null;
   refreshAccessToken?: () => Promise<string | null>;
+  handleUnauthorized?: () => Promise<void>;
 };
 
 type ApiClientOptions = AuthSession & {
@@ -25,6 +26,9 @@ export function createApiClient(options: ApiClientOptions) {
       const refreshedToken = await refreshOnce();
       if (refreshedToken) {
         response = await fetchImpl(path, withAuth(init, () => refreshedToken));
+      }
+      if (response.status === 401) {
+        await options.handleUnauthorized?.();
       }
     }
 

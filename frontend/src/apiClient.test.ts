@@ -39,3 +39,19 @@ test('does not retry a 401 response when token refresh is unavailable', async ()
 
   await assert.rejects(() => client.get('/api/me'), /expired/);
 });
+
+test('runs the unauthorized handler when a refreshed token is still rejected', async () => {
+  let unauthorizedCount = 0;
+  const client = createApiClient({
+    fetch: async () => Response.json({ detail: 'expired' }, { status: 401, statusText: 'Unauthorized' }),
+    getAccessToken: () => 'stale-token',
+    refreshAccessToken: async () => 'fresh-token',
+    handleUnauthorized: async () => {
+      unauthorizedCount += 1;
+    }
+  });
+
+  await assert.rejects(() => client.get('/api/me'), /expired/);
+
+  assert.equal(unauthorizedCount, 1);
+});

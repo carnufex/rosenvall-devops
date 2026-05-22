@@ -452,7 +452,8 @@ function setAuthSession(session: AuthSession) {
 
 const api = createApiClient({
   getAccessToken: () => authSession.getAccessToken(),
-  refreshAccessToken: () => authSession.refreshAccessToken?.() ?? Promise.resolve(null)
+  refreshAccessToken: () => authSession.refreshAccessToken?.() ?? Promise.resolve(null),
+  handleUnauthorized: () => authSession.handleUnauthorized?.() ?? Promise.resolve()
 });
 
 function App() {
@@ -503,7 +504,7 @@ function App() {
 
   React.useEffect(() => {
     setAuthSession(auth.status === 'ready'
-      ? { getAccessToken: () => auth.accessToken, refreshAccessToken: auth.refreshAccessToken }
+      ? { getAccessToken: () => auth.accessToken, refreshAccessToken: auth.refreshAccessToken, handleUnauthorized: auth.handleUnauthorized }
       : { getAccessToken: () => null });
   }, [auth]);
 
@@ -922,24 +923,28 @@ function App() {
 type AuthState =
   | { status: 'checking' }
   | { status: 'disabled' }
-  | { status: 'ready'; accessToken: string; userName: string; userEmail?: string; refreshAccessToken: () => Promise<string | null> }
+  | { status: 'ready'; accessToken: string; userName: string; userEmail?: string; refreshAccessToken: () => Promise<string | null>; handleUnauthorized: () => Promise<void> }
   | { status: 'error'; message: string };
 
 function useAuth(): AuthState {
   const [auth, setAuth] = React.useState<AuthState>(() => authSettings.enabled ? { status: 'checking' } : { status: 'disabled' });
+  const handleUnauthorized = React.useCallback(async () => {
+    if (!userManager) return;
+    await userManager.removeUser();
+    await userManager.signinRedirect();
+  }, []);
   const refreshAccessToken = React.useCallback(async () => {
     if (!userManager) return null;
     try {
       const renewed = await userManager.signinSilent();
       if (!renewed || renewed.expired) return null;
-      setAuth(toReadyAuthState(renewed, refreshAccessToken));
+      setAuth(toReadyAuthState(renewed, refreshAccessToken, handleUnauthorized));
       return renewed.access_token;
     } catch {
       await userManager.removeUser();
-      setAuth({ status: 'error', message: 'Authentication expired. Refresh the sign-in session to continue.' });
       return null;
     }
-  }, []);
+  }, [handleUnauthorized]);
 
   React.useEffect(() => {
     if (!authSettings.enabled) return;
@@ -948,7 +953,7 @@ function useAuth(): AuthState {
     initializeAuth()
       .then((user) => {
         if (!cancelled) {
-          setAuth(toReadyAuthState(user, refreshAccessToken));
+          setAuth(toReadyAuthState(user, refreshAccessToken, handleUnauthorized));
         }
       })
       .catch((error) => {
@@ -958,19 +963,20 @@ function useAuth(): AuthState {
     return () => {
       cancelled = true;
     };
-  }, [refreshAccessToken]);
+  }, [handleUnauthorized, refreshAccessToken]);
 
   return auth;
 }
 
-function toReadyAuthState(user: User, refreshAccessToken: () => Promise<string | null>): AuthState {
+function toReadyAuthState(user: User, refreshAccessToken: () => Promise<string | null>, handleUnauthorized: () => Promise<void>): AuthState {
   const userEmail = typeof user.profile.email === 'string' ? user.profile.email : undefined;
   return {
     status: 'ready',
     accessToken: user.access_token,
     userName: user.profile.name || user.profile.preferred_username || userEmail || 'Authenticated',
     userEmail,
-    refreshAccessToken
+    refreshAccessToken,
+    handleUnauthorized
   };
 }
 
