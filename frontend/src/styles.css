@@ -278,6 +278,7 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .provider-status.ready { color: var(--secondary); }
 .settings-inline { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--surface-high); border: 1px solid var(--line); padding: 14px; border-radius: 8px; }
 .settings-inline p { margin-top: 4px; }
+.button-row { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .settings-list { display: grid; gap: 10px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--line); background: #121314; padding: 12px 14px; border-radius: 8px; }
 .settings-row p { margin-top: 4px; overflow-wrap: anywhere; }

@@ -258,6 +258,39 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitHub_app_installation_sync_normalizes_account_metadata()
+    {
+        using var document = JsonDocument.Parse("""
+        [
+          {
+            "id": 3800502,
+            "account": { "login": "carnufex", "type": "User" }
+          },
+          {
+            "id": 3800503,
+            "account": { "login": "rosenvall-corp", "type": "Organization" }
+          }
+        ]
+        """);
+
+        var installations = GitHubRepositoryClient.NormalizeInstallations(document.RootElement, "github-app", "Installed");
+
+        Assert.Collection(installations,
+            first =>
+            {
+                Assert.Equal(3800502, first.InstallationId);
+                Assert.Equal("carnufex", first.AccountLogin);
+                Assert.Equal("User", first.AccountType);
+            },
+            second =>
+            {
+                Assert.Equal(3800503, second.InstallationId);
+                Assert.Equal("rosenvall-corp", second.AccountLogin);
+                Assert.Equal("Organization", second.AccountType);
+            });
+    }
+
+    [Fact]
     public void Code_repo_implementation_run_renders_kubernetes_job_without_inline_tokens()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -483,6 +516,26 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal(12345, integration.InstallationId);
         Assert.Contains(reopened.GetGitHubIntegrations(), entry => entry.InstallationId == 12345 && entry.AccountLogin == "carnufex" && entry.RepositoriesCount == 7);
+    }
+
+    [Fact]
+    public void GitHub_app_integration_sync_is_idempotent()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        fixture.Store.UpsertGitHubIntegrations([
+            new GitHubIntegrationCallbackRequest(12345, "carnufex", "User", "github-app", 7),
+            new GitHubIntegrationCallbackRequest(67890, "rosenvall-corp", "Organization", "github-app", 2)
+        ]);
+
+        fixture.Store.UpsertGitHubIntegrations([
+            new GitHubIntegrationCallbackRequest(12345, "carnufex", "User", "github-app", 9)
+        ]);
+
+        var integrations = fixture.Store.GetGitHubIntegrations();
+
+        Assert.Equal(2, integrations.Count);
+        Assert.Contains(integrations, entry => entry.InstallationId == 12345 && entry.RepositoriesCount == 9);
+        Assert.Contains(integrations, entry => entry.InstallationId == 67890 && entry.RepositoriesCount == 2);
     }
 
     [Fact]

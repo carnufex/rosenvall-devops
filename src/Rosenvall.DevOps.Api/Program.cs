@@ -122,9 +122,10 @@ app.MapGet("/integrations/github/callback", async (string? code, long? installat
 
     if (installation_id is { } installationId)
     {
-        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(
+        var installation = await github.GetAppInstallationAsync(installationId, "github-app", setup_action ?? "Installed", cancellationToken);
+        var integration = store.CreateGitHubIntegration(installation ?? new GitHubIntegrationCallbackRequest(
             installationId,
-            state is { Length: > 0 } ? state : $"installation-{installationId}",
+            $"installation-{installationId}",
             "GitHub",
             "github-app",
             Status: setup_action ?? "Installed"));
@@ -188,16 +189,51 @@ api.MapPut("/teams/{teamId:guid}/members/{userId:guid}", (Guid teamId, Guid user
     store.UpsertTeamMember(teamId, request with { UserId = userId }) is { } team ? Results.Ok(team) : Results.NotFound());
 
 api.MapGet("/integrations/github/install-url", (GitHubRepositoryClient github) => Results.Ok(new GitHubInstallUrlDto(github.GetInstallUrl())));
-api.MapGet("/integrations/github/callback", (long installation_id, string? setup_action, string? account, ClaimsPrincipal user, DevOpsStore store) =>
+api.MapGet("/integrations/github/callback", async (long installation_id, string? setup_action, string? account, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
     var actor = UserIdentityFromClaims(user);
-    var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(installation_id, account ?? $"installation-{installation_id}", "User", actor.Subject, Status: setup_action ?? "Installed"));
+    var installation = await github.GetAppInstallationAsync(installation_id, actor.Subject, setup_action ?? "Installed", cancellationToken);
+    var integration = store.CreateGitHubIntegration(installation ?? new GitHubIntegrationCallbackRequest(installation_id, account ?? $"installation-{installation_id}", "User", actor.Subject, Status: setup_action ?? "Installed"));
     return Results.Ok(integration);
 });
-api.MapGet("/integrations/github", (DevOpsStore store) => store.GetGitHubIntegrations());
+api.MapGet("/integrations/github", async (DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+{
+    var installations = await github.GetAppInstallationsAsync(cancellationToken);
+    if (installations.Count > 0)
+    {
+        store.UpsertGitHubIntegrations(installations);
+    }
+
+    return Results.Ok(store.GetGitHubIntegrations());
+});
+api.MapPost("/integrations/github/sync", async (DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+{
+    var installations = await github.GetAppInstallationsAsync(cancellationToken);
+    if (installations.Count > 0)
+    {
+        store.UpsertGitHubIntegrations(installations);
+    }
+
+    return Results.Ok(store.GetGitHubIntegrations());
+});
 api.MapGet("/integrations/github/repositories", async (long? installationId, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
     var resolvedInstallationId = installationId ?? store.GetDefaultGitHubInstallationId();
+    if (resolvedInstallationId is null && github.IsAppConfigured())
+    {
+        var installations = await github.GetAppInstallationsAsync(cancellationToken);
+        if (installations.Count > 0)
+        {
+            store.UpsertGitHubIntegrations(installations);
+            resolvedInstallationId = store.GetDefaultGitHubInstallationId();
+        }
+    }
+
+    if (resolvedInstallationId is null && github.IsAppConfigured())
+    {
+        return Results.Ok(Array.Empty<RepositoryDto>());
+    }
+
     return Results.Ok(await github.GetRepositoriesAsync(cancellationToken, resolvedInstallationId));
 });
 
@@ -722,7 +758,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record TimelineEventDto(Guid Id, Guid? BoardId, Guid? RepositoryId, Guid? WorkItemId, string Kind, string Title, string Message, string Actor, string? Url, DateTimeOffset CreatedAt);
     public sealed record DevelopmentDto(string Repository, string Branch, string? PullRequestUrl, string ChecksStatus, string? PullRequestApprovedBy = null, DateTimeOffset? PullRequestApprovedAt = null);
     public sealed record SettingsDto(GitHubSettingsDto GitHub, AiSettingsDto Ai, PreviewSettingsDto Preview, RepositoryHostingSettingsDto Repositories, AuthentikSettingsDto Authentik);
-    public sealed record GitHubSettingsDto(string Account, string TargetRepository, string BranchWatchPatterns, bool Connected);
+    public sealed record GitHubSettingsDto(string Account, string TargetRepository, string BranchWatchPatterns, bool Connected, bool AppConfigured, string? InstallUrl, bool SyncAvailable);
     public sealed record AiSettingsDto(string Provider, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels, bool AutoReviewPullRequests, IReadOnlyList<AiProviderSettingsDto> AvailableProviders);
     public sealed record AiProviderSettingsDto(string Provider, string DisplayName, string Status, string Endpoint, string ActiveModel, IReadOnlyList<string> AvailableModels);
     public sealed record PreviewSettingsDto(string Domain, int DefaultTtlDays, string Namespace);
@@ -2467,14 +2503,23 @@ namespace Rosenvall.DevOps.Api
 
     public sealed class GitHubRepositoryClient(HttpClient httpClient, IConfiguration configuration)
     {
+        public bool IsAppConfigured() =>
+            !string.IsNullOrWhiteSpace(configuration["GitHub:AppId"]) &&
+            !string.IsNullOrWhiteSpace(configuration["GitHub:AppPrivateKey"]);
+
         public string GetInstallUrl()
         {
-            if (string.IsNullOrWhiteSpace(configuration["GitHub:AppId"]) || string.IsNullOrWhiteSpace(configuration["GitHub:AppPrivateKey"]))
+            if (!IsAppConfigured())
             {
                 return "/integrations/github/manifest/start";
             }
 
             var slug = configuration["GitHub:AppSlug"] ?? configuration["GitHub:AppName"] ?? "rosenvall-devops";
+            return BuildInstallUrl(slug);
+        }
+
+        public static string BuildInstallUrl(string slug)
+        {
             var state = Guid.NewGuid().ToString("N");
             return $"https://github.com/apps/{WebUtility.UrlEncode(slug)}/installations/new?state={state}";
         }
@@ -2491,6 +2536,8 @@ namespace Rosenvall.DevOps.Api
                 hook_attributes = new { url = $"{baseUrl}/integrations/github/webhook" },
                 redirect_url = callbackUrl,
                 callback_urls = new[] { callbackUrl },
+                setup_url = callbackUrl,
+                setup_on_update = true,
                 @public = false,
                 default_permissions = new Dictionary<string, string>
                 {
@@ -2544,6 +2591,76 @@ namespace Rosenvall.DevOps.Api
             return id > 0 && !string.IsNullOrWhiteSpace(pem)
                 ? new GitHubManifestAppDto(id, slug, string.IsNullOrWhiteSpace(name) ? slug : name, pem)
                 : null;
+        }
+
+        public async Task<IReadOnlyList<GitHubIntegrationCallbackRequest>> GetAppInstallationsAsync(CancellationToken cancellationToken)
+        {
+            if (!IsAppConfigured())
+            {
+                return [];
+            }
+
+            try
+            {
+                var appId = configuration["GitHub:AppId"]!;
+                var privateKey = configuration["GitHub:AppPrivateKey"]!;
+                var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/app/installations?per_page=100");
+                request.Headers.UserAgent.ParseAdd("rosenvall-devops");
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppJwt(appId, privateKey));
+                request.Headers.Accept.ParseAdd("application/vnd.github+json");
+                using var response = await httpClient.SendAsync(request, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return [];
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+                var installations = NormalizeInstallations(document.RootElement, "github-app", "Installed");
+                return await WithRepositoryCountsAsync(installations, cancellationToken);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return [];
+            }
+        }
+
+        public async Task<GitHubIntegrationCallbackRequest?> GetAppInstallationAsync(long installationId, string installedBy, string status, CancellationToken cancellationToken)
+        {
+            if (!IsAppConfigured())
+            {
+                return null;
+            }
+
+            try
+            {
+                var appId = configuration["GitHub:AppId"]!;
+                var privateKey = configuration["GitHub:AppPrivateKey"]!;
+                var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/app/installations/{installationId}");
+                request.Headers.UserAgent.ParseAdd("rosenvall-devops");
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppJwt(appId, privateKey));
+                request.Headers.Accept.ParseAdd("application/vnd.github+json");
+                using var response = await httpClient.SendAsync(request, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+                var installation = NormalizeInstallation(document.RootElement, installedBy, status);
+                if (installation is null)
+                {
+                    return null;
+                }
+
+                var counted = await WithRepositoryCountsAsync([installation], cancellationToken);
+                return counted.FirstOrDefault();
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
         }
 
         public async Task<IReadOnlyList<RepositoryDto>> GetRepositoriesAsync(CancellationToken cancellationToken, long? installationId = null)
@@ -2644,6 +2761,56 @@ namespace Rosenvall.DevOps.Api
             }
 
             return repositories;
+        }
+
+        public static IReadOnlyList<GitHubIntegrationCallbackRequest> NormalizeInstallations(JsonElement root, string installedBy, string status)
+        {
+            if (root.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            var installations = new List<GitHubIntegrationCallbackRequest>();
+            foreach (var item in root.EnumerateArray())
+            {
+                if (NormalizeInstallation(item, installedBy, status) is { } installation)
+                {
+                    installations.Add(installation);
+                }
+            }
+
+            return installations;
+        }
+
+        private async Task<IReadOnlyList<GitHubIntegrationCallbackRequest>> WithRepositoryCountsAsync(IReadOnlyList<GitHubIntegrationCallbackRequest> installations, CancellationToken cancellationToken)
+        {
+            var counted = new List<GitHubIntegrationCallbackRequest>();
+            foreach (var installation in installations)
+            {
+                var repositories = await GetRepositoriesAsync(cancellationToken, installation.InstallationId);
+                counted.Add(installation with { RepositoriesCount = repositories.Count });
+            }
+
+            return counted;
+        }
+
+        private static GitHubIntegrationCallbackRequest? NormalizeInstallation(JsonElement item, string installedBy, string status)
+        {
+            var id = item.TryGetProperty("id", out var idElement) && idElement.TryGetInt64(out var installationId) ? installationId : 0;
+            if (id <= 0)
+            {
+                return null;
+            }
+
+            var account = item.TryGetProperty("account", out var accountElement) ? accountElement : default;
+            var login = account.ValueKind == JsonValueKind.Object ? GetString(account, "login") : "";
+            var type = account.ValueKind == JsonValueKind.Object ? GetString(account, "type") : "";
+            return new GitHubIntegrationCallbackRequest(
+                id,
+                string.IsNullOrWhiteSpace(login) ? $"installation-{id}" : login,
+                string.IsNullOrWhiteSpace(type) ? "GitHub" : type,
+                installedBy,
+                Status: string.IsNullOrWhiteSpace(status) ? "Installed" : status);
         }
 
         private static string GetString(JsonElement element, string propertyName) =>
@@ -3592,6 +3759,25 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public IReadOnlyList<GitHubIntegrationDto> UpsertGitHubIntegrations(IReadOnlyList<GitHubIntegrationCallbackRequest> requests)
+        {
+            lock (_lock)
+            {
+                foreach (var request in requests)
+                {
+                    _githubIntegrations.RemoveAll(integration => integration.InstallationId == request.InstallationId);
+                    _githubIntegrations.Add(CreateGitHubIntegrationDto(request));
+                }
+
+                if (requests.Count > 0)
+                {
+                    Persist();
+                }
+
+                return _githubIntegrations.OrderBy(integration => integration.AccountLogin).ToArray();
+            }
+        }
+
         public long? GetDefaultGitHubInstallationId()
         {
             lock (_lock)
@@ -3634,20 +3820,23 @@ namespace Rosenvall.DevOps.Api
             lock (_lock)
             {
                 _githubIntegrations.RemoveAll(integration => integration.InstallationId == request.InstallationId);
-                var integration = new GitHubIntegrationDto(
-                    Guid.NewGuid(),
-                    request.InstallationId,
-                    NormalizeText(request.AccountLogin, $"installation-{request.InstallationId}"),
-                    NormalizeText(request.AccountType, "User"),
-                    NormalizeText(request.Status, "Installed"),
-                    Math.Max(0, request.RepositoriesCount),
-                    NormalizeText(request.InstalledBy, "system"),
-                    DateTimeOffset.UtcNow);
+                var integration = CreateGitHubIntegrationDto(request);
                 _githubIntegrations.Add(integration);
                 Persist();
                 return integration;
             }
         }
+
+        private static GitHubIntegrationDto CreateGitHubIntegrationDto(GitHubIntegrationCallbackRequest request) =>
+            new(
+                Guid.NewGuid(),
+                request.InstallationId,
+                NormalizeText(request.AccountLogin, $"installation-{request.InstallationId}"),
+                NormalizeText(request.AccountType, "User"),
+                NormalizeText(request.Status, "Installed"),
+                Math.Max(0, request.RepositoriesCount),
+                NormalizeText(request.InstalledBy, "system"),
+                DateTimeOffset.UtcNow);
 
         public IReadOnlyList<BoardSecretDto> GetBoardSecrets(Guid boardId)
         {
@@ -4982,12 +5171,15 @@ namespace Rosenvall.DevOps.Api
             var githubTarget = githubIntegration is null
                 ? configuration["GitHub:TargetRepository"] ?? "Install the GitHub App to list repositories"
                 : $"{githubIntegration.RepositoriesCount} repositories granted";
-            var githubConnected = githubIntegration is not null ||
-                !string.IsNullOrWhiteSpace(configuration["GitHub:Token"]) ||
-                (!string.IsNullOrWhiteSpace(configuration["GitHub:AppId"]) && !string.IsNullOrWhiteSpace(configuration["GitHub:AppPrivateKey"]));
+            var githubAppConfigured = !string.IsNullOrWhiteSpace(configuration["GitHub:AppId"]) &&
+                !string.IsNullOrWhiteSpace(configuration["GitHub:AppPrivateKey"]);
+            var githubConnected = githubIntegration is not null || !string.IsNullOrWhiteSpace(configuration["GitHub:Token"]);
+            var githubInstallUrl = githubAppConfigured
+                ? GitHubRepositoryClient.BuildInstallUrl(configuration["GitHub:AppSlug"] ?? configuration["GitHub:AppName"] ?? "rosenvall-devops")
+                : "/integrations/github/manifest/start";
 
             return new(
-                new GitHubSettingsDto(githubAccount, githubTarget, "GitHub App installation permissions", githubConnected),
+                new GitHubSettingsDto(githubAccount, githubTarget, "GitHub App installation permissions", githubConnected, githubAppConfigured, githubInstallUrl, githubAppConfigured),
                 new AiSettingsDto(
                     configuration["Ai:DefaultProvider"] ?? "ollama",
                     configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api",

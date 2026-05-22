@@ -14,6 +14,7 @@ import {
   PanelLeft,
   Play,
   Plus,
+  RefreshCw,
   Save,
   Search,
   Settings,
@@ -300,6 +301,9 @@ type SettingsDto = {
     targetRepository: string;
     branchWatchPatterns: string;
     connected: boolean;
+    appConfigured: boolean;
+    installUrl?: string | null;
+    syncAvailable: boolean;
   };
   ai: {
     provider: string;
@@ -740,6 +744,12 @@ function App() {
         window.location.href = install.url;
       });
     },
+    syncGitHubIntegration: async () => {
+      await runAction('Syncing GitHub installations', async () => {
+        await api.post<GitHubIntegrationDto[]>('/api/integrations/github/sync', {});
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
     createBoardSecret: async (boardId, key, value, repositoryId) => {
       await runAction('Saving board secret', async () => {
         await api.post<BoardSecretDto>(`/api/boards/${boardId}/secrets`, { key, value, repositoryId: repositoryId || null });
@@ -937,7 +947,8 @@ const userManager = authSettings.enabled ? new UserManager({
   redirect_uri: authSettings.redirectUri,
   post_logout_redirect_uri: authSettings.postLogoutRedirectUri,
   response_type: 'code',
-  scope: 'openid profile email',
+  scope: 'openid profile email offline_access',
+  automaticSilentRenew: true,
   userStore: new WebStorageStateStore({ store: window.localStorage })
 }) : null;
 
@@ -955,6 +966,17 @@ async function initializeAuth(): Promise<User> {
   const user = await userManager.getUser();
   if (user && !user.expired) {
     return user;
+  }
+
+  if (user) {
+    try {
+      const renewed = await userManager.signinSilent();
+      if (renewed && !renewed.expired) {
+        return renewed;
+      }
+    } catch {
+      await userManager.removeUser();
+    }
   }
 
   await userManager.signinRedirect();
@@ -985,6 +1007,7 @@ type BoardActions = {
   approvePlan(runId: string, workItemId: string): Promise<void>;
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<void>;
   addGitHubIntegration(): Promise<void>;
+  syncGitHubIntegration(): Promise<void>;
   createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<void>;
   deleteBoardSecret(boardId: string, secretId: string): Promise<void>;
   discardPlan(runId: string, workItemId: string): Promise<void>;
@@ -1800,6 +1823,7 @@ function CreateBoardModal({ onCreate, onClose }: {
       .then((repositories) => {
         if (cancelled) return;
         setGithubRepos(repositories);
+        setGithubError(repositories.length === 0 ? 'No GitHub repositories are available yet. Sync or install the GitHub App from Settings and grant repository access.' : null);
         setGithubStatus('idle');
       })
       .catch((error) => {
@@ -1882,6 +1906,10 @@ function SettingsView({ settings, board, me, teams, repositories, boardSecrets, 
   const boardRepositories = board.repositories?.length ? board.repositories : board.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
   const visibleTeams = teams.length > 0 ? teams : [];
   const canSaveSecret = secretKey.trim().length > 0 && secretValue.length > 0;
+  const latestGitHubIntegration = githubIntegrations[0];
+  const gitHubConnected = settings.gitHub.connected || githubIntegrations.length > 0;
+  const gitHubAccount = latestGitHubIntegration ? `${latestGitHubIntegration.accountLogin} (${latestGitHubIntegration.accountType})` : settings.gitHub.account;
+  const gitHubTarget = latestGitHubIntegration ? `${latestGitHubIntegration.repositoriesCount} repositories granted` : settings.gitHub.targetRepository;
 
   async function saveSecret(event: React.FormEvent) {
     event.preventDefault();
@@ -1904,18 +1932,25 @@ function SettingsView({ settings, board, me, teams, repositories, boardSecrets, 
       <div className="settings-content">
         <SectionTitle icon={<Github size={22} />} title="GitHub integration" />
         <section className="panel form-panel">
-          <div className="connected"><Github size={28} /><div><strong>Connected account</strong><p>{settings.gitHub.account}</p></div><span>{settings.gitHub.connected ? 'Active' : 'Disconnected'}</span></div>
-          <label>Target repository<input value={settings.gitHub.targetRepository} readOnly /></label>
+          <div className="connected"><Github size={28} /><div><strong>Connected account</strong><p>{gitHubAccount}</p></div><span>{gitHubConnected ? 'Active' : 'Disconnected'}</span></div>
+          <label>Target repository<input value={gitHubTarget} readOnly /></label>
           <label>Branch watch patterns<input value={settings.gitHub.branchWatchPatterns} readOnly /></label>
           <div className="settings-inline">
             <div>
               <strong>GitHub App installations</strong>
               <p>Repositories are fetched through server-side installation tokens. Browser clients never receive GitHub credentials.</p>
             </div>
-            <button className="secondary" onClick={() => void actions.addGitHubIntegration()} type="button"><Github size={16} />Add integration</button>
+            <div className="button-row">
+              {settings.gitHub.appConfigured && (
+                <button className="secondary" onClick={() => void actions.syncGitHubIntegration()} type="button"><RefreshCw size={16} />Sync existing installation</button>
+              )}
+              {!settings.gitHub.appConfigured && (
+                <button className="secondary" onClick={() => void actions.addGitHubIntegration()} type="button"><Github size={16} />Install GitHub App</button>
+              )}
+            </div>
           </div>
           {githubIntegrations.length === 0
-            ? <p className="provider-status">No GitHub App installation has been recorded yet.</p>
+            ? <p className="provider-status">{settings.gitHub.appConfigured ? 'App exists but no GitHub installation is visible yet. Sync existing installation before creating another app.' : 'GitHub App credentials are not mounted on the API pod yet.'}</p>
             : (
               <div className="settings-list">
                 {githubIntegrations.map((integration) => (
