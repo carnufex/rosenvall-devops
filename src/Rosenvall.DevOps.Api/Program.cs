@@ -5673,7 +5673,9 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var now = DateTimeOffset.UtcNow;
-                var branch = $"rdo/{item.Key.ToLowerInvariant()}-{SlugifyRepositoryName(item.Title)}";
+                var attemptNumber = _implementationRuns.Count(run => run.WorkItemId == item.Id && run.RepositoryId == repository.Id && run.AiRunId == aiRun.Id) + 1;
+                var branchBase = $"rdo/{item.Key.ToLowerInvariant()}-{SlugifyRepositoryName(item.Title)}";
+                var branch = attemptNumber == 1 ? branchBase : $"{branchBase}-retry-{attemptNumber}";
                 var runDto = new ImplementationRunDto(
                     Guid.NewGuid(),
                     repository.Id,
@@ -5696,7 +5698,10 @@ namespace Rosenvall.DevOps.Api
                 EnsureAiSession(item.Id, aiRun.Provider, aiRun.Model, repository.Id, request.ReasoningEffort ?? aiRun.ReasoningEffort);
                 item.AiStatus = "ImplementationRunning";
                 item.Status = "AI Planning";
-                AddTimelineForItem(item, "ImplementationRunQueued", item.Key, $"Repository implementation queued for {repository.Name}.", request.Actor, repository.WebUrl);
+                var queueMessage = attemptNumber == 1
+                    ? $"Repository implementation queued for {repository.Name}."
+                    : $"Repository implementation attempt {attemptNumber} queued for {repository.Name}.";
+                AddTimelineForItem(item, "ImplementationRunQueued", item.Key, queueMessage, request.Actor, repository.WebUrl);
                 Persist();
                 return runDto;
             }

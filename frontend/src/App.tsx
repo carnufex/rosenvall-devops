@@ -1,6 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
+import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
   Activity,
@@ -1700,24 +1701,29 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const isRepositoryImplementation = repositoryProfile !== 'react-preview';
   const repositoryCanRunImplementation = !isRepositoryImplementation || targetRepository?.repository.provider === 'GitHub';
   const gitOpsSettingsReady = repositoryProfile !== 'gitops-homelab' || !!board?.gitOpsSettings;
-  const pendingRun = (detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status));
-  const hasReadyPullRequest = (detail.implementationRuns ?? []).some((run) => run.status === 'PullRequestReady' && !!run.pullRequestUrl);
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
   const previewRunning = detail.preview?.status === 'Running';
   const previewHasGeneratedSource = (detail.preview?.sourceFiles?.length ?? 0) > 0;
+  const relevantImplementationRuns = (detail.implementationRuns ?? []).filter((run) =>
+    (!targetRepository?.repositoryId || run.repositoryId === targetRepository.repositoryId) &&
+    (!selectedPlan?.id || run.aiRunId === selectedPlan.id));
+  const implementationRunsForAction = relevantImplementationRuns.length > 0 ? relevantImplementationRuns : detail.implementationRuns;
+  const latestRunForAction = latestImplementationRun(implementationRunsForAction);
+  const implementationAction = implementationActionState({
+    isRepositoryImplementation,
+    repositoryProfile,
+    repositoryCanRunImplementation,
+    gitOpsSettingsReady,
+    hasSelectedPlan: !!selectedPlan,
+    selectedPlanStatus: selectedPlan?.status,
+    latestRun: latestRunForAction,
+    hasPendingRun: (implementationRunsForAction ?? []).some((run) => isImplementationRunPendingStatus(run.status)),
+    hasReadyPullRequest: (implementationRunsForAction ?? []).some((run) => run.status === 'PullRequestReady' && !!run.pullRequestUrl),
+    previewBusy,
+    previewRunning,
+    previewHasGeneratedSource
+  });
   const planQuestions = React.useMemo(() => selectedPlan?.plan ? extractPlanQuestions(selectedPlan.plan) : [], [selectedPlan?.plan]);
-  const canImplementSelected = !!selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && (
-    isRepositoryImplementation
-      ? repositoryCanRunImplementation && gitOpsSettingsReady && !pendingRun && !hasReadyPullRequest
-      : !previewBusy && (!previewRunning || !previewHasGeneratedSource)
-  );
-  const implementLabel = isRepositoryImplementation
-    ? repositoryProfile === 'unity'
-      ? 'Implement in Unity repo'
-      : 'Implement in GitHub repo'
-    : selectedPlan?.status === 'Approved'
-      ? 'Rebuild with Codex'
-      : 'Implement plan';
   return (
     <section className="panel ai-plan-panel">
       <PanelHeader icon={<Bot size={20} />} title="AI plans" />
@@ -1761,11 +1767,12 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
           )
           : <EmptyState>No AI plans yet.</EmptyState>}
         <div className="approval-row">
-          {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementLabel}</button>}
+          {selectedPlan && implementationAction.canStart && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementationAction.label}</button>}
           {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
         </div>
+        {implementationAction.retryContext && <p className="plan-help">{implementationAction.retryContext}</p>}
         {selectedPlan?.status === 'NeedsInput' && <p className="plan-help">Add a comment with answers, then generate a revised AI plan.</p>}
-        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? !repositoryCanRunImplementation ? 'Custom URL boards are public clone-only in v1. Connect the repository through the GitHub App to run implementation jobs and create pull requests.' : !gitOpsSettingsReady ? 'GitOps settings are required before this repository can be implemented.' : 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
+        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{implementationAction.helpText}</p>}
         {aiRuns.some((run) => run.status === 'Discarded') && <p>Discarded plans are kept in history but hidden from approval.</p>}
       </div>
     </section>
@@ -2119,10 +2126,6 @@ function compactHistoryText(value: string) {
 
 function isPreviewPendingStatus(status?: string) {
   return status === 'Implementing' || status === 'Applying' || status === 'Provisioning';
-}
-
-function isImplementationRunPendingStatus(status?: string) {
-  return status === 'Queued' || status === 'Cloning' || status === 'Inspecting' || status === 'Implementing' || status === 'Validating' || status === 'Testing' || status === 'Pushing';
 }
 
 function developmentStatusText(development: DevelopmentDto) {

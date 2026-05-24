@@ -965,6 +965,34 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Failed_repository_implementation_can_be_retried_and_cleanup_includes_both_attempts()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add nginx test", "Create namespace test and expose test.rosenvall.se.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Add apps/test.")!;
+
+        var failedAttempt = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(failedAttempt.Id, "Failed", "RDO_FAILURE=Codex CLI failed", "Codex CLI failed");
+        var retryAttempt = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        var runs = store.GetImplementationRuns(item.Id);
+        var cleanup = store.RenderWorkItemCleanupManifest(item.Id)!;
+
+        Assert.Equal(2, runs.Count);
+        Assert.EndsWith("-retry-2", retryAttempt.Branch, StringComparison.Ordinal);
+        Assert.Contains(runs, run => run.Id == failedAttempt.Id && run.Status == "Failed");
+        Assert.Contains(runs, run => run.Id == retryAttempt.Id && run.Status == "Queued");
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(failedAttempt, store.GetWorkItemDetail(item.Id)!), cleanup);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(retryAttempt, store.GetWorkItemDetail(item.Id)!), cleanup);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(failedAttempt), cleanup);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(retryAttempt), cleanup);
+        Assert.Contains(store.GetTimeline(board.Id), entry => entry.WorkItemId == item.Id && entry.Message.Contains("attempt 2", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task Planning_prompt_includes_board_ai_context_gitops_settings_and_skill_references_only()
     {
         using var fixture = DevOpsStoreFixture.Create();
