@@ -725,6 +725,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("namespace: rosenvall-devops", manifest);
         Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
         Assert.Contains("codex exec", manifest);
+        Assert.Contains("codex exec --ephemeral", manifest);
         Assert.Contains("secretKeyRef:", manifest);
         Assert.Contains("rosenvall-devops-github", manifest);
         Assert.Contains("rdo/task-", manifest);
@@ -1150,6 +1151,7 @@ public sealed class DevOpsStoreTests
         Assert.Equal(second.Id, secondSession.LastRunId);
         Assert.Equal("11111111-1111-1111-1111-111111111111", secondSession.ProviderSessionId);
         Assert.Contains("codex exec resume", manifest);
+        Assert.Contains("codex exec resume --ephemeral", manifest);
         Assert.Contains("ROSENVALL_CODEX_SESSION_ID", manifest);
         Assert.Contains("CODEX_REASONING_EFFORT", manifest);
         Assert.Contains("model_reasoning_effort=$CODEX_REASONING_EFFORT", manifest);
