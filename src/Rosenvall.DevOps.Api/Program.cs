@@ -768,7 +768,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardTeamAccessDto(Guid BoardId, Guid TeamId, string TeamName, string Role);
     public sealed record BoardGitOpsSettingsDto(Guid BoardId, IReadOnlyList<string> AllowedPaths, string ArgoNamespace, string ArgoApplicationSelector);
     public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain);
-    public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null);
+    public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, RepositoryProfileDto? RepositoryProfileDraft = null);
     public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
@@ -2804,12 +2804,13 @@ namespace Rosenvall.DevOps.Api
 
             var builder = new StringBuilder();
             builder.AppendLine($"Repository profile: {board.RepositoryProfile}");
+            AppendRepositoryProfileDraft(builder, board.RepositoryProfileDraft);
             if (board.AiContext is not null)
             {
                 builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
                 builder.AppendLine($"Enabled board skills: {ListOrNone(board.AiContext.EnabledSkills)}");
                 builder.AppendLine(board.AiContext.AskWhenUncertain
-                    ? "Ask blocking questions when required facts are missing; do not guess namespaces, app names, deletion scope, temporary-vs-permanent intent, or allowed paths."
+                    ? "Ask blocking questions only when required facts are missing after applying board instructions, GitOps settings, repository profile signals, and enabled repo skill drafts. Do not ask questions that these skills or conventions answer."
                     : "Ask blocking questions only when implementation would be unsafe without an answer.");
             }
 
@@ -2833,6 +2834,8 @@ namespace Rosenvall.DevOps.Api
             }
 
             var builder = new StringBuilder();
+            builder.AppendLine($"Implementation profile: {board.RepositoryProfile}");
+            AppendRepositoryProfileDraft(builder, board.RepositoryProfileDraft);
             if (board.AiContext is not null)
             {
                 builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
@@ -2856,6 +2859,47 @@ namespace Rosenvall.DevOps.Api
 
         private static string EmptyAsNone(string value) =>
             string.IsNullOrWhiteSpace(value) ? "none" : value.Trim();
+
+        private static void AppendRepositoryProfileDraft(StringBuilder builder, RepositoryProfileDto? profile)
+        {
+            if (profile is null)
+            {
+                return;
+            }
+
+            builder.AppendLine($"Repository profile name: {profile.DisplayName}");
+            if (profile.CapabilityTags is { Count: > 0 })
+            {
+                builder.AppendLine($"Repository capability tags: {ListOrNone(profile.CapabilityTags)}");
+            }
+
+            if (profile.Signals.Count > 0)
+            {
+                builder.AppendLine($"Repository profile signals: {ListOrNone(profile.Signals)}");
+            }
+
+            var enabledDrafts = (profile.SkillDrafts ?? [])
+                .Where(draft => draft.Enabled)
+                .Take(6)
+                .ToArray();
+            if (enabledDrafts.Length == 0)
+            {
+                return;
+            }
+
+            builder.AppendLine("Enabled repo skill drafts:");
+            foreach (var draft in enabledDrafts)
+            {
+                builder.AppendLine($"- {draft.Name}: {EmptyAsNone(draft.Description)}");
+                builder.AppendLine(TrimSkillContent(draft.Content));
+            }
+        }
+
+        private static string TrimSkillContent(string content)
+        {
+            var trimmed = string.IsNullOrWhiteSpace(content) ? "No skill content provided." : content.Trim();
+            return trimmed.Length <= 1800 ? trimmed : $"{trimmed[..1800].TrimEnd()}\n[truncated]";
+        }
     }
 
     public interface IAiPlanProvider
@@ -4085,7 +4129,8 @@ namespace Rosenvall.DevOps.Api
               Required output:
               - A concrete plan.
               - Include tests.
-              - For repository or GitOps boards, return explicit blocking questions instead of guessing unsafe facts.
+              - For repository or GitOps boards, first apply board instructions, GitOps settings, repository profile signals, and enabled repo skill drafts to resolve path, namespace, routing, and validation conventions.
+              - Return blocking questions only for facts that cannot be answered by that context, such as user preference, destructive intent, or missing business requirements.
               - For react-preview boards, target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
               - React previews should be containerized and exposed through the existing Kubernetes preview route.
               - Preserve every concrete visual/content requirement from the title, description, and comments.
@@ -4267,7 +4312,8 @@ namespace Rosenvall.DevOps.Api
               Required output:
               - A concrete plan.
               - Include tests.
-              - For repository or GitOps boards, return explicit blocking questions instead of guessing unsafe facts.
+              - For repository or GitOps boards, first apply board instructions, GitOps settings, repository profile signals, and enabled repo skill drafts to resolve path, namespace, routing, and validation conventions.
+              - Return blocking questions only for facts that cannot be answered by that context, such as user preference, destructive intent, or missing business requirements.
               - For react-preview boards, target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
               - React previews should be containerized and exposed through the existing Kubernetes preview route.
               - Preserve every concrete visual/content requirement from the title, description, and comments.
@@ -5478,7 +5524,7 @@ namespace Rosenvall.DevOps.Api
                     _aiSessions.SingleOrDefault(session => session.WorkItemId == item.Id),
                     _previewEvents.Where(entry => entry.WorkItemId == item.Id).OrderBy(entry => entry.CreatedAt).ToArray(),
                     PreviewImplementationRunsAwaitingRecoveryForWorkItem(item.Id),
-                    new BoardPlanningContextDto(item.BoardId, BoardImplementationProfile(item.BoardId), GitOpsSettingsFor(item.BoardId), AiContextFor(item.BoardId)));
+                    new BoardPlanningContextDto(item.BoardId, BoardImplementationProfile(item.BoardId), GitOpsSettingsFor(item.BoardId), AiContextFor(item.BoardId), PrimaryRepositoryProfileFor(item.BoardId)));
             }
         }
 
@@ -6817,6 +6863,14 @@ namespace Rosenvall.DevOps.Api
         private Guid? RepositoryIdForBoard(Guid boardId) =>
             _boardRepositoryLinks.SingleOrDefault(link => link.BoardId == boardId && link.IsPrimary)?.RepositoryId ??
             _boards.SingleOrDefault(board => board.Id == boardId)?.RepositoryId;
+
+        private RepositoryProfileDto? PrimaryRepositoryProfileFor(Guid boardId)
+        {
+            var repositoryId = RepositoryIdForBoard(boardId);
+            return repositoryId is null
+                ? null
+                : _boardRepositoryProfiles.SingleOrDefault(profile => profile.BoardId == boardId && profile.RepositoryId == repositoryId)?.Profile;
+        }
 
         private IReadOnlyList<BoardRepositoryDto> BoardRepositoriesFor(Guid boardId)
         {

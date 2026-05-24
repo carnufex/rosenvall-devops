@@ -928,6 +928,63 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Planning_prompt_includes_repo_skill_drafts_before_asking_blocking_questions()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Rosenvalls-Homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var profile = new RepositoryProfileDto(
+            "gitops-homelab",
+            "Talos GitOps homelab",
+            0.97,
+            ["argocd", "gitops-app-onboarding", "cloudflare-gateway-routing"],
+            "Use repo-local homelab conventions before asking the user.",
+            ["kubernetes/applications/application-set.yaml", "tofu/"],
+            "scanner",
+            ["kubernetes", "argocd", "gateway-api"],
+            [
+                new RepositorySkillDraftDto("gitops-app-onboarding", "Each app under kubernetes/applications gets its own namespace.", "Use kubernetes/applications/<app-name>/ and namespace <app-name>. Wire it through the ApplicationSet pattern.", true),
+                new RepositorySkillDraftDto("cloudflare-gateway-routing", "Public routing uses Cloudflare tunnel to Gateway API.", "Expose public HTTP apps with HTTPRoute/Gateway API unless the request says internal-only.", true)
+            ]);
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Rosenvalls-Homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            GitOpsSettings: new BoardGitOpsSettingsRequest(["kubernetes/applications/", "kubernetes/infrastructure/", "tofu/"], "argocd", ""),
+            AiContext: new BoardAiContextRequest(profile.Instructions, profile.EnabledSkills, true),
+            RepositoryProfile: profile))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Hello World site", "Create a public Hello World app at test.rosenvall.se.", "Todo", "Medium", null));
+        var context = store.GetWorkItemDetail(item.Id)!;
+        var promptCapture = Path.Combine(Path.GetTempPath(), $"codex-prompt-{Guid.NewGuid():N}.md");
+        var fakeCodex = CreateFakeCodexScript(exitCode: 0, plan: "Plan from fake Codex.", promptCapturePath: promptCapture);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:Path"] = fakeCodex,
+                ["Ai:Codex:Home"] = Path.Combine(Path.GetTempPath(), $"codex-home-{Guid.NewGuid():N}")
+            })
+            .Build();
+        var provider = new CodexCliPlanProvider(configuration, NullLogger<CodexCliPlanProvider>.Instance);
+
+        await provider.GeneratePlanAsync("gpt-5.5", context, CancellationToken.None);
+
+        var prompt = await File.ReadAllTextAsync(promptCapture);
+        Assert.Contains("Enabled repo skill drafts:", prompt);
+        Assert.Contains("gitops-app-onboarding", prompt);
+        Assert.Contains("Use kubernetes/applications/<app-name>/ and namespace <app-name>", prompt);
+        Assert.Contains("cloudflare-gateway-routing", prompt);
+        Assert.Contains("HTTPRoute/Gateway API", prompt);
+        Assert.Contains("Return blocking questions only for facts that cannot be answered by that context", prompt);
+        Assert.Contains("Do not ask questions that these skills or conventions answer", prompt);
+    }
+
+    [Fact]
     public void Implementation_manifest_prompt_includes_board_context_and_allowed_path_validation()
     {
         using var fixture = DevOpsStoreFixture.Create();
