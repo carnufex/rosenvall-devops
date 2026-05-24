@@ -1142,6 +1142,20 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RDO_STEP=Inspecting", manifest);
         Assert.Contains("RDO_STEP=Validating", manifest);
         Assert.Contains("RDO_FAILURE=Changed files outside allowed GitOps paths", manifest);
+        Assert.Contains("git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > \"$workspace/uncommitted-files.txt\"", manifest);
+        Assert.Contains("git diff --name-only \"$ROSENVALL_DEFAULT_BRANCH\"...HEAD > \"$workspace/committed-files.txt\"", manifest);
+        Assert.Contains("sort -u > \"$workspace/changed-files.txt\"", manifest);
+        Assert.Contains("if [ ! -s \"$workspace/changed-files.txt\" ]; then echo \"RDO_FAILURE=No changes produced\"; exit 20; fi", manifest);
+        Assert.Contains("if [ -s \"$workspace/uncommitted-files.txt\" ]; then", manifest);
+        Assert.Contains("No uncommitted changes remain; using existing branch commits.", manifest);
+        Assert.Contains("curl -fsS -G \"https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("--data-urlencode \"head=$repo_owner:$ROSENVALL_BRANCH\"", manifest);
+        Assert.Contains("if [ -n \"$existing_pr_url\" ]; then", manifest);
+        Assert.Contains("RDO_PULL_REQUEST_URL=$pr_url", manifest);
+
+        Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
+        Assert.Contains("Leave all file changes uncommitted in the current checkout; the runner owns commit, push, and pull request creation.", prompt);
+        Assert.Contains("Do not open a pull request yourself.", prompt);
     }
 
     [Fact]
