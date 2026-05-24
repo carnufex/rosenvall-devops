@@ -1227,6 +1227,133 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_cleanup_run_manifest_includes_source_pr_context_and_runner_contract()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "test", "Create test.rosenvall.se.", "Review", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Add kubernetes/applications/test.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_COMMIT=abc123\nRDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/33");
+
+        var cleanupRun = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff --git a/kubernetes/applications/test/kustomization.yaml b/kubernetes/applications/test/kustomization.yaml")!;
+        var manifest = store.RenderRepositoryCleanupRunManifest(cleanupRun.Id, new ConfigurationBuilder().Build(), "github-token-cleanup")!;
+        var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_CLEANUP_PROMPT_B64");
+        var sourceDiff = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_SOURCE_PR_DIFF_B64");
+
+        Assert.EndsWith("-test-cleanup", cleanupRun.Branch, StringComparison.Ordinal);
+        Assert.Contains("Source pull request: https://github.com/carnufex/Rosenvalls-Homelab/pull/33", prompt);
+        Assert.Contains("Remove or revert repository resources introduced by the source pull request.", prompt);
+        Assert.Contains("Allowed GitOps paths: apps/, clusters/, infrastructure/, kubernetes/, tofu/", prompt);
+        Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
+        Assert.Contains("kubernetes/applications/test/kustomization.yaml", sourceDiff);
+        Assert.Contains("codex exec --ephemeral", manifest);
+        Assert.Contains("ROSENVALL_SOURCE_PR_DIFF_B64", manifest);
+        Assert.Contains("curl -fsS -G \"https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("--data-urlencode \"head=$repo_owner:$ROSENVALL_BRANCH\"", manifest);
+        Assert.Contains("if [ -n \"$existing_pr_url\" ]; then", manifest);
+        Assert.Contains("RDO_CLEANUP_PULL_REQUEST_URL=", manifest);
+        Assert.Contains("github-token-cleanup", manifest);
+        Assert.DoesNotContain("rosenvall-devops-codex-home\n                             mountPath: /app/codex-home", manifest);
+    }
+
+    [Fact]
+    public void Repository_cleanup_run_retries_use_cleanup_retry_branch_and_are_persisted()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "test", "Create test.rosenvall.se.", "Review", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/33");
+
+        var first = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
+        store.UpdateRepositoryCleanupRun(first.Id, "Failed", "RDO_FAILURE=Cleanup failed", "Cleanup failed");
+        var second = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
+        var reopened = fixture.Reopen();
+        var persisted = reopened.GetRepositoryCleanupRuns(item.Id);
+
+        Assert.EndsWith("-test-cleanup", first.Branch, StringComparison.Ordinal);
+        Assert.EndsWith("-test-cleanup-retry-2", second.Branch, StringComparison.Ordinal);
+        Assert.Contains(persisted, run => run.Id == first.Id && run.Status == "Failed");
+        Assert.Contains(persisted, run => run.Id == second.Id && run.Status == "Queued");
+        Assert.NotNull(reopened.GetWorkItemDetail(item.Id)!.RepositoryCleanupRuns);
+    }
+
+    [Fact]
+    public void Work_item_cleanup_manifest_includes_repository_cleanup_jobs_and_token_secrets()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "test", "Create test.rosenvall.se.", "Review", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/33");
+        var cleanupRun = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
+
+        var manifest = store.RenderWorkItemCleanupManifest(item.Id)!;
+        var cleanupContext = store.GetWorkItemDetail(item.Id)!;
+
+        Assert.Contains(RepositoryCleanupJobManifestRenderer.JobName(cleanupRun, cleanupContext), manifest);
+        Assert.Contains(RepositoryCleanupJobManifestRenderer.GitHubTokenSecretName(cleanupRun), manifest);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(implementationRun, cleanupContext), manifest);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(implementationRun), manifest);
+        Assert.DoesNotContain("rosenvall-devops-codex-home", manifest);
+    }
+
+    [Fact]
+    public async Task GitHub_client_reads_closes_and_comments_on_pull_requests()
+    {
+        var requests = new List<(HttpMethod Method, string Path, string Body)>();
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            var body = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? "";
+            requests.Add((request.Method, request.RequestUri!.PathAndQuery, body));
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/pulls/33", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"number":33,"state":"open","merged":false,"html_url":"https://github.com/carnufex/Rosenvalls-Homelab/pull/33","diff_url":"https://github.com/carnufex/Rosenvalls-Homelab/pull/33.diff"}""");
+            }
+
+            if (request.Method.Method == "PATCH" && request.RequestUri!.AbsolutePath.EndsWith("/pulls/33", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"number":33,"state":"closed","merged":false,"html_url":"https://github.com/carnufex/Rosenvalls-Homelab/pull/33"}""");
+            }
+
+            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.EndsWith("/issues/33/comments", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"html_url":"https://github.com/carnufex/Rosenvalls-Homelab/pull/33#issuecomment-1"}""");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{}") };
+        }))
+        {
+            BaseAddress = new Uri("https://api.github.com")
+        };
+        var github = new GitHubRepositoryClient(httpClient, new ConfigurationBuilder().Build());
+
+        var pullRequest = await github.GetPullRequestAsync("https://github.com/carnufex/Rosenvalls-Homelab/pull/33", "token", CancellationToken.None);
+        var closed = await github.ClosePullRequestAsync(pullRequest!, "token", CancellationToken.None);
+        var commented = await github.AddPullRequestCommentAsync(pullRequest!, "Closed by cleanup.", "token", CancellationToken.None);
+
+        Assert.NotNull(pullRequest);
+        Assert.Equal("open", pullRequest.State);
+        Assert.False(pullRequest.Merged);
+        Assert.True(closed);
+        Assert.True(commented);
+        Assert.Contains(requests, request => request.Method.Method == "PATCH" && request.Body.Contains("\"state\":\"closed\"", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.Method == HttpMethod.Post && request.Body.Contains("Closed by cleanup.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Ai_session_is_stable_per_card_and_codex_resume_is_used_when_session_id_exists()
     {
         using var fixture = DevOpsStoreFixture.Create();

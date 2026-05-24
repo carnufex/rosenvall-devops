@@ -145,6 +145,7 @@ type WorkItemDetail = {
   preview?: PreviewDto | null;
   development?: DevelopmentDto | null;
   implementationRuns?: ImplementationRunDto[] | null;
+  repositoryCleanupRuns?: RepositoryCleanupRunDto[] | null;
   aiSession?: AiSessionDto | null;
   previewEvents?: PreviewEventDto[] | null;
   previewImplementationRunsAwaitingRecovery?: AiRun[] | null;
@@ -203,6 +204,25 @@ type ImplementationRunDto = {
   pullRequestUrl?: string | null;
   commitSha?: string | null;
   failureReason?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  terminalLines?: PreviewTerminalLineDto[] | null;
+};
+
+type RepositoryCleanupRunDto = {
+  id: string;
+  repositoryId: string;
+  workItemId: string;
+  sourceImplementationRunId: string;
+  workItemKey: string;
+  workItemTitle: string;
+  status: 'Queued' | 'Cloning' | 'Implementing' | 'Validating' | 'Pushing' | 'PullRequestReady' | 'Failed' | string;
+  branch: string;
+  sourcePullRequestUrl: string;
+  cleanupPullRequestUrl?: string | null;
+  commitSha?: string | null;
+  failureReason?: string | null;
+  sourcePullRequestState?: string | null;
   createdAt: string;
   updatedAt: string;
   terminalLines?: PreviewTerminalLineDto[] | null;
@@ -668,7 +688,8 @@ function App() {
 
   const shouldPollOpenWorkItem = selected.status === 'open' && (
     isPreviewPendingStatus(selected.detail.preview?.status) ||
-    (selected.detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status))
+    (selected.detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status)) ||
+    (selected.detail.repositoryCleanupRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status))
   );
   const previewPollWorkItemId = selected.status === 'open' && shouldPollOpenWorkItem
     ? selected.detail.item.id
@@ -822,10 +843,15 @@ function App() {
       });
     },
     deleteCard: async (id) => {
-      await runAction('Deleting card and cleaning preview', async () => {
-        await api.delete(`/api/work-items/${id}`);
-        setSelected({ status: 'closed' });
-        await refreshAfterChange();
+      await runAction('Deleting card and cleaning repository state', async () => {
+        const response = await api.post<unknown>(`/api/work-items/${id}/delete-and-clean-up`, { actor });
+        if (response === undefined || response === null) {
+          setSelected({ status: 'closed' });
+          await refreshAfterChange();
+          return;
+        }
+
+        await refreshAfterChange(id);
       });
     },
     startAiPlan: async (id) => {
@@ -1606,6 +1632,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
     setTargetRepositoryId(targetRepositories.find((entry) => entry.isPrimary)?.repositoryId ?? targetRepositories[0]?.repositoryId ?? null);
   }, [targetRepositories, targetRepositoryId]);
   const activeImplementationRun = latestImplementationRun(detail.implementationRuns);
+  const activeRepositoryCleanupRun = latestRepositoryCleanupRun(detail.repositoryCleanupRuns);
 
   return (
     <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose}>
@@ -1621,7 +1648,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           </div>
           <div className="modal-actions">
             <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
-            <button className="danger-button" disabled={busy} onClick={() => confirm('Delete this work item and tear down its preview namespace/resources?') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />Delete and clean up</button>
+            <button className="danger-button" disabled={busy} onClick={() => confirm('Delete this work item and clean up runtime resources and repository PR state? Open implementation PRs will be closed. Merged implementation PRs will create a cleanup PR first.') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />Delete and clean up</button>
           </div>
           <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
           <section className="activity">
@@ -1670,6 +1697,9 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           )}
           {activeImplementationRun && (
             <ImplementationRunPanel run={activeImplementationRun} />
+          )}
+          {activeRepositoryCleanupRun && (
+            <RepositoryCleanupRunPanel run={activeRepositoryCleanupRun} />
           )}
           {detail.preview && (
             <PreviewPanel preview={detail.preview} busy={busy} onRetry={() => actions.startPreview(detail.item.id)} />
@@ -1878,6 +1908,33 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
       <p className="namespace-note">Branch: <code>{run.branch}</code></p>
       {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
       {ready && run.pullRequestUrl && <a className="url-box" href={run.pullRequestUrl} target="_blank" rel="noreferrer">Open pull request <ExternalLink size={16} /></a>}
+      {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
+      <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
+      <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
+    </section>
+  );
+}
+
+function RepositoryCleanupRunPanel({ run }: { run: RepositoryCleanupRunDto }) {
+  const pending = isImplementationRunPendingStatus(run.status);
+  const failed = run.status === 'Failed';
+  const ready = run.status === 'PullRequestReady';
+  const steps = implementationRunSteps(run.status);
+  return (
+    <section className="panel compact-panel implementation-panel">
+      <PanelHeader icon={<Trash2 size={20} />} title="Cleanup run" />
+      <ol className="preview-stepper implementation-stepper" aria-label="Repository cleanup lifecycle">
+        {steps.map((step, index) => (
+          <li className={`stepper-item ${step.state}`} key={step.key}>
+            <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
+            <span className="stepper-body"><strong>{step.title}</strong><span>{step.description}</span></span>
+          </li>
+        ))}
+      </ol>
+      <p className="namespace-note">Branch: <code>{run.branch}</code></p>
+      <p className="namespace-note">Source PR: <a href={run.sourcePullRequestUrl} target="_blank" rel="noreferrer">open source PR</a></p>
+      {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
+      {ready && run.cleanupPullRequestUrl && <a className="url-box" href={run.cleanupPullRequestUrl} target="_blank" rel="noreferrer">Open cleanup pull request <ExternalLink size={16} /></a>}
       {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
       <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
       <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
@@ -3492,6 +3549,10 @@ function displayUserName(userId: string, me: UserDto) {
 }
 
 function latestImplementationRun(runs?: ImplementationRunDto[] | null) {
+  return [...(runs ?? [])].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+}
+
+function latestRepositoryCleanupRun(runs?: RepositoryCleanupRunDto[] | null) {
   return [...(runs ?? [])].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 }
 
