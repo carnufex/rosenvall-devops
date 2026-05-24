@@ -972,21 +972,53 @@ namespace Rosenvall.DevOps.Api
                        spec:
                          restartPolicy: Never
                          securityContext:
-                           runAsNonRoot: true
-                           runAsUser: 1000
-                           runAsGroup: 1000
                            fsGroup: 1000
                            seccompProfile:
                              type: RuntimeDefault
                          volumes:
                            - name: codex-home
+                             emptyDir: {}
+                           - name: codex-home-source
                              persistentVolumeClaim:
                                claimName: rosenvall-devops-codex-home
+                         initContainers:
+                           - name: prepare-codex-home
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               runAsUser: 0
+                               runAsGroup: 0
+                               allowPrivilegeEscalation: false
+                             volumeMounts:
+                               - name: codex-home
+                                 mountPath: /app/codex-home
+                               - name: codex-home-source
+                                 mountPath: /codex-home-source
+                                 readOnly: true
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 mkdir -p /app/codex-home
+                                 for file in auth.json config.toml installation_id models_cache.json; do
+                                   if [ -f "/codex-home-source/$file" ]; then
+                                     cp -a "/codex-home-source/$file" "/app/codex-home/$file"
+                                   fi
+                                 done
+                                 mkdir -p /app/codex-home/tmp
+                                 chown -R 1000:1000 /app/codex-home
+                                 chmod 700 /app/codex-home/tmp
+                                 if [ -f /app/codex-home/auth.json ]; then chmod 600 /app/codex-home/auth.json; fi
+                                 if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
                          containers:
                            - name: runner
                              image: ghcr.io/carnufex/rosenvall-devops-api:main
                              imagePullPolicy: Always
                              securityContext:
+                               runAsNonRoot: true
+                               runAsUser: 1000
+                               runAsGroup: 1000
                                allowPrivilegeEscalation: false
                                capabilities:
                                  drop:
@@ -1000,6 +1032,12 @@ namespace Rosenvall.DevOps.Api
                                    secretKeyRef:
                                      name: {{githubSecretName}}
                                      key: token
+                               - name: HOME
+                                 value: /home/ubuntu
+                               - name: USER
+                                 value: ubuntu
+                               - name: SHELL
+                                 value: /bin/bash
                                - name: CODEX_HOME
                                  value: /app/codex-home
                                - name: CODEX_MODEL
