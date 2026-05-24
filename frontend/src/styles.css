@@ -343,7 +343,9 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .repository-settings-editor { display: grid; gap: 10px; border: 1px solid var(--line); background: #121314; border-radius: 8px; padding: 12px; }
 .repository-settings-editor > .settings-row { border: 0; padding: 0; background: transparent; }
 .primary-action.compact, .danger-button.compact { min-height: 30px; font-size: 13px; padding: 0 10px; }
+.gitops-content { max-width: 860px; }
 .gitops-applications { margin-top: 16px; }
+.gitops-page .gitops-applications { margin-top: 0; }
 .status-badges { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .status-badges a { color: var(--focus); display: inline-flex; align-items: center; }
 

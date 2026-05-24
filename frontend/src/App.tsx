@@ -47,7 +47,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-type View = 'dashboard' | 'board' | 'timeline' | 'teams' | 'settings';
+type View = 'dashboard' | 'board' | 'timeline' | 'gitops' | 'teams' | 'settings';
 
 type LoadShellOptions = {
   silentBusy?: boolean;
@@ -724,7 +724,7 @@ function App() {
     };
   }, [loadShell, previewPollWorkItemId]);
 
-  const activeGitOpsBoardId = shell.status === 'ready' && view === 'settings' ? shell.board.id : null;
+  const activeGitOpsBoardId = shell.status === 'ready' && view === 'gitops' && isGitOpsBoard(shell.board) ? shell.board.id : null;
   React.useEffect(() => {
     if (!activeGitOpsBoardId) return;
     let cancelled = false;
@@ -1033,6 +1033,8 @@ function App() {
   };
 
   const board = shell.status === 'ready' ? filterBoard(shell.board, query) : null;
+  const gitOpsAvailable = shell.status === 'ready' && isGitOpsBoard(shell.board);
+  const activeView = view === 'gitops' && !gitOpsAvailable ? 'board' : view;
   const activeBoardId = shell.status === 'ready' && selectedBoardId && shell.boards.some((entry) => entry.id === selectedBoardId)
     ? selectedBoardId
     : shell.status === 'ready'
@@ -1041,7 +1043,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar view={view} onChange={setView} onNewCard={() => setCreateStatus('Todo')} />
+      <Sidebar view={activeView} showGitOps={gitOpsAvailable} onChange={setView} onNewCard={() => setCreateStatus('Todo')} />
       <main className="main">
         <Topbar query={query} onQueryChange={setQuery} userName={auth.status === 'ready' ? auth.userName : null} />
         {auth.status === 'checking' && <Loading message="Checking authentication..." />}
@@ -1050,11 +1052,12 @@ function App() {
         {shell.status === 'error' && <ErrorPanel message={shell.message} onRetry={loadShell} />}
         {shell.status === 'ready' && board && (
           <>
-            {view === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
-            {view === 'board' && <BoardView board={board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} actions={actions} />}
-            {view === 'timeline' && <TimelineView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} timeline={shell.timeline} actions={actions} />}
-            {view === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
-            {view === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} gitOpsApplications={shell.gitOpsApplications} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onBack={() => setView('board')} />}
+            {activeView === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
+            {activeView === 'board' && <BoardView board={board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} actions={actions} />}
+            {activeView === 'timeline' && <TimelineView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} timeline={shell.timeline} actions={actions} />}
+            {activeView === 'gitops' && <GitOpsView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} gitOpsApplications={shell.gitOpsApplications} actions={actions} onBack={() => setView('board')} />}
+            {activeView === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
+            {activeView === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -1277,7 +1280,7 @@ type BoardActions = {
 function useStateFromHash(): [View, (view: View) => void] {
   const readHash = () => {
     const next = (window.location.hash.replace('#', '') as View) || 'board';
-    return ['dashboard', 'board', 'timeline', 'teams', 'settings'].includes(next) ? next : 'board';
+    return ['dashboard', 'board', 'timeline', 'gitops', 'teams', 'settings'].includes(next) ? next : 'board';
   };
   const [view, setViewState] = React.useState<View>(readHash);
   React.useEffect(() => {
@@ -1292,7 +1295,7 @@ function useStateFromHash(): [View, (view: View) => void] {
   return [view, setView];
 }
 
-function Sidebar({ view, onChange, onNewCard }: { view: View; onChange: (view: View) => void; onNewCard: () => void }) {
+function Sidebar({ view, showGitOps, onChange, onNewCard }: { view: View; showGitOps: boolean; onChange: (view: View) => void; onNewCard: () => void }) {
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -1307,6 +1310,7 @@ function Sidebar({ view, onChange, onNewCard }: { view: View; onChange: (view: V
         <NavButton active={view === 'board'} icon={<PanelLeft size={20} />} label="Board" onClick={() => onChange('board')} />
         <NavButton active={view === 'timeline'} icon={<History size={20} />} label="Timeline" onClick={() => onChange('timeline')} />
         <NavButton active={view === 'dashboard'} icon={<LayoutDashboard size={20} />} label="Dashboard" onClick={() => onChange('dashboard')} />
+        {showGitOps && <NavButton active={view === 'gitops'} icon={<Boxes size={20} />} label="GitOps" onClick={() => onChange('gitops')} />}
         <NavButton active={view === 'teams'} icon={<Users size={20} />} label="Teams" onClick={() => onChange('teams')} />
         <NavButton active={view === 'settings'} icon={<Settings size={20} />} label="Settings" onClick={() => onChange('settings')} />
       </nav>
@@ -1537,6 +1541,33 @@ function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
           </article>
         ))}
       </section>
+    </section>
+  );
+}
+
+function GitOpsView({ board, boards, selectedBoardId, gitOpsApplications, actions, onBack }: {
+  board: Board;
+  boards: Board[];
+  selectedBoardId: string;
+  gitOpsApplications: GitOpsApplicationsResponseDto;
+  actions: BoardActions;
+  onBack: () => void;
+}) {
+  return (
+    <section className="page gitops-page">
+      <div className="page-heading compact-heading">
+        <div>
+          <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
+          <p>{boardRepositorySummary(board)} - ArgoCD application status</p>
+        </div>
+        <button className="secondary" onClick={onBack}>Back to board</button>
+      </div>
+      <div className="gitops-content">
+        <SectionTitle icon={<Boxes size={22} />} title="Applications" />
+        <section className="panel form-panel">
+          <GitOpsApplicationsPanel response={gitOpsApplications} />
+        </section>
+      </div>
     </section>
   );
 }
@@ -2707,14 +2738,13 @@ function TeamsView({ teams, boards, me, actions }: {
   );
 }
 
-function SettingsView({ settings, board, me, repositories, boardSecrets, githubIntegrations, gitOpsApplications, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onBack }: {
+function SettingsView({ settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onBack }: {
   settings: SettingsDto;
   board: Board;
   me: UserDto;
   repositories: RepositoryDto[];
   boardSecrets: BoardSecretDto[];
   githubIntegrations: GitHubIntegrationDto[];
-  gitOpsApplications: GitOpsApplicationsResponseDto;
   selectedProvider: string | null;
   selectedModel: string | null;
   selectedReasoning: string | null;
@@ -2805,7 +2835,6 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
         <SectionTitle icon={<Boxes size={22} />} title="GitOps" />
         <section className="panel form-panel">
           <GitOpsSettingsForm board={board} actions={actions} />
-          <GitOpsApplicationsPanel response={gitOpsApplications} />
         </section>
         <SectionTitle icon={<Users size={22} />} title="Current user" />
         <section className="panel form-panel">
@@ -3520,6 +3549,15 @@ function defaultAiContext(boardId: string): BoardAiContextDto {
     enabledSkills: [],
     askWhenUncertain: true
   };
+}
+
+function isGitOpsBoard(board: Board): boolean {
+  if (board.gitOpsSettings) return true;
+  const profiles = [
+    board.repository?.implementationProfile,
+    ...(board.repositories ?? []).flatMap((entry) => [entry.implementationProfile, entry.repository.implementationProfile])
+  ];
+  return profiles.some((profile) => (profile ?? '').toLowerCase().includes('gitops'));
 }
 
 function statusBadgeClass(status: string) {
