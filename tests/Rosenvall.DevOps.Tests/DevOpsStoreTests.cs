@@ -68,6 +68,63 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Work_item_cleanup_manifest_is_scoped_to_the_deleted_card()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var deletedItem = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "delete me", "Create a preview and runner.", "Todo", "Medium", null));
+        var keptItem = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "keep me", "Keep this card alive.", "Todo", "Medium", null));
+        var deletedPlan = store.StartAiPlan(deletedItem.Id, "codex", "gpt-5.5", "Plan deleted card.")!;
+        var keptPlan = store.StartAiPlan(keptItem.Id, "codex", "gpt-5.5", "Plan kept card.")!;
+        store.ApproveAiRun(deletedPlan.Id, "crille");
+        store.CompleteLocalReactImplementation(deletedItem.Id);
+        var deletedRun = store.StartImplementationRun(deletedItem.Id, new StartImplementationRunRequest(deletedPlan.Id, "crille", repository.Id))!;
+        var keptRun = store.StartImplementationRun(keptItem.Id, new StartImplementationRunRequest(keptPlan.Id, "crille", repository.Id))!;
+        var deletedPipeline = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, deletedItem.Id, "Build", "Queued", "Build deleted card", null))!;
+        var keptPipeline = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, keptItem.Id, "Build", "Queued", "Build kept card", null))!;
+
+        var manifest = store.RenderWorkItemCleanupManifest(deletedItem.Id);
+
+        Assert.NotNull(manifest);
+        Assert.Contains("devops-preview-task-", manifest);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(deletedRun, store.GetWorkItemDetail(deletedItem.Id)!), manifest);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(deletedRun), manifest);
+        Assert.Contains(PipelineJobManifestRenderer.JobName(deletedPipeline, repository), manifest);
+        Assert.DoesNotContain(RepositoryImplementationJobManifestRenderer.JobName(keptRun, store.GetWorkItemDetail(keptItem.Id)!), manifest);
+        Assert.DoesNotContain(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(keptRun), manifest);
+        Assert.DoesNotContain(PipelineJobManifestRenderer.JobName(keptPipeline, repository), manifest);
+        Assert.DoesNotContain("rosenvall-devops-codex-home", manifest);
+    }
+
+    [Fact]
+    public void Deleting_work_item_removes_only_that_cards_runtime_runs()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var deletedItem = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "delete me", "Create a runner.", "Todo", "Medium", null));
+        var keptItem = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "keep me", "Keep this card alive.", "Todo", "Medium", null));
+        var deletedPlan = store.StartAiPlan(deletedItem.Id, "codex", "gpt-5.5", "Plan deleted card.")!;
+        var keptPlan = store.StartAiPlan(keptItem.Id, "codex", "gpt-5.5", "Plan kept card.")!;
+        store.StartImplementationRun(deletedItem.Id, new StartImplementationRunRequest(deletedPlan.Id, "crille", repository.Id));
+        var keptRun = store.StartImplementationRun(keptItem.Id, new StartImplementationRunRequest(keptPlan.Id, "crille", repository.Id))!;
+        store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, deletedItem.Id, "Build", "Queued", "Build deleted card", null));
+        var keptPipeline = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, keptItem.Id, "Build", "Queued", "Build kept card", null))!;
+
+        Assert.True(store.DeleteWorkItem(deletedItem.Id, "crille"));
+
+        Assert.Empty(store.GetImplementationRuns(deletedItem.Id));
+        Assert.Contains(store.GetImplementationRuns(keptItem.Id), run => run.Id == keptRun.Id);
+        Assert.DoesNotContain(store.GetPipelineStatuses(), run => run.WorkItemId == deletedItem.Id);
+        Assert.Contains(store.GetPipelineStatuses(), run => run.Id == keptPipeline.Id && run.WorkItemId == keptItem.Id);
+    }
+
+    [Fact]
     public void Dashboard_metrics_are_derived_from_current_runtime_state()
     {
         using var fixture = DevOpsStoreFixture.Create();

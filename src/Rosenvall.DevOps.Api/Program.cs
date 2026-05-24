@@ -390,13 +390,14 @@ api.MapPatch("/work-items/{workItemId:guid}", async (Guid workItemId, UpdateWork
 
 api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
-    var manifest = store.RenderPreviewManifest(workItemId);
+    var manifest = store.RenderWorkItemCleanupManifest(workItemId);
     if (manifest is not null)
     {
         var cleanup = await previews.DeleteAsync(manifest, cancellationToken);
         if (!cleanup.Succeeded)
         {
             store.RecordPreviewFailure(workItemId, "CleanupFailed", "crille", cleanup.Message);
+            return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
         }
     }
 
@@ -848,15 +849,20 @@ namespace Rosenvall.DevOps.Api
 
     public static class PipelineJobManifestRenderer
     {
+        public const string Namespace = "rosenvall-devops-pipelines";
+
+        public static string JobName(PipelineRunDto run, RepositoryDto repository) =>
+            SafeName($"pipeline-{run.Stage}-{repository.Name}-{run.Id:N}");
+
         public static string Render(PipelineRunDto run, RepositoryDto repository)
         {
-            var name = SafeName($"pipeline-{run.Stage}-{repository.Name}-{run.Id:N}");
+            var name = JobName(run, repository);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
                    metadata:
                      name: {{name}}
-                     namespace: rosenvall-devops-pipelines
+                     namespace: {{Namespace}}
                      labels:
                        app.kubernetes.io/part-of: rosenvall-devops-pipeline
                        rosenvall.devops/repository: {{SafeName(repository.Name)}}
@@ -5496,8 +5502,11 @@ namespace Rosenvall.DevOps.Api
                 _items.Remove(item);
                 _comments.RemoveAll(c => c.WorkItemId == workItemId);
                 _aiRuns.RemoveAll(r => r.WorkItemId == workItemId);
+                _aiSessions.RemoveAll(session => session.WorkItemId == workItemId);
                 _previews.RemoveAll(p => p.WorkItemId == workItemId);
                 _development.RemoveAll(d => d.WorkItemId == workItemId);
+                _implementationRuns.RemoveAll(run => run.WorkItemId == workItemId);
+                _pipelineRuns.RemoveAll(run => run.WorkItemId == workItemId);
                 AddTimelineForItem(item, "CardDeleted", item.Key, $"Deleted {item.Title}.", actor);
                 NormalizeBoard(boardId);
                 Persist();
@@ -6725,6 +6734,64 @@ namespace Rosenvall.DevOps.Api
              (string.Equals(preview.FailureReason, "ImplementationFailed", StringComparison.OrdinalIgnoreCase) ||
               string.Equals(preview.FailureReason, "ServerRestart", StringComparison.OrdinalIgnoreCase) ||
               string.Equals(preview.FailureReason, "ManifestMissing", StringComparison.OrdinalIgnoreCase)));
+
+        public string? RenderWorkItemCleanupManifest(Guid workItemId)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                var documents = new List<string>();
+                var previewManifest = RenderPreviewManifest(workItemId);
+                if (!string.IsNullOrWhiteSpace(previewManifest))
+                {
+                    documents.Add(previewManifest);
+                }
+
+                var cleanupContext = ToWorkItemDetailForCleanup(item);
+                foreach (var run in _implementationRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.CreatedAt))
+                {
+                    var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, cleanupContext);
+                    var tokenSecretName = RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(run);
+                    documents.Add(RenderDeleteStub("batch/v1", "Job", jobName, RepositoryImplementationJobManifestRenderer.Namespace));
+                    documents.Add(RenderDeleteStub("v1", "Secret", tokenSecretName, RepositoryImplementationJobManifestRenderer.Namespace));
+                    documents.Add(RenderDeleteStub("batch/v1", "Job", jobName, PipelineJobManifestRenderer.Namespace));
+                    documents.Add(RenderDeleteStub("v1", "Secret", tokenSecretName, PipelineJobManifestRenderer.Namespace));
+                }
+
+                foreach (var run in _pipelineRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.StartedAt))
+                {
+                    var repository = _repositories.SingleOrDefault(repository => repository.Id == run.RepositoryId);
+                    if (repository is not null)
+                    {
+                        documents.Add(RenderDeleteStub("batch/v1", "Job", PipelineJobManifestRenderer.JobName(run, repository), PipelineJobManifestRenderer.Namespace));
+                    }
+                }
+
+                return documents.Count == 0 ? null : string.Join("\n---\n", documents);
+            }
+        }
+
+        private WorkItemDetailDto ToWorkItemDetailForCleanup(WorkItemRecord item) =>
+            new(
+                ToSummary(item),
+                item.Description,
+                [],
+                null,
+                null);
+
+        private static string RenderDeleteStub(string apiVersion, string kind, string name, string @namespace) =>
+            $$"""
+              apiVersion: {{apiVersion}}
+              kind: {{kind}}
+              metadata:
+                name: {{name}}
+                namespace: {{@namespace}}
+              """;
 
         public string? RenderPipelineJobManifest(Guid pipelineRunId)
         {
