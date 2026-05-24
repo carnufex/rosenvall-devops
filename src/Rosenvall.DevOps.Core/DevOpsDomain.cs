@@ -55,6 +55,7 @@ public sealed class WorkItemType
 public enum AiRunStatus
 {
     Planning,
+    NeedsInput,
     PlanReady,
     Approved,
     ImplementationRunning,
@@ -141,8 +142,24 @@ public sealed class AiRun
         Status = AiRunStatus.PlanReady;
     }
 
+    public void PostQuestions(string questions)
+    {
+        if (string.IsNullOrWhiteSpace(questions))
+        {
+            throw new ArgumentException("Questions are required.", nameof(questions));
+        }
+
+        Plan = questions.Trim();
+        Status = AiRunStatus.NeedsInput;
+    }
+
     public void Approve(string approvedBy)
     {
+        if (Status == AiRunStatus.NeedsInput)
+        {
+            throw new InvalidOperationException("This AI plan needs input and cannot be implemented until a revised plan is generated.");
+        }
+
         if (Status != AiRunStatus.PlanReady)
         {
             throw new InvalidOperationException("An AI run can only be approved after a plan is ready.");

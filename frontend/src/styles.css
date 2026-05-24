@@ -161,6 +161,8 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospa
 .form-grid > label:first-child, .form-grid > label:nth-child(2) { grid-column: 1 / -1; }
 .form-grid.two { margin-top: 0; }
 .form-grid.two > label:first-child, .form-grid.two > label:nth-child(2) { grid-column: auto; }
+.form-grid .full-width { grid-column: 1 / -1; }
+.form-actions-row { display: flex; align-items: end; justify-content: flex-start; }
 .create-form { padding: 22px; display: grid; gap: 18px; }
 label { display: grid; gap: 8px; color: var(--muted-strong); font-weight: 700; font-size: 13px; }
 input, textarea, select { border: 1px solid var(--line); background: #090a0b; color: var(--text); border-radius: 8px; padding: 10px 12px; outline: none; min-width: 0; }
@@ -212,6 +214,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--focus); box-shad
 .compact-plan-comment p { color: var(--muted-strong); margin-bottom: 8px; }
 .plan-reference { border: 1px solid rgba(103, 232, 249, 0.28); background: rgba(103, 232, 249, 0.06); color: var(--focus); border-radius: 8px; min-height: 38px; padding: 8px 12px; justify-content: flex-start; text-align: left; width: 100%; }
 .plan-reference:hover { border-color: rgba(103, 232, 249, 0.52); background: rgba(103, 232, 249, 0.1); }
+.needs-input-note { border: 1px solid rgba(245, 158, 11, 0.38); background: rgba(245, 158, 11, 0.08); color: #fcd34d; padding: 10px 12px; border-radius: 8px; }
 pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; padding: 14px; line-height: 22px; overflow: auto; white-space: pre-wrap; border-radius: 8px; }
 .repo, .status-line, .url-box, .split-stats, .namespace-note, .approval-note { margin: 14px 16px; }
 .status-line { display: flex; gap: 10px; align-items: center; }
@@ -312,6 +315,11 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .secret-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(180px, 0.7fr) auto; gap: 12px; align-items: end; }
 .session-line { color: var(--secondary); font-size: 13px; }
 .target-repo-select { display: grid; gap: 8px; max-width: 420px; }
+.settings-stack { display: grid; gap: 16px; }
+.gitops-create-fields { border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.gitops-applications { margin-top: 16px; }
+.status-badges { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.status-badges a { color: var(--focus); display: inline-flex; align-items: center; }
 
 .board-select { min-width: 260px; max-width: min(480px, 80vw); height: 42px; font-size: 22px; font-weight: 800; background: #090a0b; border-color: var(--line-strong); color: var(--text); padding: 0 34px 0 12px; }
 .board-select:focus { border-color: var(--focus); }

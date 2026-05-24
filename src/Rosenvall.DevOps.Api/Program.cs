@@ -43,6 +43,7 @@ builder.Services.AddDbContextFactory<DevOpsStateDbContext>(options =>
 builder.Services.AddSingleton<DevOpsStore>();
 builder.Services.AddSingleton<PreviewEnvironmentOrchestrator>();
 builder.Services.AddSingleton<PipelineJobOrchestrator>();
+builder.Services.AddSingleton<GitOpsStatusReader>();
 builder.Services.AddSingleton<PreviewImplementationRunner>();
 builder.Services.AddHostedService<PreviewImplementationRecoveryService>();
 builder.Services.AddHostedService<PreviewHealthMonitor>();
@@ -160,8 +161,24 @@ api.MapPost("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, CreateBo
 api.MapGet("/boards/{boardId:guid}", (Guid boardId, DevOpsStore store) =>
     store.GetBoard(boardId) is { } board ? Results.Ok(board) : Results.NotFound());
 
+api.MapPut("/boards/{boardId:guid}/gitops-settings", (Guid boardId, BoardGitOpsSettingsRequest request, DevOpsStore store) =>
+    store.UpsertBoardGitOpsSettings(boardId, request) is { } settings ? Results.Ok(settings) : Results.NotFound());
+
+api.MapPut("/boards/{boardId:guid}/ai-context", (Guid boardId, BoardAiContextRequest request, DevOpsStore store) =>
+    store.UpsertBoardAiContext(boardId, request) is { } context ? Results.Ok(context) : Results.NotFound());
+
 api.MapGet("/boards/{boardId:guid}/timeline", (Guid boardId, DevOpsStore store) =>
     store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetTimeline(boardId)));
+
+api.MapGet("/boards/{boardId:guid}/gitops/applications", async (Guid boardId, DevOpsStore store, GitOpsStatusReader reader, IConfiguration configuration, CancellationToken cancellationToken) =>
+{
+    if (store.GetBoard(boardId) is null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(await reader.ReadApplicationsAsync(store.GetBoardGitOpsSettings(boardId), configuration, cancellationToken));
+});
 
 api.MapGet("/repositories", (DevOpsStore store) => store.GetRepositories());
 
@@ -643,7 +660,16 @@ api.MapGet("/implementation-runs/{implementationRunId:guid}/manifest", (Guid imp
 
 api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid workItemId, StartImplementationRunRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
-    var run = store.StartImplementationRun(workItemId, request);
+    ImplementationRunDto? run;
+    try
+    {
+        run = store.StartImplementationRun(workItemId, request);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+    }
+
     if (run is null)
     {
         return Results.NotFound();
@@ -726,10 +752,13 @@ namespace Rosenvall.DevOps.Api
     public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt, string? Owner = null, string ImplementationProfile = "react-preview");
     public sealed record BoardRepositoryDto(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, RepositoryDto Repository);
     public sealed record BoardTeamAccessDto(Guid BoardId, Guid TeamId, string TeamName, string Role);
-    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null);
+    public sealed record BoardGitOpsSettingsDto(Guid BoardId, IReadOnlyList<string> AllowedPaths, string ArgoNamespace, string ArgoApplicationSelector);
+    public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain);
+    public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null);
+    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
-    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null);
+    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null, BoardPlanningContextDto? BoardContext = null);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
     public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
@@ -738,6 +767,8 @@ namespace Rosenvall.DevOps.Api
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
+    public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt);
+    public sealed record GitOpsApplicationsResponseDto(IReadOnlyList<GitOpsApplicationStatusDto> Applications, string? Message = null);
     public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt);
     public sealed record GitHubManifestAppDto(long Id, string Slug, string Name, string Pem);
     public sealed record BoardSecretDto(Guid Id, Guid BoardId, Guid? RepositoryId, string Key, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastUsedAt = null);
@@ -762,7 +793,9 @@ namespace Rosenvall.DevOps.Api
     public sealed record InviteTeamMemberRequest(string Email, string Role);
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
     public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null, string? Owner = null, string? ImplementationProfile = null);
-    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null);
+    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null);
+    public sealed record BoardGitOpsSettingsRequest(IReadOnlyList<string>? AllowedPaths, string? ArgoNamespace, string? ArgoApplicationSelector);
+    public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain);
     public sealed record LinkBoardRepositoryRequest(Guid RepositoryId, bool IsPrimary, string? ImplementationProfile = null);
     public sealed record UpsertBoardTeamAccessRequest(string Role);
     public sealed record CreateBoardSecretRequest(string Key, string Value, Guid? RepositoryId = null);
@@ -881,6 +914,7 @@ namespace Rosenvall.DevOps.Api
             var jobName = JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, aiRun, context)));
+            var allowedPaths = Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join('\n', context.BoardContext?.GitOpsSettings?.AllowedPaths ?? [])));
             var secretEnv = RenderSecretEnvironment(boardSecrets ?? []);
             var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
                 ? "codex exec --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
@@ -945,10 +979,12 @@ namespace Rosenvall.DevOps.Api
                                  value: "{{Escape(repository.DefaultBranch)}}"
                                - name: ROSENVALL_BRANCH
                                  value: "{{Escape(run.Branch)}}"
-                               - name: ROSENVALL_PROMPT_B64
-                                 value: "{{prompt}}"
-                               - name: ROSENVALL_CODEX_SESSION_ID
-                                 value: "{{Escape(aiSession?.ProviderSessionId)}}"
+                                - name: ROSENVALL_PROMPT_B64
+                                  value: "{{prompt}}"
+                                - name: ROSENVALL_ALLOWED_PATHS_B64
+                                  value: "{{allowedPaths}}"
+                                - name: ROSENVALL_CODEX_SESSION_ID
+                                  value: "{{Escape(aiSession?.ProviderSessionId)}}"
                    {{secretEnv}}
                              command:
                                - sh
@@ -961,17 +997,34 @@ namespace Rosenvall.DevOps.Api
                                  auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${GITHUB_TOKEN}@github.com/#")"
                                  git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
                                  cd "$workspace/repo"
-                                 git config user.name "Rosenvall DevOps"
-                                 git config user.email "devops@rosenvall.se"
-                                 git switch -c "$ROSENVALL_BRANCH"
-                                 printf '%s' "$ROSENVALL_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
-                                 echo "RDO_STEP=Implementing"
-                                 {{codexCommand}}
-                                 echo "RDO_STEP=Testing"
-                                 if [ -f package.json ]; then npm test -- --runInBand || npm run build || true; fi
-                                 if ls *.sln *.slnx >/dev/null 2>&1; then dotnet test --no-restore || true; fi
-                                 if git diff --quiet && [ -z "$(git status --porcelain)" ]; then echo "RDO_FAILURE=No changes produced"; exit 20; fi
-                                 git status --short
+                                  git config user.name "Rosenvall DevOps"
+                                  git config user.email "devops@rosenvall.se"
+                                  git switch -c "$ROSENVALL_BRANCH"
+                                  echo "RDO_STEP=Inspecting"
+                                  git status --short
+                                  printf '%s' "$ROSENVALL_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
+                                  printf '%s' "$ROSENVALL_ALLOWED_PATHS_B64" | base64 -d > "$workspace/allowed-paths.txt"
+                                  echo "RDO_STEP=Implementing"
+                                  {{codexCommand}}
+                                  if [ -f package.json ]; then echo "RDO_STEP=Testing"; npm test -- --runInBand || npm run build || true; fi
+                                  if ls *.sln *.slnx >/dev/null 2>&1; then echo "RDO_STEP=Testing"; dotnet test --no-restore || true; fi
+                                  echo "RDO_STEP=Validating"
+                                  if git diff --quiet && [ -z "$(git status --porcelain)" ]; then echo "RDO_FAILURE=No changes produced"; exit 20; fi
+                                  git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/changed-files.txt"
+                                  outside=""
+                                  if [ -s "$workspace/allowed-paths.txt" ]; then
+                                    while IFS= read -r changed; do
+                                      [ -z "$changed" ] && continue
+                                      allowed=0
+                                      while IFS= read -r prefix; do
+                                        [ -z "$prefix" ] && continue
+                                        case "$changed" in "$prefix"*) allowed=1 ;; esac
+                                      done < "$workspace/allowed-paths.txt"
+                                      if [ "$allowed" != "1" ]; then outside="$outside $changed"; fi
+                                    done < "$workspace/changed-files.txt"
+                                  fi
+                                  if [ -n "$outside" ]; then echo "RDO_FAILURE=Changed files outside allowed GitOps paths"; printf '%s\n' "$outside"; exit 22; fi
+                                  git status --short
                                  git add -A
                                  git commit -m "Implement {{Escape(context.Item.Key)}} {{Escape(context.Item.Title)}}"
                                  commit="$(git rev-parse HEAD)"
@@ -1018,7 +1071,9 @@ namespace Rosenvall.DevOps.Api
         {
             var unityGuidance = string.Equals(repository.ImplementationProfile, "unity", StringComparison.OrdinalIgnoreCase)
                 ? "This repository is a Unity project. Respect Unity folder conventions, avoid destructive scene or asset rewrites, and document any change that requires Unity Editor/MCP validation."
-                : "Follow the repository's existing stack and style. Make the smallest coherent production change.";
+                : string.Equals(repository.ImplementationProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase)
+                    ? "This repository is a GitOps homelab repository. Follow declared allowed paths, keep all cluster changes PR-first, and rely on ArgoCD to reconcile after human review."
+                    : "Follow the repository's existing stack and style. Make the smallest coherent production change.";
             return $$"""
                    You are implementing a Rosenvall DevOps work item directly in a Git repository.
 
@@ -1033,11 +1088,16 @@ namespace Rosenvall.DevOps.Api
                    Repository: {{repository.Provider}} / {{repository.Owner}}/{{repository.Name}}
                    Implementation profile: {{repository.ImplementationProfile}}
 
+                   Board context:
+                   {{PromptContextRenderer.RenderImplementationContext(context)}}
+
                    {{unityGuidance}}
 
                    Requirements:
                    - Inspect the repository before editing.
                    - Modify source files in the checked-out repository.
+                   - Obey the allowed path scope when one is configured.
+                   - Keep GitOps and repository implementation PR-first; do not apply changes directly to the cluster.
                    - Do not build a standalone React preview unless the repository itself is a React app and the work item requires it.
                    - Run the relevant lightweight tests or build command if discoverable.
                    - Leave a focused diff suitable for a pull request.
@@ -1752,6 +1812,122 @@ namespace Rosenvall.DevOps.Api
         }
     }
 
+    public sealed class GitOpsStatusReader(PipelineJobOrchestrator jobs)
+    {
+        public async Task<GitOpsApplicationsResponseDto> ReadApplicationsAsync(BoardGitOpsSettingsDto? settings, IConfiguration configuration, CancellationToken cancellationToken)
+        {
+            if (settings is null)
+            {
+                return new GitOpsApplicationsResponseDto([], "GitOps settings are not configured for this board.");
+            }
+
+            var selector = string.IsNullOrWhiteSpace(settings.ArgoApplicationSelector)
+                ? ""
+                : $" -l \"{settings.ArgoApplicationSelector.Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
+            var result = await jobs.GetOutputAsync($"get applications.argoproj.io -n {settings.ArgoNamespace}{selector} -o json", cancellationToken);
+            if (!result.Succeeded)
+            {
+                return FromKubectlFailure(result.Message);
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(result.Message);
+                var applications = ParseApplicationsJson(document.RootElement, configuration["ArgoCD:BaseUrl"]);
+                var message = applications.Count == 0
+                    ? string.IsNullOrWhiteSpace(settings.ArgoApplicationSelector)
+                        ? "No ArgoCD applications were found in the configured namespace."
+                        : "No ArgoCD applications matched the configured selector."
+                    : null;
+                return new GitOpsApplicationsResponseDto(applications, message);
+            }
+            catch (JsonException)
+            {
+                return new GitOpsApplicationsResponseDto([], "kubectl returned invalid ArgoCD Application JSON.");
+            }
+        }
+
+        public static IReadOnlyList<GitOpsApplicationStatusDto> ParseApplicationsJson(JsonElement root, string? argoBaseUrl = null)
+        {
+            if (!root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return items.EnumerateArray()
+                .Select(item =>
+                {
+                    var metadata = item.TryGetProperty("metadata", out var meta) ? meta : default;
+                    var status = item.TryGetProperty("status", out var stat) ? stat : default;
+                    var sync = status.ValueKind == JsonValueKind.Object && status.TryGetProperty("sync", out var syncElement) ? syncElement : default;
+                    var health = status.ValueKind == JsonValueKind.Object && status.TryGetProperty("health", out var healthElement) ? healthElement : default;
+                    var name = JsonString(metadata, "name", "application");
+                    return new GitOpsApplicationStatusDto(
+                        name,
+                        JsonString(metadata, "namespace", "argocd"),
+                        JsonString(sync, "status", "Unknown"),
+                        JsonString(health, "status", "Unknown"),
+                        JsonNullableString(sync, "revision"),
+                        FirstNonEmpty(JsonNullableString(health, "message"), JsonNullableString(status, "message"), "Application status read from ArgoCD."),
+                        BuildArgoUrl(argoBaseUrl, name),
+                        JsonDate(metadata, "creationTimestamp") ?? JsonDate(status, "reconciledAt"));
+                })
+                .OrderBy(application => application.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        public static GitOpsApplicationsResponseDto FromKubectlFailure(string kubectlError)
+        {
+            var message = kubectlError ?? "";
+            if (message.Contains("doesn't have a resource type", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("the server could not find the requested resource", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("applications.argoproj.io", StringComparison.OrdinalIgnoreCase) && message.Contains("not found", StringComparison.OrdinalIgnoreCase) && !message.Contains("namespaces", StringComparison.OrdinalIgnoreCase))
+            {
+                return new GitOpsApplicationsResponseDto([], "ArgoCD Application CRD was not found. Install ArgoCD CRDs before reading GitOps application status.");
+            }
+
+            if (message.Contains("forbidden", StringComparison.OrdinalIgnoreCase))
+            {
+                return new GitOpsApplicationsResponseDto([], "The service account lacks access to read ArgoCD Application resources.");
+            }
+
+            if (message.Contains("namespaces", StringComparison.OrdinalIgnoreCase) && message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+            {
+                return new GitOpsApplicationsResponseDto([], "The configured ArgoCD namespace is missing.");
+            }
+
+            return new GitOpsApplicationsResponseDto([], $"Could not read ArgoCD applications: {message}");
+        }
+
+        private static string JsonString(JsonElement element, string property, string fallback) =>
+            JsonNullableString(element, property) ?? fallback;
+
+        private static string? JsonNullableString(JsonElement element, string property)
+        {
+            if (element.ValueKind == JsonValueKind.Object &&
+                element.TryGetProperty(property, out var value) &&
+                value.ValueKind == JsonValueKind.String)
+            {
+                return value.GetString();
+            }
+
+            return null;
+        }
+
+        private static DateTimeOffset? JsonDate(JsonElement element, string property) =>
+            JsonNullableString(element, property) is { } value && DateTimeOffset.TryParse(value, out var parsed)
+                ? parsed
+                : null;
+
+        private static string? BuildArgoUrl(string? baseUrl, string name) =>
+            string.IsNullOrWhiteSpace(baseUrl)
+                ? null
+                : $"{baseUrl.TrimEnd('/')}/applications/{WebUtility.UrlEncode(name)}";
+
+        private static string FirstNonEmpty(params string?[] values) =>
+            values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
+    }
+
     public sealed class PreviewHealthMonitor(DevOpsStore store, PreviewEnvironmentOrchestrator previews, ILogger<PreviewHealthMonitor> logger) : BackgroundService
     {
         private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
@@ -1900,6 +2076,11 @@ namespace Rosenvall.DevOps.Api
                 return "Pushing";
             }
 
+            if (logs.Contains("RDO_STEP=Validating", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Validating";
+            }
+
             if (logs.Contains("RDO_STEP=Testing", StringComparison.OrdinalIgnoreCase))
             {
                 return "Testing";
@@ -1908,6 +2089,11 @@ namespace Rosenvall.DevOps.Api
             if (logs.Contains("RDO_STEP=Implementing", StringComparison.OrdinalIgnoreCase))
             {
                 return "Implementing";
+            }
+
+            if (logs.Contains("RDO_STEP=Inspecting", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Inspecting";
             }
 
             if (logs.Contains("RDO_STEP=Cloning", StringComparison.OrdinalIgnoreCase))
@@ -2579,6 +2765,72 @@ namespace Rosenvall.DevOps.Api
             needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
     }
 
+    public static class PromptContextRenderer
+    {
+        public static string RenderPlanningContext(WorkItemDetailDto context)
+        {
+            var board = context.BoardContext;
+            if (board is null)
+            {
+                return "Repository profile: react-preview";
+            }
+
+            var builder = new StringBuilder();
+            builder.AppendLine($"Repository profile: {board.RepositoryProfile}");
+            if (board.AiContext is not null)
+            {
+                builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
+                builder.AppendLine($"Enabled board skills: {ListOrNone(board.AiContext.EnabledSkills)}");
+                builder.AppendLine(board.AiContext.AskWhenUncertain
+                    ? "Ask blocking questions when required facts are missing; do not guess namespaces, app names, deletion scope, temporary-vs-permanent intent, or allowed paths."
+                    : "Ask blocking questions only when implementation would be unsafe without an answer.");
+            }
+
+            if (board.GitOpsSettings is not null)
+            {
+                builder.AppendLine($"Allowed GitOps paths: {ListOrNone(board.GitOpsSettings.AllowedPaths)}");
+                builder.AppendLine($"ArgoCD namespace: {board.GitOpsSettings.ArgoNamespace}");
+                builder.AppendLine($"ArgoCD Application selector: {EmptyAsNone(board.GitOpsSettings.ArgoApplicationSelector)}");
+                builder.AppendLine("GitOps mode is PR-first: generate a plan for repository changes only; do not directly apply Kubernetes manifests.");
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        public static string RenderImplementationContext(WorkItemDetailDto context)
+        {
+            var board = context.BoardContext;
+            if (board is null)
+            {
+                return "No board-specific implementation context is configured.";
+            }
+
+            var builder = new StringBuilder();
+            if (board.AiContext is not null)
+            {
+                builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
+                builder.AppendLine($"Enabled board skills: {ListOrNone(board.AiContext.EnabledSkills)}");
+                builder.AppendLine("Use these skills when relevant; do not assume unrelated skills are active.");
+            }
+
+            if (board.GitOpsSettings is not null)
+            {
+                builder.AppendLine($"Allowed GitOps paths: {ListOrNone(board.GitOpsSettings.AllowedPaths)}");
+                builder.AppendLine($"ArgoCD namespace: {board.GitOpsSettings.ArgoNamespace}");
+                builder.AppendLine($"ArgoCD Application selector: {EmptyAsNone(board.GitOpsSettings.ArgoApplicationSelector)}");
+                builder.AppendLine("PR-first rule: edit the repository, push a branch, and open a pull request. Do not run kubectl apply, auto-merge, or mutate the cluster directly.");
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private static string ListOrNone(IReadOnlyList<string> values) =>
+            values.Count == 0 ? "none" : string.Join(", ", values);
+
+        private static string EmptyAsNone(string value) =>
+            string.IsNullOrWhiteSpace(value) ? "none" : value.Trim();
+    }
+
     public interface IAiPlanProvider
     {
         string ProviderName { get; }
@@ -3074,11 +3326,15 @@ namespace Rosenvall.DevOps.Api
               Comments:
               {{string.Join("\n", context.Comments.Select(comment => $"- {comment.Author} ({comment.Kind}): {comment.Body}"))}}
 
+              Board and repository context:
+              {{PromptContextRenderer.RenderPlanningContext(context)}}
+
               Required output:
               - A concrete plan.
               - Include tests.
-              - Target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
-              - The preview should be containerized and exposed through the existing Kubernetes preview route.
+              - For repository or GitOps boards, return explicit blocking questions instead of guessing unsafe facts.
+              - For react-preview boards, target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
+              - React previews should be containerized and exposed through the existing Kubernetes preview route.
               - Preserve every concrete visual/content requirement from the title, description, and comments.
               - If colors, language, exact text, layout, or behavior are specified, repeat them explicitly in the plan.
               """;
@@ -3252,11 +3508,15 @@ namespace Rosenvall.DevOps.Api
               Comments:
               {{string.Join("\n", context.Comments.Select(comment => $"- {comment.Author} ({comment.Kind}): {comment.Body}"))}}
 
+              Board and repository context:
+              {{PromptContextRenderer.RenderPlanningContext(context)}}
+
               Required output:
               - A concrete plan.
               - Include tests.
-              - Target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
-              - The preview should be containerized and exposed through the existing Kubernetes preview route.
+              - For repository or GitOps boards, return explicit blocking questions instead of guessing unsafe facts.
+              - For react-preview boards, target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
+              - React previews should be containerized and exposed through the existing Kubernetes preview route.
               - Preserve every concrete visual/content requirement from the title, description, and comments.
               - If colors, language, exact text, layout, or behavior are specified, repeat them explicitly in the plan.
               """;
@@ -3655,6 +3915,8 @@ namespace Rosenvall.DevOps.Api
         private readonly List<GitHubIntegrationDto> _githubIntegrations = [];
         private readonly List<BoardSecretDto> _boardSecrets = [];
         private readonly List<AiSessionDto> _aiSessions = [];
+        private readonly List<BoardGitOpsSettingsDto> _boardGitOpsSettings = [];
+        private readonly List<BoardAiContextDto> _boardAiContexts = [];
         private int _nextTaskNumber = 4821;
 
         public DevOpsStore(IDbContextFactory<DevOpsStateDbContext> dbFactory)
@@ -3934,7 +4196,16 @@ namespace Rosenvall.DevOps.Api
                 _boards.Add(board);
                 if (repository is not null)
                 {
-                    UpsertBoardRepositoryLinkWithoutLock(board.Id, repository.Id, true, repository.ImplementationProfile);
+                    UpsertBoardRepositoryLinkWithoutLock(board.Id, repository.Id, true, NormalizeImplementationProfile(request.ImplementationProfile ?? repository.ImplementationProfile));
+                }
+                var boardProfile = BoardImplementationProfile(board.Id);
+                if (request.GitOpsSettings is not null || string.Equals(boardProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase))
+                {
+                    _boardGitOpsSettings.Add(CreateGitOpsSettings(board.Id, request.GitOpsSettings));
+                }
+                if (request.AiContext is not null || string.Equals(boardProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase))
+                {
+                    _boardAiContexts.Add(CreateAiContext(board.Id, request.AiContext, defaultAskWhenUncertain: string.Equals(boardProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase)));
                 }
                 var teamIds = request.TeamIds?.Where(teamId => _teams.Any(team => team.Id == teamId)).Distinct().ToArray() ?? [];
                 if (teamIds.Length == 0 && !string.IsNullOrWhiteSpace(actorSubject))
@@ -4012,6 +4283,56 @@ namespace Rosenvall.DevOps.Api
             lock (_lock)
             {
                 return BoardRepositoriesFor(boardId);
+            }
+        }
+
+        public BoardGitOpsSettingsDto? GetBoardGitOpsSettings(Guid boardId)
+        {
+            lock (_lock)
+            {
+                return GitOpsSettingsFor(boardId);
+            }
+        }
+
+        public BoardGitOpsSettingsDto? UpsertBoardGitOpsSettings(Guid boardId, BoardGitOpsSettingsRequest request)
+        {
+            lock (_lock)
+            {
+                if (_boards.All(board => board.Id != boardId))
+                {
+                    return null;
+                }
+
+                var settings = CreateGitOpsSettings(boardId, request);
+                _boardGitOpsSettings.RemoveAll(existing => existing.BoardId == boardId);
+                _boardGitOpsSettings.Add(settings);
+                Persist();
+                return settings;
+            }
+        }
+
+        public BoardAiContextDto? GetBoardAiContext(Guid boardId)
+        {
+            lock (_lock)
+            {
+                return AiContextFor(boardId);
+            }
+        }
+
+        public BoardAiContextDto? UpsertBoardAiContext(Guid boardId, BoardAiContextRequest request)
+        {
+            lock (_lock)
+            {
+                if (_boards.All(board => board.Id != boardId))
+                {
+                    return null;
+                }
+
+                var context = CreateAiContext(boardId, request);
+                _boardAiContexts.RemoveAll(existing => existing.BoardId == boardId);
+                _boardAiContexts.Add(context);
+                Persist();
+                return context;
             }
         }
 
@@ -4369,7 +4690,8 @@ namespace Rosenvall.DevOps.Api
                     _implementationRuns.Where(run => run.WorkItemId == item.Id).OrderByDescending(run => run.CreatedAt).ToArray(),
                     _aiSessions.SingleOrDefault(session => session.WorkItemId == item.Id),
                     _previewEvents.Where(entry => entry.WorkItemId == item.Id).OrderBy(entry => entry.CreatedAt).ToArray(),
-                    PreviewImplementationRunsAwaitingRecoveryForWorkItem(item.Id));
+                    PreviewImplementationRunsAwaitingRecoveryForWorkItem(item.Id),
+                    new BoardPlanningContextDto(item.BoardId, BoardImplementationProfile(item.BoardId), GitOpsSettingsFor(item.BoardId), AiContextFor(item.BoardId)));
             }
         }
 
@@ -4896,19 +5218,27 @@ namespace Rosenvall.DevOps.Api
                     .DefaultIfEmpty(0)
                     .Max() + 1;
                 var run = AiRun.Start(workItemId, provider, model, sequenceNumber, DateTimeOffset.UtcNow, normalizedReasoningEffort);
-                run.PostPlan(string.IsNullOrWhiteSpace(plan) ? BuildPlan(item) : plan);
+                var planBody = string.IsNullOrWhiteSpace(plan) ? BuildPlan(item) : plan;
+                if (IsNeedsInputPlan(planBody))
+                {
+                    run.PostQuestions(planBody);
+                }
+                else
+                {
+                    run.PostPlan(planBody);
+                }
                 _aiRuns.Add(run);
-                _comments.Add(new CommentDto(Guid.NewGuid(), workItemId, "Rosenvall AI", "Result", $"Created plan #{run.SequenceNumber}: {item.Title}.", run.CreatedAt));
-                item.AiStatus = "PlanReady";
+                _comments.Add(new CommentDto(Guid.NewGuid(), workItemId, "Rosenvall AI", "Result", run.Status == AiRunStatus.NeedsInput ? $"AI needs input for plan #{run.SequenceNumber}: {item.Title}." : $"Created plan #{run.SequenceNumber}: {item.Title}.", run.CreatedAt));
+                item.AiStatus = run.Status == AiRunStatus.NeedsInput ? "NeedsInput" : "PlanReady";
                 if (session is not null)
                 {
                     var sessionIndex = _aiSessions.FindIndex(entry => entry.Id == session.Id);
                     if (sessionIndex >= 0)
                     {
-                        _aiSessions[sessionIndex] = _aiSessions[sessionIndex] with { LastRunId = run.Id, LastPromptAt = run.CreatedAt, Status = "PlanReady" };
+                        _aiSessions[sessionIndex] = _aiSessions[sessionIndex] with { LastRunId = run.Id, LastPromptAt = run.CreatedAt, Status = run.Status.ToString() };
                     }
                 }
-                AddTimelineForItem(item, "AiPlanReady", item.Key, $"AI plan ready for {item.Title}.", "Rosenvall AI");
+                AddTimelineForItem(item, run.Status == AiRunStatus.NeedsInput ? "AiNeedsInput" : "AiPlanReady", item.Key, run.Status == AiRunStatus.NeedsInput ? $"AI needs input for {item.Title}." : $"AI plan ready for {item.Title}.", "Rosenvall AI");
                 Persist();
                 return run;
             }
@@ -4927,6 +5257,10 @@ namespace Rosenvall.DevOps.Api
                 if (run.Status == AiRunStatus.PlanReady)
                 {
                     run.Approve(approvedBy);
+                }
+                else if (run.Status == AiRunStatus.NeedsInput)
+                {
+                    throw new InvalidOperationException("This AI plan needs input and cannot be implemented until a revised plan is generated.");
                 }
                 else if (run.Status != AiRunStatus.Approved)
                 {
@@ -5583,7 +5917,9 @@ namespace Rosenvall.DevOps.Api
                 board.Columns.Select(column => new BoardColumnDto(column, _items.Where(i => i.BoardId == board.Id && i.Status == column).OrderBy(i => i.SortOrder).ThenBy(i => i.Key).Select(ToSummary).ToArray())).ToArray(),
                 RepositoryIdForBoard(board.Id) is { } repositoryId ? _repositories.SingleOrDefault(repository => repository.Id == repositoryId) : null,
                 BoardRepositoriesFor(board.Id),
-                BoardTeamAccessFor(board.Id));
+                BoardTeamAccessFor(board.Id),
+                GitOpsSettingsFor(board.Id),
+                AiContextFor(board.Id));
 
         private TeamDto EnrichTeam(TeamDto team) =>
             team with
@@ -5831,7 +6167,7 @@ namespace Rosenvall.DevOps.Api
         private static string NormalizeImplementationProfile(string? value)
         {
             var normalized = NormalizeText(value, "react-preview").ToLowerInvariant();
-            return normalized is "code-repo" or "unity" or "react-preview" ? normalized : "react-preview";
+            return normalized is "code-repo" or "unity" or "react-preview" or "gitops-homelab" ? normalized : "react-preview";
         }
 
         private static string NormalizeRole(string? value)
@@ -5922,6 +6258,78 @@ namespace Rosenvall.DevOps.Api
                 .Take(1)
                 .ToArray();
         }
+
+        private string BoardImplementationProfile(Guid boardId) =>
+            BoardRepositoriesFor(boardId).FirstOrDefault(entry => entry.IsPrimary)?.ImplementationProfile ??
+            (RepositoryIdForBoard(boardId) is { } repositoryId
+                ? _repositories.SingleOrDefault(repository => repository.Id == repositoryId)?.ImplementationProfile
+                : null) ??
+            "react-preview";
+
+        private BoardGitOpsSettingsDto? GitOpsSettingsFor(Guid boardId)
+        {
+            var configured = _boardGitOpsSettings.SingleOrDefault(settings => settings.BoardId == boardId);
+            if (configured is not null)
+            {
+                return configured;
+            }
+
+            return string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase)
+                ? DefaultGitOpsSettings(boardId)
+                : null;
+        }
+
+        private BoardAiContextDto? AiContextFor(Guid boardId)
+        {
+            var configured = _boardAiContexts.SingleOrDefault(context => context.BoardId == boardId);
+            if (configured is not null)
+            {
+                return configured;
+            }
+
+            return string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase)
+                ? DefaultAiContext(boardId)
+                : null;
+        }
+
+        private static BoardGitOpsSettingsDto DefaultGitOpsSettings(Guid boardId) =>
+            new(boardId, ["apps/", "clusters/", "infrastructure/"], "argocd", "");
+
+        private static BoardAiContextDto DefaultAiContext(Guid boardId) =>
+            new(boardId, "", [], true);
+
+        private static BoardGitOpsSettingsDto CreateGitOpsSettings(Guid boardId, BoardGitOpsSettingsRequest? request)
+        {
+            var defaults = DefaultGitOpsSettings(boardId);
+            var paths = NormalizePaths(request?.AllowedPaths);
+            return new BoardGitOpsSettingsDto(
+                boardId,
+                paths.Count == 0 ? defaults.AllowedPaths : paths,
+                NormalizeText(request?.ArgoNamespace, defaults.ArgoNamespace),
+                string.IsNullOrWhiteSpace(request?.ArgoApplicationSelector) ? "" : request.ArgoApplicationSelector.Trim());
+        }
+
+        private static BoardAiContextDto CreateAiContext(Guid boardId, BoardAiContextRequest? request, bool defaultAskWhenUncertain = true) =>
+            new(
+                boardId,
+                string.IsNullOrWhiteSpace(request?.Instructions) ? "" : request.Instructions.Trim(),
+                NormalizeSkills(request?.EnabledSkills),
+                request?.AskWhenUncertain ?? defaultAskWhenUncertain);
+
+        private static IReadOnlyList<string> NormalizePaths(IEnumerable<string>? paths) =>
+            (paths ?? [])
+                .Select(path => path.Replace('\\', '/').Trim())
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(path => path.EndsWith("/", StringComparison.Ordinal) ? path : $"{path}/")
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+        private static IReadOnlyList<string> NormalizeSkills(IEnumerable<string>? skills) =>
+            (skills ?? [])
+                .Select(skill => skill.Trim())
+                .Where(skill => !string.IsNullOrWhiteSpace(skill))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
 
         private static bool IsPreviewImplementationAwaitingRecovery(PreviewDto preview) =>
             string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
@@ -6064,6 +6472,15 @@ namespace Rosenvall.DevOps.Api
         private static string BuildPlan(WorkItemRecord item) =>
             $"Based on {item.Key}, implement {item.Title}. Plan: 1. confirm API and data contracts, 2. add focused tests, 3. implement the smallest production slice, 4. build a preview image, 5. post the PR and demo URL for human review.";
 
+        private static bool IsNeedsInputPlan(string plan)
+        {
+            var normalized = plan.TrimStart();
+            return normalized.StartsWith("Questions:", StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith("Needs input:", StringComparison.OrdinalIgnoreCase) ||
+                normalized.Contains("\nQuestions:", StringComparison.OrdinalIgnoreCase) ||
+                normalized.Contains("\nNeeds input:", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static int TryGetTaskNumber(string key)
         {
             if (key.StartsWith("TASK-", StringComparison.OrdinalIgnoreCase) &&
@@ -6177,6 +6594,8 @@ namespace Rosenvall.DevOps.Api
             _githubIntegrations.AddRange(snapshot.GitHubIntegrations ?? []);
             _boardSecrets.AddRange(snapshot.BoardSecrets ?? []);
             _aiSessions.AddRange(snapshot.AiSessions ?? []);
+            _boardGitOpsSettings.AddRange(snapshot.BoardGitOpsSettings ?? []);
+            _boardAiContexts.AddRange(snapshot.BoardAiContexts ?? []);
             _nextTaskNumber = Math.Max(snapshot.NextTaskNumber, NextTaskNumberFromItems());
             return true;
         }
@@ -6204,7 +6623,9 @@ namespace Rosenvall.DevOps.Api
                 _boardRepositoryLinks.ToArray(),
                 _githubIntegrations.ToArray(),
                 _boardSecrets.ToArray(),
-                _aiSessions.ToArray());
+                _aiSessions.ToArray(),
+                _boardGitOpsSettings.ToArray(),
+                _boardAiContexts.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
 
             using var db = _dbFactory.CreateDbContext();
@@ -6260,7 +6681,7 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardAccessDtoRecord(Guid BoardId, Guid UserId, string Role);
     internal sealed record BoardTeamAccessRecord(Guid BoardId, Guid TeamId, string Role);
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);

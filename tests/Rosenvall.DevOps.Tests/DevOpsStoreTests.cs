@@ -132,6 +132,41 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitOps_settings_and_board_ai_context_are_defaulted_upserted_and_persisted()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/rosenvall/rosenvalls-homelab.git", "main", "https://github.com/rosenvall/rosenvalls-homelab", "rosenvall", "gitops-homelab"));
+
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "rosenvalls-homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab"))!;
+
+        Assert.Equal(["apps/", "clusters/", "infrastructure/"], board.GitOpsSettings!.AllowedPaths);
+        Assert.Equal("argocd", board.GitOpsSettings.ArgoNamespace);
+        Assert.True(board.AiContext!.AskWhenUncertain);
+
+        var gitops = store.UpsertBoardGitOpsSettings(board.Id, new BoardGitOpsSettingsRequest(["clusters/prod/", "apps/home/"], "argocd-prod", "app.kubernetes.io/part-of=homelab"));
+        var aiContext = store.UpsertBoardAiContext(board.Id, new BoardAiContextRequest("Never delete resources without explicit approval.", ["kubernetes", "argocd", "gitops-homelab"], true));
+        var reopened = fixture.Reopen();
+        var reopenedBoard = reopened.GetBoard(board.Id)!;
+
+        Assert.Equal(["clusters/prod/", "apps/home/"], gitops!.AllowedPaths);
+        Assert.Equal("app.kubernetes.io/part-of=homelab", reopened.GetBoardGitOpsSettings(board.Id)!.ArgoApplicationSelector);
+        Assert.Equal("Never delete resources without explicit approval.", aiContext!.Instructions);
+        Assert.Equal(["kubernetes", "argocd", "gitops-homelab"], reopened.GetBoardAiContext(board.Id)!.EnabledSkills);
+        Assert.Equal("argocd-prod", reopenedBoard.GitOpsSettings!.ArgoNamespace);
+        Assert.Contains("argocd", reopenedBoard.AiContext!.EnabledSkills);
+    }
+
+    [Fact]
     public void Timeline_combines_card_preview_pr_and_pipeline_events_for_board()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -407,6 +442,28 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void NeedsInput_plans_cannot_be_approved_or_implemented_and_revised_plans_can_be_ready()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/rosenvall/rosenvalls-homelab.git", "main", "https://github.com/rosenvall/rosenvalls-homelab", "rosenvall", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Move Grafana", "Move Grafana to a different namespace.", "Todo", "Medium", null));
+
+        var needsInput = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Questions:\n- Which namespace should Grafana move to?")!;
+        var approveError = Assert.Throws<InvalidOperationException>(() => store.ApproveAiRun(needsInput.Id, "crille"));
+        var implementationError = Assert.Throws<InvalidOperationException>(() => store.StartImplementationRun(item.Id, new StartImplementationRunRequest(needsInput.Id, "crille", repository.Id)));
+        store.AddComment(item.Id, "crille", "Comment", "Use namespace observability and keep the old release until ArgoCD is healthy.");
+        var revised = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Plan:\n1. Edit clusters/prod/grafana namespace.\n2. Validate manifests.")!;
+
+        Assert.Equal(AiRunStatus.NeedsInput, needsInput.Status);
+        Assert.Contains("cannot be implemented", approveError.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("cannot be implemented", implementationError.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AiRunStatus.PlanReady, revised.Status);
+    }
+
+    [Fact]
     public void Custom_url_boards_are_public_clone_only_and_do_not_start_repository_pr_runs()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -523,6 +580,84 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Planning_prompt_includes_board_ai_context_gitops_settings_and_skill_references_only()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/rosenvall/rosenvalls-homelab.git", "main", "https://github.com/rosenvall/rosenvalls-homelab", "rosenvall", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            GitOpsSettings: new BoardGitOpsSettingsRequest(["clusters/prod/"], "argocd", "homelab=true"),
+            AiContext: new BoardAiContextRequest("Only edit production after checking overlays.", ["fake-skill-body-marker", "argocd"], true)))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Update app", "Change the GitOps app.", "Todo", "Medium", null));
+        var context = store.GetWorkItemDetail(item.Id)!;
+        var promptCapture = Path.Combine(Path.GetTempPath(), $"codex-prompt-{Guid.NewGuid():N}.md");
+        var fakeCodex = CreateFakeCodexScript(exitCode: 0, plan: "Plan from fake Codex.", promptCapturePath: promptCapture);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:Path"] = fakeCodex,
+                ["Ai:Codex:Home"] = Path.Combine(Path.GetTempPath(), $"codex-home-{Guid.NewGuid():N}")
+            })
+            .Build();
+        var provider = new CodexCliPlanProvider(configuration, NullLogger<CodexCliPlanProvider>.Instance);
+
+        await provider.GeneratePlanAsync("gpt-5.4", context, CancellationToken.None);
+
+        var prompt = await File.ReadAllTextAsync(promptCapture);
+        Assert.Contains("Only edit production after checking overlays.", prompt);
+        Assert.Contains("Enabled board skills: fake-skill-body-marker, argocd", prompt);
+        Assert.Contains("Allowed GitOps paths: clusters/prod/", prompt);
+        Assert.Contains("ArgoCD namespace: argocd", prompt);
+        Assert.Contains("Ask blocking questions", prompt);
+        Assert.DoesNotContain("FULL FAKE SKILL BODY", prompt);
+    }
+
+    [Fact]
+    public void Implementation_manifest_prompt_includes_board_context_and_allowed_path_validation()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/rosenvall/rosenvalls-homelab.git", "main", "https://github.com/rosenvall/rosenvalls-homelab", "rosenvall", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            GitOpsSettings: new BoardGitOpsSettingsRequest(["clusters/prod/", "apps/home/"], "argocd", "homelab=true"),
+            AiContext: new BoardAiContextRequest("Use app-of-apps conventions.", ["argocd", "kubernetes"], true)))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Update app", "Change the GitOps app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Plan:\n1. Update apps/home.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var manifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build())!;
+        var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_PROMPT_B64");
+
+        Assert.Contains("Implementation profile: gitops-homelab", prompt);
+        Assert.Contains("Use app-of-apps conventions.", prompt);
+        Assert.Contains("Enabled board skills: argocd, kubernetes", prompt);
+        Assert.Contains("Allowed GitOps paths: clusters/prod/, apps/home/", prompt);
+        Assert.Contains("PR-first", prompt);
+        Assert.Contains("ROSENVALL_ALLOWED_PATHS_B64", manifest);
+        Assert.Contains("RDO_STEP=Inspecting", manifest);
+        Assert.Contains("RDO_STEP=Validating", manifest);
+        Assert.Contains("RDO_FAILURE=Changed files outside allowed GitOps paths", manifest);
+    }
+
+    [Fact]
     public void Ai_session_is_stable_per_card_and_codex_resume_is_used_when_session_id_exists()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -596,6 +731,68 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal(222, fixture.Store.GetDefaultGitHubInstallationId());
         Assert.Equal(integration.Id, fixture.Store.GetGitHubIntegrationForRepository(repository)!.Id);
+    }
+
+    [Fact]
+    public void GitOps_application_status_parser_handles_synced_healthy_and_degraded_apps()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "items": [
+            {
+              "metadata": {
+                "name": "grafana",
+                "namespace": "argocd",
+                "creationTimestamp": "2026-05-24T08:00:00Z"
+              },
+              "status": {
+                "sync": { "status": "Synced", "revision": "abc123" },
+                "health": { "status": "Healthy", "message": "all resources healthy" }
+              }
+            },
+            {
+              "metadata": {
+                "name": "prometheus",
+                "namespace": "argocd"
+              },
+              "status": {
+                "sync": { "status": "OutOfSync", "revision": "def456" },
+                "health": { "status": "Degraded", "message": "deployment unavailable" }
+              }
+            }
+          ]
+        }
+        """);
+
+        var statuses = GitOpsStatusReader.ParseApplicationsJson(document.RootElement, "https://argocd.rosenvall.se");
+
+        Assert.Collection(statuses,
+            grafana =>
+            {
+                Assert.Equal("grafana", grafana.Name);
+                Assert.Equal("Synced", grafana.SyncStatus);
+                Assert.Equal("Healthy", grafana.HealthStatus);
+                Assert.Equal("abc123", grafana.Revision);
+                Assert.Equal("https://argocd.rosenvall.se/applications/grafana", grafana.Url);
+            },
+            prometheus =>
+            {
+                Assert.Equal("prometheus", prometheus.Name);
+                Assert.Equal("OutOfSync", prometheus.SyncStatus);
+                Assert.Equal("Degraded", prometheus.HealthStatus);
+                Assert.Contains("deployment unavailable", prometheus.Message);
+            });
+    }
+
+    [Theory]
+    [InlineData("the server doesn't have a resource type \"applications\"", "ArgoCD Application CRD was not found")]
+    [InlineData("Error from server (Forbidden): applications.argoproj.io is forbidden", "service account lacks access")]
+    [InlineData("Error from server (NotFound): namespaces \"argocd\" not found", "namespace is missing")]
+    public void GitOps_application_status_failures_are_actionable(string kubectlError, string expectedMessage)
+    {
+        var result = GitOpsStatusReader.FromKubectlFailure(kubectlError);
+
+        Assert.Contains(expectedMessage, result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1488,12 +1685,33 @@ public sealed class DevOpsStoreTests
         }
     }
 
-    private static string CreateFakeCodexScript(int exitCode, string plan, bool requireSkipGitRepoCheck = false)
+    private static string DecodeManifestEnvironmentValue(string manifest, string name)
+    {
+        var lines = manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        for (var index = 0; index < lines.Length - 1; index++)
+        {
+            if (lines[index].Trim() == $"- name: {name}")
+            {
+                var value = lines[index + 1].Trim();
+                const string prefix = "value: \"";
+                if (value.StartsWith(prefix, StringComparison.Ordinal) && value.EndsWith("\"", StringComparison.Ordinal))
+                {
+                    var encoded = value[prefix.Length..^1];
+                    return System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+                }
+            }
+        }
+
+        throw new InvalidOperationException($"Environment value {name} was not found.");
+    }
+
+    private static string CreateFakeCodexScript(int exitCode, string plan, bool requireSkipGitRepoCheck = false, string? promptCapturePath = null)
     {
         if (!OperatingSystem.IsWindows())
         {
             var unixScriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-{Guid.NewGuid():N}.sh");
             var escapedPlan = plan.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+            var escapedCapture = (promptCapturePath ?? "").Replace("'", "'\"'\"'", StringComparison.Ordinal);
             var requiredSkipCheck = requireSkipGitRepoCheck ? "1" : "0";
             File.WriteAllText(unixScriptPath, $$"""
 #!/usr/bin/env sh
@@ -1514,6 +1732,7 @@ if [ "{{requiredSkipCheck}}" = "1" ] && [ "$has_skip" != "1" ]; then
   printf '%s\n' 'Not inside a trusted directory and --skip-git-repo-check was not specified.' >&2
   exit 1
 fi
+if [ -n "{{escapedCapture}}" ]; then cat > "{{escapedCapture}}"; else cat >/dev/null; fi
 if [ -n "$last" ]; then printf '%s\n' '{{escapedPlan}}' > "$last"; fi
 exit {{exitCode}}
 """);
@@ -1523,6 +1742,7 @@ exit {{exitCode}}
 
         var scriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-{Guid.NewGuid():N}.cmd");
         var requiredSkipCheckWindows = requireSkipGitRepoCheck ? "1" : "0";
+        var captureCommand = string.IsNullOrWhiteSpace(promptCapturePath) ? "more > nul" : $"more > \"{promptCapturePath}\"";
         File.WriteAllText(scriptPath, $"""
 @echo off
 set last=
@@ -1541,6 +1761,7 @@ if "{requiredSkipCheckWindows}"=="1" if not "%hasSkip%"=="1" (
   echo Not inside a trusted directory and --skip-git-repo-check was not specified. 1>&2
   exit /b 1
 )
+{captureCommand}
 if defined last echo {plan}> "%last%"
 exit /b {exitCode}
 """);

@@ -66,6 +66,22 @@ type Board = {
   repository?: RepositoryDto | null;
   repositories?: BoardRepositoryDto[] | null;
   teamAccess?: BoardTeamAccessDto[] | null;
+  gitOpsSettings?: BoardGitOpsSettingsDto | null;
+  aiContext?: BoardAiContextDto | null;
+};
+
+type BoardGitOpsSettingsDto = {
+  boardId: string;
+  allowedPaths: string[];
+  argoNamespace: string;
+  argoApplicationSelector: string;
+};
+
+type BoardAiContextDto = {
+  boardId: string;
+  instructions: string;
+  enabledSkills: string[];
+  askWhenUncertain: boolean;
 };
 
 type RepositoryDto = {
@@ -125,6 +141,12 @@ type WorkItemDetail = {
   aiSession?: AiSessionDto | null;
   previewEvents?: PreviewEventDto[] | null;
   previewImplementationRunsAwaitingRecovery?: AiRun[] | null;
+  boardContext?: {
+    boardId: string;
+    repositoryProfile: string;
+    gitOpsSettings?: BoardGitOpsSettingsDto | null;
+    aiContext?: BoardAiContextDto | null;
+  } | null;
 };
 
 type CommentDto = {
@@ -169,7 +191,7 @@ type ImplementationRunDto = {
   aiRunId: string;
   workItemKey: string;
   workItemTitle: string;
-  status: 'Queued' | 'Cloning' | 'Implementing' | 'Testing' | 'Pushing' | 'PullRequestReady' | 'Failed' | string;
+  status: 'Queued' | 'Cloning' | 'Inspecting' | 'Implementing' | 'Validating' | 'Testing' | 'Pushing' | 'PullRequestReady' | 'Failed' | string;
   branch: string;
   pullRequestUrl?: string | null;
   commitSha?: string | null;
@@ -177,6 +199,22 @@ type ImplementationRunDto = {
   createdAt: string;
   updatedAt: string;
   terminalLines?: PreviewTerminalLineDto[] | null;
+};
+
+type GitOpsApplicationStatusDto = {
+  name: string;
+  namespace: string;
+  syncStatus: string;
+  healthStatus: string;
+  revision?: string | null;
+  message: string;
+  url?: string | null;
+  updatedAt?: string | null;
+};
+
+type GitOpsApplicationsResponseDto = {
+  applications: GitOpsApplicationStatusDto[];
+  message?: string | null;
 };
 
 type AiSessionDto = {
@@ -401,8 +439,14 @@ type CreateBoardForm = {
   repositoryRemoteUrl: string;
   repositoryWebUrl: string;
   repositoryDefaultBranch: string;
-  implementationProfile: 'react-preview' | 'code-repo' | 'unity';
+  implementationProfile: 'react-preview' | 'code-repo' | 'unity' | 'gitops-homelab';
   teamIds: string[];
+  gitOpsAllowedPaths: string;
+  argoNamespace: string;
+  argoApplicationSelector: string;
+  aiInstructions: string;
+  enabledSkills: string;
+  askWhenUncertain: boolean;
 };
 
 type GitHubRepositoryPickerDto = {
@@ -437,7 +481,13 @@ const emptyBoardForm: CreateBoardForm = {
   repositoryWebUrl: '',
   repositoryDefaultBranch: 'main',
   implementationProfile: 'code-repo',
-  teamIds: []
+  teamIds: [],
+  gitOpsAllowedPaths: 'apps/\nclusters/\ninfrastructure/',
+  argoNamespace: 'argocd',
+  argoApplicationSelector: '',
+  aiInstructions: '',
+  enabledSkills: 'kubernetes\nargocd\ngitops-homelab',
+  askWhenUncertain: true
 };
 
 const selectedBoardStorageKey = 'rosenvall-devops:selected-board';
@@ -527,7 +577,7 @@ function App() {
       const boards = await api.get<Board[]>(`/api/workspaces/${workspace.id}/boards`);
       const board = boards.find((entry) => entry.id === (preferredBoardId ?? selectedBoardIdRef.current)) ?? boards[0];
       if (!board) throw new Error('No board returned by API');
-      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets] = await Promise.all([
+      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, gitOpsApplications] = await Promise.all([
         api.get<RepositoryDto[]>('/api/repositories'),
         api.get<SettingsDto>('/api/settings'),
         api.get<PreviewEnvironmentDto[]>('/api/preview-environments'),
@@ -539,10 +589,11 @@ function App() {
         api.get<UserDto>('/api/me'),
         api.get<TeamDto[]>('/api/teams'),
         api.get<GitHubIntegrationDto[]>('/api/integrations/github'),
-        api.get<BoardSecretDto[]>(`/api/boards/${board.id}/secrets`)
+        api.get<BoardSecretDto[]>(`/api/boards/${board.id}/secrets`),
+        api.get<GitOpsApplicationsResponseDto>(`/api/boards/${board.id}/gitops/applications`).catch(() => ({ applications: [], message: 'ArgoCD status is unavailable.' }))
       ]);
       setSelectedBoardId(board.id);
-      setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, busy: false });
+      setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, gitOpsApplications, busy: false });
     } catch (loadError) {
       setShell({ status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
     }
@@ -612,6 +663,35 @@ function App() {
     };
   }, [loadShell, previewPollWorkItemId]);
 
+  const activeGitOpsBoardId = shell.status === 'ready' && view === 'settings' ? shell.board.id : null;
+  React.useEffect(() => {
+    if (!activeGitOpsBoardId) return;
+    let cancelled = false;
+
+    const refreshGitOpsApplications = async () => {
+      try {
+        const result = await api.get<GitOpsApplicationsResponseDto>(`/api/boards/${activeGitOpsBoardId}/gitops/applications`);
+        if (cancelled) return;
+        setShell((current) => current.status === 'ready' && current.board.id === activeGitOpsBoardId
+          ? { ...current, gitOpsApplications: result }
+          : current);
+      } catch (error) {
+        if (!cancelled) {
+          setShell((current) => current.status === 'ready' && current.board.id === activeGitOpsBoardId
+            ? { ...current, gitOpsApplications: { applications: [], message: error instanceof Error ? error.message : 'ArgoCD status is unavailable.' } }
+            : current);
+        }
+      }
+    };
+
+    void refreshGitOpsApplications();
+    const interval = window.setInterval(() => void refreshGitOpsApplications(), 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeGitOpsBoardId]);
+
   const runAction = React.useCallback(async (label: string, action: () => Promise<void>) => {
     setBusyAction(label);
     try {
@@ -648,7 +728,17 @@ function App() {
           providerMode: form.providerMode === 'CustomUrl' ? 'CustomUrl' : 'GitHub',
           customRepositoryUrl: form.providerMode === 'CustomUrl' ? form.repositoryRemoteUrl : null,
           gitHubRepositoryId: form.providerMode === 'GitHub' ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : null,
-          teamIds: form.teamIds
+          teamIds: form.teamIds,
+          gitOpsSettings: form.implementationProfile === 'gitops-homelab' ? {
+            allowedPaths: linesFromTextarea(form.gitOpsAllowedPaths),
+            argoNamespace: form.argoNamespace,
+            argoApplicationSelector: form.argoApplicationSelector
+          } : null,
+          aiContext: form.implementationProfile === 'gitops-homelab' ? {
+            instructions: form.aiInstructions,
+            enabledSkills: linesFromTextarea(form.enabledSkills),
+            askWhenUncertain: form.askWhenUncertain
+          } : null
         });
         setCreateBoardOpen(false);
         setSelectedBoardId(created.id);
@@ -756,6 +846,18 @@ function App() {
     deleteBoardSecret: async (boardId, secretId) => {
       await runAction('Deleting board secret', async () => {
         await api.delete(`/api/boards/${boardId}/secrets/${secretId}`);
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
+    updateBoardGitOpsSettings: async (boardId, settings) => {
+      await runAction('Saving GitOps settings', async () => {
+        await api.put<BoardGitOpsSettingsDto>(`/api/boards/${boardId}/gitops-settings`, settings);
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
+    updateBoardAiContext: async (boardId, context) => {
+      await runAction('Saving board AI context', async () => {
+        await api.put<BoardAiContextDto>(`/api/boards/${boardId}/ai-context`, context);
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
@@ -879,7 +981,7 @@ function App() {
             {view === 'board' && <BoardView board={board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} actions={actions} />}
             {view === 'timeline' && <TimelineView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} timeline={shell.timeline} actions={actions} />}
             {view === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
-            {view === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onBack={() => setView('board')} />}
+            {view === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} gitOpsApplications={shell.gitOpsApplications} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -1057,7 +1159,7 @@ async function initializeAuth(): Promise<User> {
 type ShellState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; workspace: Workspace; boards: Board[]; board: Board; repositories: RepositoryDto[]; settings: SettingsDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; timeline: TimelineEventDto[]; metrics: MetricsDto; assignees: AssigneeDto[]; me: UserDto; teams: TeamDto[]; githubIntegrations: GitHubIntegrationDto[]; boardSecrets: BoardSecretDto[]; busy: boolean };
+  | { status: 'ready'; workspace: Workspace; boards: Board[]; board: Board; repositories: RepositoryDto[]; settings: SettingsDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; timeline: TimelineEventDto[]; metrics: MetricsDto; assignees: AssigneeDto[]; me: UserDto; teams: TeamDto[]; githubIntegrations: GitHubIntegrationDto[]; boardSecrets: BoardSecretDto[]; gitOpsApplications: GitOpsApplicationsResponseDto; busy: boolean };
 
 type SelectedState =
   | { status: 'closed' }
@@ -1081,6 +1183,8 @@ type BoardActions = {
   syncGitHubIntegration(): Promise<void>;
   createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<void>;
   deleteBoardSecret(boardId: string, secretId: string): Promise<void>;
+  updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<void>;
+  updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<void>;
   discardPlan(runId: string, workItemId: string): Promise<void>;
   approvePullRequest(workItemId: string): Promise<void>;
   startPreview(workItemId: string): Promise<void>;
@@ -1548,6 +1652,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const repositoryProfile = targetRepository?.implementationProfile ?? board?.repository?.implementationProfile ?? 'react-preview';
   const isRepositoryImplementation = repositoryProfile !== 'react-preview';
   const repositoryCanRunImplementation = !isRepositoryImplementation || targetRepository?.repository.provider === 'GitHub';
+  const gitOpsSettingsReady = repositoryProfile !== 'gitops-homelab' || !!board?.gitOpsSettings;
   const pendingRun = (detail.implementationRuns ?? []).some((run) => isImplementationRunPendingStatus(run.status));
   const hasReadyPullRequest = (detail.implementationRuns ?? []).some((run) => run.status === 'PullRequestReady' && !!run.pullRequestUrl);
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
@@ -1555,7 +1660,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const previewHasGeneratedSource = (detail.preview?.sourceFiles?.length ?? 0) > 0;
   const canImplementSelected = !!selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && (
     isRepositoryImplementation
-      ? repositoryCanRunImplementation && !pendingRun && !hasReadyPullRequest
+      ? repositoryCanRunImplementation && gitOpsSettingsReady && !pendingRun && !hasReadyPullRequest
       : !previewBusy && (!previewRunning || !previewHasGeneratedSource)
   );
   const implementLabel = isRepositoryImplementation
@@ -1589,6 +1694,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
           ? (
             <>
               <p>Provider: {selectedPlan.provider} / {selectedPlan.model}. Status: {selectedPlan.status}.</p>
+              {selectedPlan.status === 'NeedsInput' && <p className="needs-input-note">Questions need answers before implementation can start.</p>}
               {detail.aiSession && <p className="session-line">Session: {detail.aiSession.provider} / {detail.aiSession.model} - {detail.aiSession.providerSessionId ? 'Codex resume ready' : 'No provider session id yet'}.</p>}
               {isRepositoryImplementation && boardRepositories.length > 0 && (
                 <label className="target-repo-select">Target repo<select value={targetRepository?.repositoryId ?? ''} onChange={(event) => onTargetRepositoryChange(event.target.value || null)}>
@@ -1603,7 +1709,8 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
           {selectedPlan && canImplementSelected && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementLabel}</button>}
           {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
         </div>
-        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? repositoryCanRunImplementation ? 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Custom URL boards are public clone-only in v1. Connect the repository through the GitHub App to run implementation jobs and create pull requests.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
+        {selectedPlan?.status === 'NeedsInput' && <p className="plan-help">Add a comment with answers, then generate a revised AI plan.</p>}
+        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? !repositoryCanRunImplementation ? 'Custom URL boards are public clone-only in v1. Connect the repository through the GitHub App to run implementation jobs and create pull requests.' : !gitOpsSettingsReady ? 'GitOps settings are required before this repository can be implemented.' : 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
         {aiRuns.some((run) => run.status === 'Discarded') && <p>Discarded plans are kept in history but hidden from approval.</p>}
       </div>
     </section>
@@ -1826,7 +1933,9 @@ function previewLifecycleSteps(preview: PreviewDto) {
 function implementationRunSteps(status: string) {
   const steps = [
     ['Cloning', 'Clone repository', 'The runner checks out the linked repository and creates a task branch.'],
+    ['Inspecting', 'Inspect repository', 'The runner records repository state before Codex starts.'],
     ['Implementing', 'Implement with Codex', 'Codex edits the repository according to the selected plan.'],
+    ['Validating', 'Validate scope', 'Changed files are checked against the board allowed paths.'],
     ['Testing', 'Run checks', 'The runner executes lightweight tests or builds when they are discoverable.'],
     ['Pushing', 'Push branch', 'Changes are committed and pushed to GitHub.'],
     ['PullRequestReady', 'Pull request ready', 'A GitHub pull request is available for review.']
@@ -1878,7 +1987,7 @@ function isPreviewPendingStatus(status?: string) {
 }
 
 function isImplementationRunPendingStatus(status?: string) {
-  return status === 'Queued' || status === 'Cloning' || status === 'Implementing' || status === 'Testing' || status === 'Pushing';
+  return status === 'Queued' || status === 'Cloning' || status === 'Inspecting' || status === 'Implementing' || status === 'Validating' || status === 'Testing' || status === 'Pushing';
 }
 
 function developmentStatusText(development: DevelopmentDto) {
@@ -2017,7 +2126,11 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
       repositoryRemoteUrl: repository.remoteUrl,
       repositoryWebUrl: repository.webUrl ?? '',
       repositoryDefaultBranch: repository.defaultBranch || 'main',
-      implementationProfile: repository.implementationProfile === 'unity' ? 'unity' : 'code-repo'
+      implementationProfile: repository.implementationProfile === 'unity'
+        ? 'unity'
+        : repository.implementationProfile === 'gitops-homelab'
+          ? 'gitops-homelab'
+          : 'code-repo'
     });
   };
 
@@ -2044,7 +2157,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
             });
             if (providerMode === 'GitHub') setGithubStatus('idle');
           }}><option value="GitHub">GitHub App</option><option value="CustomUrl">Custom URL</option></select></label>
-          <label>Implementation profile<select value={form.implementationProfile} onChange={(event) => setForm({ ...form, implementationProfile: event.target.value as CreateBoardForm['implementationProfile'] })}><option value="code-repo">Code repo</option><option value="unity">Unity</option><option value="react-preview">React preview</option></select></label>
+          <label>Implementation profile<select value={form.implementationProfile} onChange={(event) => setForm({ ...form, implementationProfile: event.target.value as CreateBoardForm['implementationProfile'] })}><option value="code-repo">Code repo</option><option value="gitops-homelab">GitOps homelab</option><option value="unity">Unity</option><option value="react-preview">React preview</option></select></label>
           {usesGitHub && (
             <label>GitHub repository<select value={form.repositoryOwner && form.repositoryRemoteUrl ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : ''} onChange={(event) => selectGitHubRepository(event.target.value)}>
               <option value="">{githubStatus === 'loading' ? 'Loading repositories...' : 'Select repository...'}</option>
@@ -2059,6 +2172,16 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
             </>
           )}
         </div>
+        {form.implementationProfile === 'gitops-homelab' && (
+          <div className="form-grid two gitops-create-fields">
+            <label>Allowed paths<textarea value={form.gitOpsAllowedPaths} onChange={(event) => setForm({ ...form, gitOpsAllowedPaths: event.target.value })} /></label>
+            <label>ArgoCD namespace<input value={form.argoNamespace} onChange={(event) => setForm({ ...form, argoNamespace: event.target.value })} /></label>
+            <label>Application selector<input value={form.argoApplicationSelector} onChange={(event) => setForm({ ...form, argoApplicationSelector: event.target.value })} placeholder="app.kubernetes.io/part-of=homelab" /></label>
+            <label>Enabled skills<textarea value={form.enabledSkills} onChange={(event) => setForm({ ...form, enabledSkills: event.target.value })} /></label>
+            <label className="full-width">Board instructions<textarea value={form.aiInstructions} onChange={(event) => setForm({ ...form, aiInstructions: event.target.value })} /></label>
+            <label className="checkbox-row full-width"><input type="checkbox" checked={form.askWhenUncertain} onChange={(event) => setForm({ ...form, askWhenUncertain: event.target.checked })} /><span>Ask when uncertain</span></label>
+          </div>
+        )}
         <fieldset className="team-picker">
           <legend>Teams</legend>
           {teams.length === 0
@@ -2217,13 +2340,14 @@ function TeamsView({ teams, boards, me, actions }: {
   );
 }
 
-function SettingsView({ settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onBack }: {
+function SettingsView({ settings, board, me, repositories, boardSecrets, githubIntegrations, gitOpsApplications, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onBack }: {
   settings: SettingsDto;
   board: Board;
   me: UserDto;
   repositories: RepositoryDto[];
   boardSecrets: BoardSecretDto[];
   githubIntegrations: GitHubIntegrationDto[];
+  gitOpsApplications: GitOpsApplicationsResponseDto;
   selectedProvider: string | null;
   selectedModel: string | null;
   selectedReasoning: string | null;
@@ -2311,6 +2435,11 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
           <p className={activeProvider.status === 'Ready' ? 'provider-status ready' : 'provider-status'}>{activeProvider.displayName} status: {activeProvider.status === 'LoginRequired' ? 'Login required on server' : activeProvider.status}.</p>
           <label>Auto review pull requests<input value={settings.ai.autoReviewPullRequests ? 'Enabled' : 'Disabled'} readOnly /></label>
         </section>
+        <SectionTitle icon={<Boxes size={22} />} title="GitOps" />
+        <section className="panel form-panel">
+          <GitOpsSettingsForm board={board} actions={actions} />
+          <GitOpsApplicationsPanel response={gitOpsApplications} />
+        </section>
         <SectionTitle icon={<Users size={22} />} title="Current user" />
         <section className="panel form-panel">
           <div className="connected"><Users size={28} /><div><strong>{me.displayName}</strong><p>{me.email || me.subject}</p></div><span>Signed in</span></div>
@@ -2386,6 +2515,83 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
         </section>
       </div>
     </section>
+  );
+}
+
+function GitOpsSettingsForm({ board, actions }: { board: Board; actions: BoardActions }) {
+  const initialGitOps = board.gitOpsSettings ?? defaultGitOpsSettings(board.id);
+  const initialAi = board.aiContext ?? defaultAiContext(board.id);
+  const [allowedPaths, setAllowedPaths] = React.useState(initialGitOps.allowedPaths.join('\n'));
+  const [argoNamespace, setArgoNamespace] = React.useState(initialGitOps.argoNamespace);
+  const [argoApplicationSelector, setArgoApplicationSelector] = React.useState(initialGitOps.argoApplicationSelector);
+  const [instructions, setInstructions] = React.useState(initialAi.instructions);
+  const [enabledSkills, setEnabledSkills] = React.useState(initialAi.enabledSkills.join('\n'));
+  const [askWhenUncertain, setAskWhenUncertain] = React.useState(initialAi.askWhenUncertain);
+
+  React.useEffect(() => {
+    const gitops = board.gitOpsSettings ?? defaultGitOpsSettings(board.id);
+    const ai = board.aiContext ?? defaultAiContext(board.id);
+    setAllowedPaths(gitops.allowedPaths.join('\n'));
+    setArgoNamespace(gitops.argoNamespace);
+    setArgoApplicationSelector(gitops.argoApplicationSelector);
+    setInstructions(ai.instructions);
+    setEnabledSkills(ai.enabledSkills.join('\n'));
+    setAskWhenUncertain(ai.askWhenUncertain);
+  }, [board.id, board.gitOpsSettings, board.aiContext]);
+
+  return (
+    <div className="settings-stack">
+      <form className="form-grid two" onSubmit={(event) => {
+        event.preventDefault();
+        void actions.updateBoardGitOpsSettings(board.id, {
+          boardId: board.id,
+          allowedPaths: linesFromTextarea(allowedPaths),
+          argoNamespace,
+          argoApplicationSelector
+        });
+      }}>
+        <label>Allowed paths<textarea value={allowedPaths} onChange={(event) => setAllowedPaths(event.target.value)} /></label>
+        <label>ArgoCD namespace<input value={argoNamespace} onChange={(event) => setArgoNamespace(event.target.value)} /></label>
+        <label>Application selector<input value={argoApplicationSelector} onChange={(event) => setArgoApplicationSelector(event.target.value)} /></label>
+        <div className="form-actions-row"><button className="secondary" type="submit"><Save size={16} />Save GitOps</button></div>
+      </form>
+      <form className="form-grid two" onSubmit={(event) => {
+        event.preventDefault();
+        void actions.updateBoardAiContext(board.id, {
+          boardId: board.id,
+          instructions,
+          enabledSkills: linesFromTextarea(enabledSkills),
+          askWhenUncertain
+        });
+      }}>
+        <label>Board instructions<textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
+        <label>Enabled skills<textarea value={enabledSkills} onChange={(event) => setEnabledSkills(event.target.value)} /></label>
+        <label className="checkbox-row"><input type="checkbox" checked={askWhenUncertain} onChange={(event) => setAskWhenUncertain(event.target.checked)} /><span>Ask when uncertain</span></label>
+        <div className="form-actions-row"><button className="secondary" type="submit"><Save size={16} />Save AI context</button></div>
+      </form>
+    </div>
+  );
+}
+
+function GitOpsApplicationsPanel({ response }: { response: GitOpsApplicationsResponseDto }) {
+  return (
+    <div className="settings-list gitops-applications">
+      {response.message && <p className="provider-status">{response.message}</p>}
+      {response.applications.map((app) => (
+        <div className="settings-row" key={`${app.namespace}/${app.name}`}>
+          <div>
+            <strong>{app.name}</strong>
+            <p>{app.namespace} - {app.revision || 'no revision'}{app.updatedAt ? ` - updated ${relativeTime(app.updatedAt)}` : ''}</p>
+            {app.message && <p>{app.message}</p>}
+          </div>
+          <div className="status-badges">
+            <span className={statusBadgeClass(app.syncStatus)}>{app.syncStatus}</span>
+            <span className={statusBadgeClass(app.healthStatus)}>{app.healthStatus}</span>
+            {app.url && <a href={app.url} target="_blank" rel="noreferrer" aria-label={`Open ${app.name} in ArgoCD`}><ExternalLink size={16} /></a>}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -2809,9 +3015,43 @@ function boardRepositorySummary(board: Board) {
   return `${primary.repository.provider} / ${repositoryLabel(primary.repository)} - ${primary.repository.defaultBranch} - ${profileLabel(primary.implementationProfile)}${extraCount}`;
 }
 
+function linesFromTextarea(value: string) {
+  return value
+    .split(/\r?\n|,/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function defaultGitOpsSettings(boardId: string): BoardGitOpsSettingsDto {
+  return {
+    boardId,
+    allowedPaths: ['apps/', 'clusters/', 'infrastructure/'],
+    argoNamespace: 'argocd',
+    argoApplicationSelector: ''
+  };
+}
+
+function defaultAiContext(boardId: string): BoardAiContextDto {
+  return {
+    boardId,
+    instructions: '',
+    enabledSkills: [],
+    askWhenUncertain: true
+  };
+}
+
+function statusBadgeClass(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === 'synced' || normalized === 'healthy') return 'state-good';
+  if (normalized === 'progressing' || normalized === 'outofsync') return 'state-warn';
+  if (normalized === 'degraded' || normalized === 'missing' || normalized === 'unknown') return 'state-bad';
+  return 'state-muted';
+}
+
 function profileLabel(profile?: string | null) {
   if (profile === 'react-preview') return 'React preview';
   if (profile === 'code-repo') return 'Code repo';
+  if (profile === 'gitops-homelab') return 'GitOps homelab';
   if (profile === 'unity') return 'Unity';
   return profile || 'React preview';
 }
