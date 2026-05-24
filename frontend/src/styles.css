@@ -295,6 +295,8 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .settings-list { display: grid; gap: 10px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--line); background: #121314; padding: 12px 14px; border-radius: 8px; }
 .settings-row p { margin-top: 4px; overflow-wrap: anywhere; }
+.repository-settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.repository-settings-actions select { min-width: 170px; }
 .teams-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 18px; align-items: start; }
 .team-list-panel { display: grid; gap: 14px; }
 .compact-form, .team-action-form { display: grid; gap: 12px; }
@@ -317,6 +319,9 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .target-repo-select { display: grid; gap: 8px; max-width: 420px; }
 .settings-stack { display: grid; gap: 16px; }
 .gitops-create-fields { border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.detected-profile { border: 1px solid rgba(103, 232, 249, 0.28); background: rgba(103, 232, 249, 0.06); border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
+.detected-profile strong { color: var(--focus); }
+.detected-profile p { overflow-wrap: anywhere; }
 .gitops-applications { margin-top: 16px; }
 .status-badges { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .status-badges a { color: var(--focus); display: inline-flex; align-items: center; }

@@ -167,6 +167,33 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Create_board_persists_detected_profile_and_ai_skill_suggestions()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Gatebound",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "unity",
+            AiContext: new BoardAiContextRequest("Unity project detected.", ["unity", "unity-project", "csharp"], true)))!;
+
+        var reopened = fixture.Reopen();
+        var reopenedBoard = reopened.GetBoard(board.Id)!;
+
+        Assert.Equal("unity", reopenedBoard.Repositories!.Single(entry => entry.IsPrimary).ImplementationProfile);
+        Assert.Equal("Unity project detected.", reopenedBoard.AiContext!.Instructions);
+        Assert.Contains("unity-project", reopenedBoard.AiContext.EnabledSkills);
+    }
+
+    [Fact]
     public void Timeline_combines_card_preview_pr_and_pipeline_events_for_board()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -323,6 +350,66 @@ public sealed class DevOpsStoreTests
                 Assert.Equal("rosenvall-corp", second.AccountLogin);
                 Assert.Equal("Organization", second.AccountType);
             });
+    }
+
+    [Fact]
+    public async Task GitHub_repository_picker_returns_error_result_when_github_times_out()
+    {
+        using var httpClient = new HttpClient(new DelayedHttpMessageHandler())
+        {
+            Timeout = TimeSpan.FromMilliseconds(20)
+        };
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["GitHub:Token"] = "ghp_test"
+            })
+            .Build();
+        var github = new GitHubRepositoryClient(httpClient, configuration);
+
+        var result = await github.GetRepositoriesResultAsync(CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(result.Repositories);
+        Assert.Contains("timed out", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Repository_profile_classifier_detects_known_project_shapes()
+    {
+        var unity = RepositoryProfileClassifier.Classify([
+            "Assets/Scripts/PlayerController.cs",
+            "Packages/manifest.json",
+            "ProjectSettings/ProjectVersion.txt"
+        ]);
+        var gitops = RepositoryProfileClassifier.Classify([
+            "apps/grafana/kustomization.yaml",
+            "clusters/homelab/apps.yaml",
+            "infrastructure/argocd/application.yaml"
+        ], new Dictionary<string, string>
+        {
+            ["infrastructure/argocd/application.yaml"] = "kind: Application\napiVersion: argoproj.io/v1alpha1"
+        });
+        var react = RepositoryProfileClassifier.Classify([
+            "package.json",
+            "src/App.tsx",
+            "vite.config.ts"
+        ], new Dictionary<string, string>
+        {
+            ["package.json"] = """{"dependencies":{"@vitejs/plugin-react":"latest","react":"latest"},"devDependencies":{"vite":"latest"}}"""
+        });
+        var generic = RepositoryProfileClassifier.Classify([
+            "README.md",
+            "src/service.cs"
+        ]);
+
+        Assert.Equal("unity", unity.ImplementationProfile);
+        Assert.Contains("unity", unity.EnabledSkills);
+        Assert.Equal("gitops-homelab", gitops.ImplementationProfile);
+        Assert.Contains("argocd", gitops.EnabledSkills);
+        Assert.Equal("react-preview", react.ImplementationProfile);
+        Assert.Contains("react", react.EnabledSkills);
+        Assert.Equal("code-repo", generic.ImplementationProfile);
     }
 
     [Fact]
@@ -1819,5 +1906,17 @@ exit {{exitCode}}
 exit /b {exitCode}
 """);
         return scriptPath;
+    }
+
+    private sealed class DelayedHttpMessageHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]")
+            };
+        }
     }
 }

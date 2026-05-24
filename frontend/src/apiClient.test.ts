@@ -70,3 +70,14 @@ test('runs the unauthorized handler when a refreshed token is still rejected', a
 
   assert.equal(unauthorizedCount, 1);
 });
+
+test('aborts a request when a per-request timeout expires', async () => {
+  const client = createApiClient({
+    fetch: async (_path, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+    }),
+    getAccessToken: () => null
+  });
+
+  await assert.rejects(() => client.get('/api/integrations/github/repository-picker', { timeoutMs: 10 }), /timed out/i);
+});

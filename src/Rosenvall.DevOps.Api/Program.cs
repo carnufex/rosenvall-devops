@@ -299,6 +299,18 @@ api.MapGet("/integrations/github/repository-picker", async (long? installationId
         result.Repositories,
         resolvedInstallationId));
 });
+api.MapGet("/integrations/github/repository-profile", async (string owner, string repo, string? branch, long? installationId, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
+    {
+        return Results.BadRequest("Both owner and repo are required.");
+    }
+
+    var result = await github.GetRepositoryProfileAsync(owner, repo, branch, cancellationToken, installationId);
+    return result is null
+        ? Results.Ok(RepositoryProfileClassifier.Classify([], null, $"Could not scan {owner}/{repo}; defaulted to code repo."))
+        : Results.Ok(result);
+});
 
 api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepositoryRequest request, DevOpsStore store) =>
     store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound());
@@ -786,6 +798,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record AssigneeDto(string Id, string DisplayName, string Email, string Source);
     public sealed record GitHubInstallUrlDto(string Url);
     public sealed record GitHubRepositoryPickerDto(string Status, string? Message, IReadOnlyList<RepositoryDto> Repositories, long? ActiveInstallationId = null);
+    public sealed record RepositoryProfileDto(string ImplementationProfile, string DisplayName, double Confidence, IReadOnlyList<string> EnabledSkills, string Instructions, IReadOnlyList<string> Signals, string Source = "scanner");
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);
     public sealed record CreateTeamRequest(string Name);
@@ -2860,6 +2873,122 @@ namespace Rosenvall.DevOps.Api
 
     public sealed record GitHubRepositoryFetchResult(bool Succeeded, string? Message, IReadOnlyList<RepositoryDto> Repositories);
 
+    public static class RepositoryProfileClassifier
+    {
+        public static RepositoryProfileDto Classify(IEnumerable<string> paths, IReadOnlyDictionary<string, string>? fileContents = null, string? fallbackSignal = null)
+        {
+            var normalizedPaths = paths
+                .Select(path => path.Replace('\\', '/').Trim().TrimStart('/'))
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var contents = fileContents is null
+                ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, string>(fileContents, StringComparer.OrdinalIgnoreCase);
+
+            if (LooksLikeUnity(normalizedPaths))
+            {
+                return new RepositoryProfileDto(
+                    "unity",
+                    "Unity",
+                    0.98,
+                    ["unity", "unity-project", "csharp"],
+                    "Unity project detected. Prefer Unity-aware implementation steps, inspect Assets/ and ProjectSettings/, and run Unity tests where available.",
+                    MatchingSignals(normalizedPaths, ["ProjectSettings/ProjectVersion.txt", "Assets/", "Packages/manifest.json"]));
+            }
+
+            if (LooksLikeGitOpsHomelab(normalizedPaths, contents))
+            {
+                return new RepositoryProfileDto(
+                    "gitops-homelab",
+                    "GitOps homelab",
+                    0.94,
+                    ["kubernetes", "argocd", "gitops-homelab"],
+                    "GitOps homelab repository detected. Keep changes scoped to declared app, cluster, or infrastructure paths and prefer pull requests over direct mutation.",
+                    MatchingSignals(normalizedPaths, ["apps/", "clusters/", "infrastructure/", "kustomization.yaml", "Chart.yaml", "kind: Application"]));
+            }
+
+            if (LooksLikeReactPreview(normalizedPaths, contents))
+            {
+                return new RepositoryProfileDto(
+                    "react-preview",
+                    "React preview",
+                    0.9,
+                    ["react", "vite", "typescript"],
+                    "React/Vite project detected. Use the preview implementation flow and verify with the frontend build.",
+                    MatchingSignals(normalizedPaths, ["package.json", "vite.config", "src/App"]));
+            }
+
+            var signals = string.IsNullOrWhiteSpace(fallbackSignal)
+                ? ["No framework-specific repository signature was detected."]
+                : new[] { fallbackSignal.Trim() };
+            return new RepositoryProfileDto(
+                "code-repo",
+                "Code repo",
+                0.55,
+                ["code-repo"],
+                "Generic code repository detected. Inspect the repository before choosing framework-specific implementation steps.",
+                signals);
+        }
+
+        private static bool LooksLikeUnity(IReadOnlyList<string> paths) =>
+            HasPath(paths, "ProjectSettings/ProjectVersion.txt") &&
+            HasPrefix(paths, "Assets/") &&
+            HasPath(paths, "Packages/manifest.json");
+
+        private static bool LooksLikeGitOpsHomelab(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents) =>
+            HasPrefix(paths, "clusters/") ||
+            (HasPrefix(paths, "apps/") && HasAnyPathEnding(paths, "kustomization.yaml")) ||
+            HasPrefix(paths, "infrastructure/") ||
+            HasAnyPathEnding(paths, "Chart.yaml") ||
+            contents.Values.Any(content => content.Contains("kind: Application", StringComparison.OrdinalIgnoreCase) && content.Contains("argoproj.io", StringComparison.OrdinalIgnoreCase));
+
+        private static bool LooksLikeReactPreview(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents)
+        {
+            var hasViteConfig = paths.Any(path => path.StartsWith("vite.config.", StringComparison.OrdinalIgnoreCase));
+            var hasReactSource = paths.Any(path => path.Equals("src/App.tsx", StringComparison.OrdinalIgnoreCase) || path.Equals("src/App.jsx", StringComparison.OrdinalIgnoreCase));
+            var packageJson = contents.TryGetValue("package.json", out var packageContent) ? packageContent : "";
+            var packageMentionsReact = packageJson.Contains("\"react\"", StringComparison.OrdinalIgnoreCase);
+            var packageMentionsVite = packageJson.Contains("\"vite\"", StringComparison.OrdinalIgnoreCase) || packageJson.Contains("@vitejs/plugin-react", StringComparison.OrdinalIgnoreCase);
+            return HasPath(paths, "package.json") && (hasViteConfig || hasReactSource || (packageMentionsReact && packageMentionsVite));
+        }
+
+        private static IReadOnlyList<string> MatchingSignals(IReadOnlyList<string> paths, IReadOnlyList<string> expected)
+        {
+            var signals = new List<string>();
+            foreach (var signal in expected)
+            {
+                if (signal.Contains(':', StringComparison.Ordinal))
+                {
+                    signals.Add(signal);
+                }
+                else if (signal.EndsWith("/", StringComparison.Ordinal) && HasPrefix(paths, signal))
+                {
+                    signals.Add(signal);
+                }
+                else if (signal.Contains('.', StringComparison.Ordinal) && (HasPath(paths, signal) || HasAnyPathEnding(paths, signal)))
+                {
+                    signals.Add(signal);
+                }
+                else if (paths.Any(path => path.StartsWith(signal, StringComparison.OrdinalIgnoreCase)))
+                {
+                    signals.Add(signal);
+                }
+            }
+
+            return signals.Count == 0 ? expected : signals.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        private static bool HasPath(IReadOnlyList<string> paths, string expected) =>
+            paths.Any(path => path.Equals(expected, StringComparison.OrdinalIgnoreCase));
+
+        private static bool HasPrefix(IReadOnlyList<string> paths, string expectedPrefix) =>
+            paths.Any(path => path.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase));
+
+        private static bool HasAnyPathEnding(IReadOnlyList<string> paths, string expectedSuffix) =>
+            paths.Any(path => path.EndsWith(expectedSuffix, StringComparison.OrdinalIgnoreCase));
+    }
+
     public sealed class GitHubRepositoryClient(HttpClient httpClient, IConfiguration configuration)
     {
         public string? ConfiguredToken => configuration["GitHub:Token"];
@@ -3032,37 +3161,93 @@ namespace Rosenvall.DevOps.Api
 
         public async Task<GitHubRepositoryFetchResult> GetRepositoriesResultAsync(CancellationToken cancellationToken, long? installationId = null)
         {
-            var token = installationId is { } id
-                ? await CreateInstallationTokenAsync(id, cancellationToken)
-                : configuration["GitHub:Token"];
-            if (string.IsNullOrWhiteSpace(token))
+            try
             {
-                var message = installationId is null
-                    ? "No GitHub token or GitHub App installation is configured."
-                    : $"Could not mint a GitHub installation token for installation {installationId}.";
-                return new GitHubRepositoryFetchResult(false, message, []);
-            }
+                var token = installationId is { } id
+                    ? await CreateInstallationTokenAsync(id, cancellationToken)
+                    : configuration["GitHub:Token"];
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    var message = installationId is null
+                        ? "No GitHub token or GitHub App installation is configured."
+                        : $"Could not mint a GitHub installation token for installation {installationId}.";
+                    return new GitHubRepositoryFetchResult(false, message, []);
+                }
 
-            var url = installationId.HasValue
-                ? "https://api.github.com/installation/repositories?per_page=100"
-                : "https://api.github.com/user/repos?per_page=100&sort=updated";
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd("rosenvall-devops");
-            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Trim());
-            request.Headers.Accept.ParseAdd("application/vnd.github+json");
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            if (!response.IsSuccessStatusCode)
+                var url = installationId.HasValue
+                    ? "https://api.github.com/installation/repositories?per_page=100"
+                    : "https://api.github.com/user/repos?per_page=100&sort=updated";
+                var request = CreateGitHubRequest(HttpMethod.Get, url, token);
+                using var timeout = CreateGitHubTimeout(cancellationToken);
+                using var response = await httpClient.SendAsync(request, timeout.Token);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await response.Content.ReadAsStringAsync(cancellationToken);
+                    return new GitHubRepositoryFetchResult(false, $"GitHub repository list failed with {(int)response.StatusCode} {response.ReasonPhrase}: {TrimError(error)}", []);
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+                var repositories = installationId.HasValue && document.RootElement.TryGetProperty("repositories", out var repositoryElement)
+                    ? NormalizeRepositories(repositoryElement)
+                    : NormalizeRepositories(document.RootElement);
+                return new GitHubRepositoryFetchResult(true, null, repositories);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                var error = await response.Content.ReadAsStringAsync(cancellationToken);
-                return new GitHubRepositoryFetchResult(false, $"GitHub repository list failed with {(int)response.StatusCode} {response.ReasonPhrase}: {TrimError(error)}", []);
+                return new GitHubRepositoryFetchResult(false, $"GitHub repository list timed out after {GitHubRequestTimeout().TotalSeconds:0} seconds. Check GitHub App credentials and network access from the API pod.", []);
             }
+            catch (HttpRequestException ex)
+            {
+                return new GitHubRepositoryFetchResult(false, $"GitHub repository list failed: {ex.Message}", []);
+            }
+        }
 
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-            var repositories = installationId.HasValue && document.RootElement.TryGetProperty("repositories", out var repositoryElement)
-                ? NormalizeRepositories(repositoryElement)
-                : NormalizeRepositories(document.RootElement);
-            return new GitHubRepositoryFetchResult(true, null, repositories);
+        public async Task<RepositoryProfileDto?> GetRepositoryProfileAsync(string owner, string repo, string? branch, CancellationToken cancellationToken, long? installationId = null)
+        {
+            try
+            {
+                var token = installationId is { } id
+                    ? await CreateInstallationTokenAsync(id, cancellationToken)
+                    : configuration["GitHub:Token"];
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    return RepositoryProfileClassifier.Classify([], null, "No GitHub token or GitHub App installation token was available for repository profiling.");
+                }
+
+                var defaultBranch = string.IsNullOrWhiteSpace(branch) ? "main" : branch.Trim();
+                var paths = await GetRepositoryTreePathsAsync(owner, repo, defaultBranch, token, cancellationToken);
+                var contents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (paths.Any(path => path.Equals("package.json", StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (await GetRepositoryFileContentAsync(owner, repo, "package.json", defaultBranch, token, cancellationToken) is { } packageJson)
+                    {
+                        contents["package.json"] = packageJson;
+                    }
+                }
+
+                foreach (var path in paths.Where(IsProfileRelevantYaml).Take(3))
+                {
+                    if (await GetRepositoryFileContentAsync(owner, repo, path, defaultBranch, token, cancellationToken) is { } yaml)
+                    {
+                        contents[path] = yaml;
+                    }
+                }
+
+                return RepositoryProfileClassifier.Classify(paths, contents);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return RepositoryProfileClassifier.Classify([], null, $"GitHub repository profile scan timed out after {GitHubRequestTimeout().TotalSeconds:0} seconds.");
+            }
+            catch (HttpRequestException ex)
+            {
+                return RepositoryProfileClassifier.Classify([], null, $"GitHub repository profile scan failed: {ex.Message}");
+            }
+            catch (JsonException ex)
+            {
+                return RepositoryProfileClassifier.Classify([], null, $"GitHub repository profile response could not be parsed: {ex.Message}");
+            }
         }
 
         public async Task<string?> CreateInstallationTokenAsync(long installationId, CancellationToken cancellationToken)
@@ -3079,7 +3264,62 @@ namespace Rosenvall.DevOps.Api
             request.Headers.UserAgent.ParseAdd("rosenvall-devops");
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", jwt);
             request.Headers.Accept.ParseAdd("application/vnd.github+json");
-            using var response = await httpClient.SendAsync(request, cancellationToken);
+            try
+            {
+                using var timeout = CreateGitHubTimeout(cancellationToken);
+                using var response = await httpClient.SendAsync(request, timeout.Token);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+                return GetString(document.RootElement, "token");
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            catch (HttpRequestException)
+            {
+                return null;
+            }
+        }
+
+        private async Task<IReadOnlyList<string>> GetRepositoryTreePathsAsync(string owner, string repo, string branch, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/git/trees/{Uri.EscapeDataString(branch)}?recursive=1";
+            using var request = CreateGitHubRequest(HttpMethod.Get, url, token);
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new HttpRequestException($"GitHub tree lookup failed with {(int)response.StatusCode} {response.ReasonPhrase}: {TrimError(error)}");
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (!document.RootElement.TryGetProperty("tree", out var tree) || tree.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return tree.EnumerateArray()
+                .Select(item => GetString(item, "path"))
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private async Task<string?> GetRepositoryFileContentAsync(string owner, string repo, string path, string branch, string token, CancellationToken cancellationToken)
+        {
+            var escapedPath = string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/contents/{escapedPath}?ref={Uri.EscapeDataString(branch)}";
+            using var request = CreateGitHubRequest(HttpMethod.Get, url, token);
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
             if (!response.IsSuccessStatusCode)
             {
                 return null;
@@ -3087,8 +3327,53 @@ namespace Rosenvall.DevOps.Api
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-            return GetString(document.RootElement, "token");
+            var content = GetString(document.RootElement, "content");
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return null;
+            }
+
+            var encoding = GetString(document.RootElement, "encoding");
+            if (!encoding.Equals("base64", StringComparison.OrdinalIgnoreCase))
+            {
+                return content;
+            }
+
+            try
+            {
+                return Encoding.UTF8.GetString(Convert.FromBase64String(content.Replace("\n", "", StringComparison.Ordinal)));
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
         }
+
+        private static HttpRequestMessage CreateGitHubRequest(HttpMethod method, string url, string token)
+        {
+            var request = new HttpRequestMessage(method, url);
+            request.Headers.UserAgent.ParseAdd("rosenvall-devops");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Trim());
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            return request;
+        }
+
+        private CancellationTokenSource CreateGitHubTimeout(CancellationToken cancellationToken)
+        {
+            var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(GitHubRequestTimeout());
+            return timeout;
+        }
+
+        private TimeSpan GitHubRequestTimeout() =>
+            TimeSpan.FromSeconds(Math.Clamp(configuration.GetValue("GitHub:RequestTimeoutSeconds", 10), 2, 60));
+
+        private static bool IsProfileRelevantYaml(string path) =>
+            (path.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".yml", StringComparison.OrdinalIgnoreCase)) &&
+            (path.Contains("argocd", StringComparison.OrdinalIgnoreCase) ||
+             path.StartsWith("apps/", StringComparison.OrdinalIgnoreCase) ||
+             path.StartsWith("clusters/", StringComparison.OrdinalIgnoreCase) ||
+             path.StartsWith("infrastructure/", StringComparison.OrdinalIgnoreCase));
 
         private static string CreateAppJwt(string appId, string privateKey)
         {

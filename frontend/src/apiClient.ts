@@ -8,6 +8,10 @@ type ApiClientOptions = AuthSession & {
   fetch?: (path: string, init?: RequestInit) => Promise<Response>;
 };
 
+type RequestOptions = {
+  timeoutMs?: number;
+};
+
 export function createApiClient(options: ApiClientOptions) {
   const fetchImpl = options.fetch ?? ((path, init) => fetch(path, init));
   let refreshInFlight: Promise<string | null> | null = null;
@@ -20,24 +24,36 @@ export function createApiClient(options: ApiClientOptions) {
     return refreshInFlight;
   };
 
-  const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-    let response = await fetchImpl(path, await withAuth(init, options.getAccessToken));
-    if (response.status === 401) {
-      const refreshedToken = await refreshOnce();
-      if (refreshedToken) {
-        response = await fetchImpl(path, await withAuth(init, () => refreshedToken));
-      }
+  const request = async <T>(path: string, init?: RequestInit, requestOptions?: RequestOptions): Promise<T> => {
+    const controller = requestOptions?.timeoutMs ? new AbortController() : null;
+    const timeout = controller ? globalThis.setTimeout(() => controller.abort(), requestOptions!.timeoutMs) : null;
+    const requestInit = controller ? { ...init, signal: controller.signal } : init;
+    try {
+      let response = await fetchImpl(path, await withAuth(requestInit, options.getAccessToken));
       if (response.status === 401) {
-        await options.handleUnauthorized?.();
+        const refreshedToken = await refreshOnce();
+        if (refreshedToken) {
+          response = await fetchImpl(path, await withAuth(requestInit, () => refreshedToken));
+        }
+        if (response.status === 401) {
+          await options.handleUnauthorized?.();
+        }
       }
-    }
 
-    return parseResponse<T>(response);
+      return parseResponse<T>(response);
+    } catch (error) {
+      if (controller?.signal.aborted) {
+        throw new Error(`Request to ${path} timed out after ${requestOptions?.timeoutMs} ms`);
+      }
+      throw error;
+    } finally {
+      if (timeout) globalThis.clearTimeout(timeout);
+    }
   };
 
   return {
-    get<T>(path: string): Promise<T> {
-      return request<T>(path);
+    get<T>(path: string, options?: RequestOptions): Promise<T> {
+      return request<T>(path, undefined, options);
     },
     post<T>(path: string, body: unknown): Promise<T> {
       return request<T>(path, jsonRequest('POST', body));
