@@ -48,6 +48,10 @@ import { CSS } from '@dnd-kit/utilities';
 
 type View = 'dashboard' | 'board' | 'timeline' | 'teams' | 'settings';
 
+type LoadShellOptions = {
+  silentBusy?: boolean;
+};
+
 type Workspace = {
   id: string;
   name: string;
@@ -594,9 +598,12 @@ function App() {
     }, kind === 'success' ? 5000 : 30000);
   }, []);
 
-  const loadShell = React.useCallback(async (preferredBoardId?: string | null) => {
+  const loadShell = React.useCallback(async (preferredBoardId?: string | null, options?: LoadShellOptions) => {
     if (auth.status === 'checking') return;
-    setShell((current) => current.status === 'ready' ? { ...current, busy: true } : { status: 'loading' });
+    setShell((current) => {
+      if (current.status !== 'ready') return { status: 'loading' };
+      return options?.silentBusy ? current : { ...current, busy: true };
+    });
     try {
       const workspaces = await api.get<Workspace[]>('/api/workspaces');
       const workspace = workspaces[0];
@@ -622,6 +629,11 @@ function App() {
       setSelectedBoardId(board.id);
       setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, gitOpsApplications, busy: false });
     } catch (loadError) {
+      if (options?.silentBusy) {
+        console.warn('Failed to refresh API state', loadError);
+        setShell((current) => current.status === 'ready' ? { ...current, busy: false } : current);
+        return;
+      }
       setShell({ status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
     }
   }, [auth.status, setSelectedBoardId]);
@@ -675,7 +687,7 @@ function App() {
         setSelected((current) => current.status === 'open' && current.detail.item.id === previewPollWorkItemId
           ? { ...current, detail, aiRuns: runs, busy: false }
           : current);
-        await loadShell();
+        await loadShell(undefined, { silentBusy: true });
       } catch (pollError) {
         console.warn('Failed to refresh preview status', pollError);
       }
