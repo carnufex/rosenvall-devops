@@ -665,6 +665,8 @@ public sealed class DevOpsStoreTests
         Assert.Equal("unity", repository.ImplementationProfile);
         Assert.Equal("Queued", implementationRun.Status);
         Assert.Contains("kind: Job", manifest);
+        Assert.Contains("namespace: rosenvall-devops", manifest);
+        Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
         Assert.Contains("codex exec", manifest);
         Assert.Contains("secretKeyRef:", manifest);
         Assert.Contains("rosenvall-devops-github", manifest);
@@ -698,7 +700,7 @@ public sealed class DevOpsStoreTests
         var runnerManifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build(), tokenSecretName);
 
         Assert.Contains("kind: Secret", secretManifest);
-        Assert.Contains("rosenvall-devops-pipelines", secretManifest);
+        Assert.Contains("namespace: rosenvall-devops", secretManifest);
         Assert.Contains("ghs_short_lived_installation_token", secretManifest);
         Assert.Contains(tokenSecretName, runnerManifest);
         Assert.DoesNotContain("ghs_short_lived_installation_token", runnerManifest);

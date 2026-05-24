@@ -915,6 +915,8 @@ namespace Rosenvall.DevOps.Api
 
     public static class RepositoryImplementationJobManifestRenderer
     {
+        public const string Namespace = "rosenvall-devops";
+
         public static string JobName(ImplementationRunDto run, WorkItemDetailDto context) =>
             SafeName($"impl-{context.Item.Key}-{run.Id:N}");
 
@@ -927,7 +929,7 @@ namespace Rosenvall.DevOps.Api
               kind: Secret
               metadata:
                 name: {{GitHubTokenSecretName(run)}}
-                namespace: rosenvall-devops-pipelines
+                namespace: {{Namespace}}
                 labels:
                   app.kubernetes.io/part-of: rosenvall-devops-implementation
                   rosenvall.devops/implementation-run: {{run.Id}}
@@ -951,7 +953,7 @@ namespace Rosenvall.DevOps.Api
                    kind: Job
                    metadata:
                      name: {{jobName}}
-                     namespace: rosenvall-devops-pipelines
+                     namespace: {{Namespace}}
                      labels:
                        app.kubernetes.io/part-of: rosenvall-devops-implementation
                        rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
@@ -2041,11 +2043,12 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, detail);
-                var logsResult = await jobs.GetOutputAsync($"logs -n rosenvall-devops-pipelines job/{jobName} --all-containers --tail=220", cancellationToken);
+                var implementationNamespace = RepositoryImplementationJobManifestRenderer.Namespace;
+                var logsResult = await jobs.GetOutputAsync($"logs -n {implementationNamespace} job/{jobName} --all-containers --tail=220", cancellationToken);
                 var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
                 var nextStatus = StatusFromLogs(logs, run.Status);
 
-                var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n rosenvall-devops-pipelines -o json", cancellationToken);
+                var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {implementationNamespace} -o json", cancellationToken);
                 if (jobResult.Succeeded)
                 {
                     using var document = JsonDocument.Parse(jobResult.Message);
