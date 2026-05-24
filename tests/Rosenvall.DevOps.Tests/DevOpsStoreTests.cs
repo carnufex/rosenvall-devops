@@ -886,6 +886,26 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_runner_manifest_keeps_environment_entries_in_one_yaml_list()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("CLOUDFLARE_API_TOKEN", "secret-value", repository.Id));
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add nginx test", "Create namespace test and expose test.rosenvall.se.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Add apps/test.\n2. Use Gateway API.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var manifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build())!;
+
+        AssertImplementationManifestEnvListIsWellFormed(manifest);
+        Assert.Contains("ROSENVALL_PROMPT_B64", manifest);
+        Assert.Contains("CLOUDFLARE_API_TOKEN", manifest);
+    }
+
+    [Fact]
     public async Task Planning_prompt_includes_board_ai_context_gitops_settings_and_skill_references_only()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -2084,6 +2104,47 @@ public sealed class DevOpsStoreTests
         }
 
         throw new InvalidOperationException($"Environment value {name} was not found.");
+    }
+
+    private static void AssertImplementationManifestEnvListIsWellFormed(string manifest)
+    {
+        var lines = manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        var envIndex = Array.FindIndex(lines, line => line.Trim() == "env:");
+        var commandIndex = Array.FindIndex(lines, envIndex + 1, line => line.Trim() == "command:");
+
+        Assert.True(envIndex >= 0, "Manifest should include a container env block.");
+        Assert.True(commandIndex > envIndex, "Manifest env block should be followed by a command block.");
+
+        var nameLines = lines[(envIndex + 1)..commandIndex]
+            .Where(line => line.TrimStart().StartsWith("- name:", StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(nameLines);
+
+        var listIndent = LeadingSpaces(nameLines[0]);
+        foreach (var line in nameLines)
+        {
+            Assert.Equal(listIndent, LeadingSpaces(line));
+        }
+
+        foreach (var line in lines[(envIndex + 1)..commandIndex])
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("value:", StringComparison.Ordinal) || trimmed.StartsWith("valueFrom:", StringComparison.Ordinal))
+            {
+                Assert.Equal(listIndent + 2, LeadingSpaces(line));
+            }
+        }
+    }
+
+    private static int LeadingSpaces(string value)
+    {
+        var count = 0;
+        while (count < value.Length && value[count] == ' ')
+        {
+            count++;
+        }
+
+        return count;
     }
 
     private static string CreateFakeCodexScript(int exitCode, string plan, bool requireSkipGitRepoCheck = false, string? promptCapturePath = null)

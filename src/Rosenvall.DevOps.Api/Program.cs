@@ -1006,12 +1006,12 @@ namespace Rosenvall.DevOps.Api
                                  value: "{{Escape(repository.DefaultBranch)}}"
                                - name: ROSENVALL_BRANCH
                                  value: "{{Escape(run.Branch)}}"
-                                - name: ROSENVALL_PROMPT_B64
-                                  value: "{{prompt}}"
-                                - name: ROSENVALL_ALLOWED_PATHS_B64
-                                  value: "{{allowedPaths}}"
-                                - name: ROSENVALL_CODEX_SESSION_ID
-                                  value: "{{Escape(aiSession?.ProviderSessionId)}}"
+                               - name: ROSENVALL_PROMPT_B64
+                                 value: "{{prompt}}"
+                               - name: ROSENVALL_ALLOWED_PATHS_B64
+                                 value: "{{allowedPaths}}"
+                               - name: ROSENVALL_CODEX_SESSION_ID
+                                 value: "{{Escape(aiSession?.ProviderSessionId)}}"
                    {{secretEnv}}
                              command:
                                - sh
@@ -1074,15 +1074,13 @@ namespace Rosenvall.DevOps.Api
             }
 
             var builder = new StringBuilder();
-            var first = true;
             foreach (var secret in secrets.OrderBy(secret => secret.Key, StringComparer.OrdinalIgnoreCase))
             {
-                builder.AppendLine((first ? "            " : "                               ") + "- name: " + EnvName(secret.Key));
-                first = false;
-                builder.AppendLine("                                 valueFrom:");
-                builder.AppendLine("                                   secretKeyRef:");
-                builder.AppendLine("                                     name: " + BoardSecretManifestRenderer.SecretName(secret));
-                builder.AppendLine("                                     key: " + BoardSecretManifestRenderer.SecretDataKey(secret));
+                builder.AppendLine("            - name: " + EnvName(secret.Key));
+                builder.AppendLine("              valueFrom:");
+                builder.AppendLine("                secretKeyRef:");
+                builder.AppendLine("                  name: " + BoardSecretManifestRenderer.SecretName(secret));
+                builder.AppendLine("                  key: " + BoardSecretManifestRenderer.SecretDataKey(secret));
             }
 
             return builder.ToString().TrimEnd();
