@@ -319,9 +319,18 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .target-repo-select { display: grid; gap: 8px; max-width: 420px; }
 .settings-stack { display: grid; gap: 16px; }
 .gitops-create-fields { border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
-.detected-profile { border: 1px solid rgba(103, 232, 249, 0.28); background: rgba(103, 232, 249, 0.06); border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
-.detected-profile strong { color: var(--focus); }
-.detected-profile p { overflow-wrap: anywhere; }
+.repository-profile-editor { border: 1px solid rgba(103, 232, 249, 0.28); background: rgba(103, 232, 249, 0.06); border-radius: 8px; padding: 14px; display: grid; gap: 14px; }
+.repository-profile-editor .form-grid.two > label:first-child, .repository-profile-editor .form-grid.two > label:nth-child(2) { grid-column: auto; }
+.profile-toolbar { background: rgba(9, 10, 11, 0.56); }
+.profile-signals { color: var(--muted-strong); overflow-wrap: anywhere; font-size: 13px; }
+.skill-drafts { display: grid; gap: 10px; }
+.skill-draft-row { border: 1px solid var(--line); background: #101112; border-radius: 8px; padding: 0; overflow: hidden; }
+.skill-draft-row summary { min-height: 44px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
+.skill-draft-row summary::-webkit-details-marker { display: none; }
+.skill-draft-row .form-grid { padding: 12px; border-top: 1px solid var(--line); }
+.repository-settings-editor { display: grid; gap: 10px; border: 1px solid var(--line); background: #121314; border-radius: 8px; padding: 12px; }
+.repository-settings-editor > .settings-row { border: 0; padding: 0; background: transparent; }
+.primary-action.compact, .danger-button.compact { min-height: 30px; font-size: 13px; padding: 0 10px; }
 .gitops-applications { margin-top: 16px; }
 .status-badges { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .status-badges a { color: var(--focus); display: inline-flex; align-items: center; }

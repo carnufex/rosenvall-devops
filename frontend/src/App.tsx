@@ -102,6 +102,7 @@ type BoardRepositoryDto = {
   isPrimary: boolean;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
   repository: RepositoryDto;
+  profile?: RepositoryProfileDto | null;
 };
 
 type BoardTeamAccessDto = {
@@ -446,6 +447,8 @@ type CreateBoardForm = {
   argoApplicationSelector: string;
   aiInstructions: string;
   enabledSkills: string;
+  capabilityTags: string;
+  skillDrafts: RepositorySkillDraftDto[];
   askWhenUncertain: boolean;
 };
 
@@ -464,6 +467,17 @@ type RepositoryProfileDto = {
   instructions: string;
   signals: string[];
   source: string;
+  capabilityTags?: string[] | null;
+  skillDrafts?: RepositorySkillDraftDto[] | null;
+  analyzerModel?: string | null;
+  analyzedAt?: string | null;
+};
+
+type RepositorySkillDraftDto = {
+  name: string;
+  description: string;
+  content: string;
+  enabled: boolean;
 };
 
 type ToastMessage = {
@@ -497,6 +511,8 @@ const emptyBoardForm: CreateBoardForm = {
   argoApplicationSelector: '',
   aiInstructions: '',
   enabledSkills: 'kubernetes\nargocd\ngitops-homelab',
+  capabilityTags: 'kubernetes\nargocd',
+  skillDrafts: [],
   askWhenUncertain: true
 };
 
@@ -748,7 +764,8 @@ function App() {
             instructions: form.aiInstructions,
             enabledSkills: linesFromTextarea(form.enabledSkills),
             askWhenUncertain: form.askWhenUncertain
-          } : null
+          } : null,
+          repositoryProfile: repositoryProfileFromForm(form)
         });
         setCreateBoardOpen(false);
         setSelectedBoardId(created.id);
@@ -871,9 +888,9 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
-    updateBoardRepositoryProfile: async (boardId, repositoryId, implementationProfile) => {
+    updateBoardRepositoryProfile: async (boardId, repositoryId, profile) => {
       await runAction('Saving repository profile', async () => {
-        await api.post<Board>(`/api/boards/${boardId}/repositories`, { repositoryId, isPrimary: true, implementationProfile });
+        await api.put<Board>(`/api/boards/${boardId}/repositories/${repositoryId}/profile`, profile);
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
@@ -1201,7 +1218,7 @@ type BoardActions = {
   deleteBoardSecret(boardId: string, secretId: string): Promise<void>;
   updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<void>;
   updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<void>;
-  updateBoardRepositoryProfile(boardId: string, repositoryId: string, implementationProfile: CreateBoardForm['implementationProfile']): Promise<void>;
+  updateBoardRepositoryProfile(boardId: string, repositoryId: string, profile: RepositoryProfileDto): Promise<void>;
   discardPlan(runId: string, workItemId: string): Promise<void>;
   approvePullRequest(workItemId: string): Promise<void>;
   startPreview(workItemId: string): Promise<void>;
@@ -2103,6 +2120,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
   const [githubInstallationId, setGithubInstallationId] = React.useState<number | null>(null);
   const [repositoryProfile, setRepositoryProfile] = React.useState<RepositoryProfileDto | null>(null);
   const [profileStatus, setProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  const [aiProfileStatus, setAiProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [profileError, setProfileError] = React.useState<string | null>(null);
   const normalizedName = form.name.trim();
   const usesGitHub = form.providerMode === 'GitHub';
@@ -2135,11 +2153,26 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
     };
   }, [githubStatus, loadGithubRepositories, usesGitHub]);
 
+  function applyRepositoryProfile(profile: RepositoryProfileDto) {
+    const implementationProfile = normalizeImplementationProfile(profile.implementationProfile);
+    setRepositoryProfile(profile);
+    setForm((current) => ({
+      ...current,
+      implementationProfile,
+      enabledSkills: (profile.enabledSkills ?? []).join('\n'),
+      capabilityTags: (profile.capabilityTags ?? []).join('\n'),
+      aiInstructions: profile.instructions,
+      skillDrafts: profile.skillDrafts ?? [],
+      askWhenUncertain: implementationProfile === 'gitops-homelab' ? true : current.askWhenUncertain
+    }));
+  }
+
   const loadRepositoryProfile = React.useCallback(async (repository: RepositoryDto) => {
     if (!repository.owner || !repository.name) return;
     setProfileStatus('loading');
     setProfileError(null);
     setRepositoryProfile(null);
+    setAiProfileStatus('idle');
     const query = new URLSearchParams({
       owner: repository.owner,
       repo: repository.name,
@@ -2147,17 +2180,22 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
     });
     if (githubInstallationId) query.set('installationId', String(githubInstallationId));
     try {
+      query.set('mode', 'scanner');
       const profile = await api.get<RepositoryProfileDto>(`/api/integrations/github/repository-profile?${query.toString()}`, { timeoutMs: 15000 });
-      const implementationProfile = normalizeImplementationProfile(profile.implementationProfile);
-      setRepositoryProfile(profile);
+      applyRepositoryProfile(profile);
       setProfileStatus('loaded');
-      setForm((current) => ({
-        ...current,
-        implementationProfile,
-        enabledSkills: profile.enabledSkills.join('\n'),
-        aiInstructions: profile.instructions,
-        askWhenUncertain: implementationProfile === 'gitops-homelab' ? true : current.askWhenUncertain
-      }));
+      setAiProfileStatus('loading');
+      const fullQuery = new URLSearchParams(query);
+      fullQuery.set('mode', 'full');
+      api.get<RepositoryProfileDto>(`/api/integrations/github/repository-profile?${fullQuery.toString()}`, { timeoutMs: 45000 })
+        .then((codexProfile) => {
+          applyRepositoryProfile(codexProfile);
+          setAiProfileStatus('loaded');
+        })
+        .catch((error) => {
+          setAiProfileStatus('error');
+          setProfileError(error instanceof Error ? error.message : 'Codex analysis did not return a profile');
+        });
     } catch (error) {
       setProfileStatus('error');
       setProfileError(error instanceof Error ? error.message : 'Could not detect repository profile');
@@ -2182,6 +2220,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
     });
     void loadRepositoryProfile(repository);
   };
+  const selectedGitHubRepository = githubRepos.find((entry) => `${entry.owner ?? ''}/${entry.name}` === (form.repositoryOwner && form.repositoryRemoteUrl ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : ''));
 
   return (
     <ModalFrame title="Add board" onClose={onClose}>
@@ -2206,6 +2245,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
             });
             setRepositoryProfile(null);
             setProfileStatus('idle');
+            setAiProfileStatus('idle');
             setProfileError(null);
             if (providerMode === 'GitHub') setGithubStatus('idle');
           }}><option value="GitHub">GitHub App</option><option value="CustomUrl">Custom URL</option></select></label>
@@ -2224,15 +2264,15 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
           )}
         </div>
         {usesGitHub && form.repositoryRemoteUrl && (
-          <div className="detected-profile">
-            <div>
-              <strong>Detected profile</strong>
-              <p>{profileStatus === 'loading' ? 'Detecting repository profile...' : repositoryProfile ? `${repositoryProfile.displayName} - ${Math.round(repositoryProfile.confidence * 100)}% confidence` : profileError ? 'Profile detection failed; using Code repo.' : profileLabel(form.implementationProfile)}</p>
-            </div>
-            {repositoryProfile?.enabledSkills.length ? <p>Skills: {repositoryProfile.enabledSkills.join(', ')}</p> : null}
-            {repositoryProfile?.signals.length ? <p>Signals: {repositoryProfile.signals.join(', ')}</p> : null}
-            {profileError && <p className="provider-status">{profileError}</p>}
-          </div>
+          <RepositoryProfileEditor
+            form={form}
+            profile={repositoryProfile}
+            profileStatus={profileStatus}
+            aiProfileStatus={aiProfileStatus}
+            profileError={profileError}
+            onChange={setForm}
+            onAnalyze={selectedGitHubRepository ? () => void loadRepositoryProfile(selectedGitHubRepository) : undefined}
+          />
         )}
         <fieldset className="team-picker">
           <legend>Teams</legend>
@@ -2261,6 +2301,100 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
         </div>
       </form>
     </ModalFrame>
+  );
+}
+
+function RepositoryProfileEditor({ form, profile, profileStatus, aiProfileStatus, profileError, onChange, onAnalyze, saveLabel, onSave }: {
+  form: CreateBoardForm;
+  profile?: RepositoryProfileDto | null;
+  profileStatus?: 'idle' | 'loading' | 'loaded' | 'error';
+  aiProfileStatus?: 'idle' | 'loading' | 'loaded' | 'error';
+  profileError?: string | null;
+  onChange: React.Dispatch<React.SetStateAction<CreateBoardForm>>;
+  onAnalyze?: () => void;
+  saveLabel?: string;
+  onSave?: () => void;
+}) {
+  const updateDraft = (index: number, patch: Partial<RepositorySkillDraftDto>) => {
+    onChange((current) => ({
+      ...current,
+      skillDrafts: current.skillDrafts.map((draft, draftIndex) => draftIndex === index ? { ...draft, ...patch } : draft)
+    }));
+  };
+  const removeDraft = (index: number) => onChange((current) => ({ ...current, skillDrafts: current.skillDrafts.filter((_, draftIndex) => draftIndex !== index) }));
+  const addDraft = () => onChange((current) => ({
+    ...current,
+    skillDrafts: [...current.skillDrafts, { name: 'repo-skill', description: '', content: '', enabled: true }]
+  }));
+  const statusLine = profileStatus === 'loading'
+    ? 'Scanner is reading repository structure...'
+    : aiProfileStatus === 'loading'
+      ? 'Scanner result is editable. Codex analysis is refining it in the background...'
+      : profile
+        ? `${profile.displayName} - ${Math.round((profile.confidence ?? 0) * 100)}% confidence - ${profile.source}${profile.analyzerModel ? ` / ${profile.analyzerModel}` : ''}`
+        : profileLabel(form.implementationProfile);
+
+  return (
+    <section className="repository-profile-editor">
+      <div className="settings-inline profile-toolbar">
+        <div>
+          <strong>Repository profile</strong>
+          <p>{statusLine}</p>
+        </div>
+        <div className="button-row">
+          {onAnalyze && <button type="button" className="secondary compact" onClick={onAnalyze}><Sparkles size={14} />Analyze again</button>}
+          {onSave && <button type="button" className="primary-action compact" onClick={onSave}><Save size={14} />{saveLabel ?? 'Save profile'}</button>}
+        </div>
+      </div>
+      {profileError && <p className="provider-status">{profileError}</p>}
+      {profile?.signals?.length ? <p className="profile-signals">Signals: {profile.signals.join(', ')}</p> : null}
+      <div className="form-grid two">
+        <label>Profile<select value={form.implementationProfile} onChange={(event) => onChange((current) => ({ ...current, implementationProfile: normalizeImplementationProfile(event.target.value) }))}>
+          <option value="code-repo">Code repo</option>
+          <option value="gitops-homelab">GitOps homelab</option>
+          <option value="unity">Unity</option>
+          <option value="react-preview">React preview</option>
+        </select></label>
+        <label>Ask when uncertain<select value={form.askWhenUncertain ? 'yes' : 'no'} onChange={(event) => onChange((current) => ({ ...current, askWhenUncertain: event.target.value === 'yes' }))}>
+          <option value="yes">Yes</option>
+          <option value="no">No</option>
+        </select></label>
+        <label className="full-width">Capability tags<textarea value={form.capabilityTags} onChange={(event) => onChange((current) => ({ ...current, capabilityTags: event.target.value }))} /></label>
+        <label className="full-width">Enabled skills<textarea value={form.enabledSkills} onChange={(event) => onChange((current) => ({ ...current, enabledSkills: event.target.value }))} /></label>
+        <label className="full-width">Board instructions<textarea value={form.aiInstructions} onChange={(event) => onChange((current) => ({ ...current, aiInstructions: event.target.value }))} /></label>
+      </div>
+      {form.implementationProfile === 'gitops-homelab' && (
+        <div className="form-grid two">
+          <label className="full-width">GitOps paths<textarea value={form.gitOpsAllowedPaths} onChange={(event) => onChange((current) => ({ ...current, gitOpsAllowedPaths: event.target.value }))} /></label>
+          <label>ArgoCD namespace<input value={form.argoNamespace} onChange={(event) => onChange((current) => ({ ...current, argoNamespace: event.target.value }))} /></label>
+          <label>Application selector<input value={form.argoApplicationSelector} onChange={(event) => onChange((current) => ({ ...current, argoApplicationSelector: event.target.value }))} /></label>
+        </div>
+      )}
+      <div className="skill-drafts">
+        <div className="settings-inline">
+          <div><strong>Skill drafts</strong><p>Editable repo-local suggestions. They are not installed globally.</p></div>
+          <button type="button" className="secondary compact" onClick={addDraft}><Plus size={14} />Add draft</button>
+        </div>
+        {form.skillDrafts.length === 0
+          ? <p className="provider-status">No skill drafts suggested yet.</p>
+          : form.skillDrafts.map((draft, index) => (
+            <details className="skill-draft-row" key={`${draft.name}-${index}`}>
+              <summary>
+                <label className="checkbox-row" onClick={(event) => event.stopPropagation()}>
+                  <input type="checkbox" checked={draft.enabled} onChange={(event) => updateDraft(index, { enabled: event.target.checked })} />
+                  <span>{draft.name || 'Unnamed skill'}</span>
+                </label>
+                <button type="button" className="danger-button compact" onClick={(event) => { event.preventDefault(); removeDraft(index); }}><Trash2 size={14} />Remove</button>
+              </summary>
+              <div className="form-grid two">
+                <label>Name<input value={draft.name} onChange={(event) => updateDraft(index, { name: event.target.value })} /></label>
+                <label>Description<input value={draft.description} onChange={(event) => updateDraft(index, { description: event.target.value })} /></label>
+                <label className="full-width">Content<textarea value={draft.content} onChange={(event) => updateDraft(index, { content: event.target.value })} /></label>
+              </div>
+            </details>
+          ))}
+      </div>
+    </section>
   );
 }
 
@@ -2539,21 +2673,7 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
             {boardRepositories.length === 0
               ? <p className="provider-status">No repositories are linked to this board.</p>
               : boardRepositories.map((entry) => (
-                <div className="settings-row" key={entry.repositoryId}>
-                  <div>
-                    <strong>{repositoryLabel(entry.repository)}</strong>
-                    <p>{entry.repository.provider} - {entry.repository.defaultBranch} - {profileLabel(entry.implementationProfile)}</p>
-                  </div>
-                  <div className="repository-settings-actions">
-                    <select value={normalizeImplementationProfile(entry.implementationProfile)} onChange={(event) => void actions.updateBoardRepositoryProfile(board.id, entry.repositoryId, event.target.value as CreateBoardForm['implementationProfile'])}>
-                      <option value="code-repo">Code repo</option>
-                      <option value="gitops-homelab">GitOps homelab</option>
-                      <option value="unity">Unity</option>
-                      <option value="react-preview">React preview</option>
-                    </select>
-                    <span className={entry.isPrimary ? 'state-good' : 'state-muted'}>{entry.isPrimary ? 'Primary' : 'Linked'}</span>
-                  </div>
-                </div>
+                <RepositorySettingsProfileEditor board={board} entry={entry} actions={actions} key={entry.repositoryId} />
               ))}
           </div>
         </section>
@@ -2575,6 +2695,79 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
         </section>
       </div>
     </section>
+  );
+}
+
+function RepositorySettingsProfileEditor({ board, entry, actions }: { board: Board; entry: BoardRepositoryDto; actions: BoardActions }) {
+  const [form, setForm] = React.useState<CreateBoardForm>(() => createBoardFormFromRepositoryProfile(board, entry));
+  const [profile, setProfile] = React.useState<RepositoryProfileDto | null>(entry.profile ?? repositoryProfileFromForm(createBoardFormFromRepositoryProfile(board, entry)));
+  const [profileStatus, setProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('loaded');
+  const [aiProfileStatus, setAiProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  const [profileError, setProfileError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    const next = createBoardFormFromRepositoryProfile(board, entry);
+    setForm(next);
+    setProfile(entry.profile ?? repositoryProfileFromForm(next));
+    setProfileStatus('loaded');
+    setAiProfileStatus('idle');
+    setProfileError(null);
+  }, [board.id, board.aiContext, board.gitOpsSettings, entry.profile, entry.implementationProfile, entry.repository.defaultBranch, entry.repository.name, entry.repository.owner]);
+
+  const analyzeAgain = async () => {
+    if (!entry.repository.owner) {
+      setProfileError('Repository owner is missing; cannot analyze through GitHub.');
+      return;
+    }
+
+    setProfileStatus('loaded');
+    setAiProfileStatus('loading');
+    setProfileError(null);
+    const query = new URLSearchParams({
+      owner: entry.repository.owner,
+      repo: entry.repository.name,
+      branch: entry.repository.defaultBranch || 'main',
+      mode: 'full'
+    });
+    try {
+      const nextProfile = await api.get<RepositoryProfileDto>(`/api/integrations/github/repository-profile?${query.toString()}`, { timeoutMs: 45000 });
+      setProfile(nextProfile);
+      setForm((current) => ({
+        ...current,
+        implementationProfile: normalizeImplementationProfile(nextProfile.implementationProfile),
+        enabledSkills: (nextProfile.enabledSkills ?? []).join('\n'),
+        capabilityTags: (nextProfile.capabilityTags ?? []).join('\n'),
+        aiInstructions: nextProfile.instructions,
+        skillDrafts: nextProfile.skillDrafts ?? []
+      }));
+      setAiProfileStatus('loaded');
+    } catch (error) {
+      setAiProfileStatus('error');
+      setProfileError(error instanceof Error ? error.message : 'Codex analysis failed');
+    }
+  };
+
+  return (
+    <div className="repository-settings-editor">
+      <div className="settings-row">
+        <div>
+          <strong>{repositoryLabel(entry.repository)}</strong>
+          <p>{entry.repository.provider} - {entry.repository.defaultBranch} - {profileLabel(form.implementationProfile)}</p>
+        </div>
+        <span className={entry.isPrimary ? 'state-good' : 'state-muted'}>{entry.isPrimary ? 'Primary' : 'Linked'}</span>
+      </div>
+      <RepositoryProfileEditor
+        form={form}
+        profile={profile}
+        profileStatus={profileStatus}
+        aiProfileStatus={aiProfileStatus}
+        profileError={profileError}
+        onChange={setForm}
+        onAnalyze={() => void analyzeAgain()}
+        onSave={() => void actions.updateBoardRepositoryProfile(board.id, entry.repositoryId, repositoryProfileFromForm(form, profile))}
+        saveLabel="Save profile"
+      />
+    </div>
   );
 }
 
@@ -3080,6 +3273,54 @@ function linesFromTextarea(value: string) {
     .split(/\r?\n|,/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function repositoryProfileFromForm(form: CreateBoardForm, base?: RepositoryProfileDto | null): RepositoryProfileDto {
+  const implementationProfile = normalizeImplementationProfile(form.implementationProfile);
+  return {
+    implementationProfile,
+    displayName: base?.displayName ?? profileLabel(implementationProfile),
+    confidence: base?.confidence ?? 0.9,
+    enabledSkills: linesFromTextarea(form.enabledSkills),
+    instructions: form.aiInstructions,
+    signals: base?.signals ?? [],
+    source: base?.source ?? 'user',
+    capabilityTags: linesFromTextarea(form.capabilityTags),
+    skillDrafts: form.skillDrafts.map((draft) => ({
+      name: draft.name.trim(),
+      description: draft.description.trim(),
+      content: draft.content.trim(),
+      enabled: draft.enabled
+    })).filter((draft) => draft.name.length > 0),
+    analyzerModel: base?.analyzerModel ?? null,
+    analyzedAt: base?.analyzedAt ?? null
+  };
+}
+
+function createBoardFormFromRepositoryProfile(board: Board, entry: BoardRepositoryDto): CreateBoardForm {
+  const profile = entry.profile;
+  const gitOps = board.gitOpsSettings ?? defaultGitOpsSettings(board.id);
+  const ai = board.aiContext ?? defaultAiContext(board.id);
+  return {
+    ...emptyBoardForm,
+    name: board.name,
+    repositoryProvider: entry.repository.provider,
+    providerMode: entry.repository.provider === 'GitHub' ? 'GitHub' : 'CustomUrl',
+    repositoryId: entry.repository.id,
+    repositoryOwner: entry.repository.owner ?? '',
+    repositoryRemoteUrl: entry.repository.remoteUrl,
+    repositoryWebUrl: entry.repository.webUrl ?? '',
+    repositoryDefaultBranch: entry.repository.defaultBranch,
+    implementationProfile: normalizeImplementationProfile(profile?.implementationProfile ?? entry.implementationProfile),
+    gitOpsAllowedPaths: gitOps.allowedPaths.join('\n'),
+    argoNamespace: gitOps.argoNamespace,
+    argoApplicationSelector: gitOps.argoApplicationSelector,
+    aiInstructions: profile?.instructions ?? ai.instructions,
+    enabledSkills: (profile?.enabledSkills ?? ai.enabledSkills).join('\n'),
+    capabilityTags: (profile?.capabilityTags ?? []).join('\n'),
+    skillDrafts: profile?.skillDrafts ?? [],
+    askWhenUncertain: ai.askWhenUncertain
+  };
 }
 
 function defaultGitOpsSettings(boardId: string): BoardGitOpsSettingsDto {

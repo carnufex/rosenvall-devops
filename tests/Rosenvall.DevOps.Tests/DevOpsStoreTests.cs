@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -375,6 +376,65 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task GitHub_repository_profile_retries_default_branch_when_requested_branch_is_wrong()
+    {
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            var url = request.RequestUri?.ToString() ?? "";
+            if (url.Contains("/git/trees/main", StringComparison.OrdinalIgnoreCase))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("""{"message":"Not Found"}""") };
+            }
+
+            if (url.EndsWith("/repos/carnufex/Rosenvalls-Homelab", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse("""{"default_branch":"master"}""");
+            }
+
+            if (url.Contains("/git/trees/master", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse("""
+                {"tree":[
+                  {"path":"kubernetes/applications/application-set.yaml"},
+                  {"path":"tofu/talos.tf"},
+                  {"path":".codex/skills/cluster-diagnostics/SKILL.md"}
+                ]}
+                """);
+            }
+
+            if (url.Contains("/contents/kubernetes/applications/application-set.yaml", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonContent("kind: ApplicationSet\napiVersion: argoproj.io/v1alpha1");
+            }
+
+            if (url.Contains("/contents/tofu/talos.tf", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonContent("resource \"talos_machine_configuration_apply\" \"worker\" {}");
+            }
+
+            if (url.Contains("/contents/.codex/skills/cluster-diagnostics/SKILL.md", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonContent("# Cluster Diagnostics\nCheck ArgoCD sync first.");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("""{"message":"Not Found"}""") };
+        }));
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["GitHub:Token"] = "ghp_test"
+            })
+            .Build();
+        var github = new GitHubRepositoryClient(httpClient, configuration);
+
+        var profile = await github.GetRepositoryProfileAsync("carnufex", "Rosenvalls-Homelab", "main", CancellationToken.None);
+
+        Assert.NotNull(profile);
+        Assert.Equal("gitops-homelab", profile.ImplementationProfile);
+        Assert.Contains("cluster-diagnostics", profile.EnabledSkills);
+    }
+
+    [Fact]
     public void Repository_profile_classifier_detects_known_project_shapes()
     {
         var unity = RepositoryProfileClassifier.Classify([
@@ -410,6 +470,165 @@ public sealed class DevOpsStoreTests
         Assert.Equal("react-preview", react.ImplementationProfile);
         Assert.Contains("react", react.EnabledSkills);
         Assert.Equal("code-repo", generic.ImplementationProfile);
+    }
+
+    [Fact]
+    public void Repository_profile_classifier_detects_rosenvalls_homelab_shape()
+    {
+        var profile = RepositoryProfileClassifier.Classify([
+            ".codex/skills/cloudflare-gateway-routing/SKILL.md",
+            ".codex/skills/cluster-diagnostics/SKILL.md",
+            ".codex/skills/gitops-app-onboarding/SKILL.md",
+            "AGENTS.md",
+            "README.md",
+            "bootstrap.ps1",
+            "kubernetes/applications/application-set.yaml",
+            "kubernetes/applications/bikepal/kustomization.yaml",
+            "kubernetes/infrastructure/cilium/values.yaml",
+            "kubernetes/infrastructure/longhorn/values.yaml",
+            "tofu/main.tf",
+            "tofu/talos.tf"
+        ], new Dictionary<string, string>
+        {
+            ["README.md"] = "A Proxmox-hosted Talos Kubernetes homelab managed through GitOps. GitOps: ArgoCD syncs kubernetes/ from origin.",
+            ["kubernetes/applications/application-set.yaml"] = "kind: ApplicationSet\napiVersion: argoproj.io/v1alpha1",
+            ["kubernetes/applications/bikepal/externalsecret.yaml"] = "kind: ExternalSecret",
+            ["tofu/talos.tf"] = "resource \"talos_machine_configuration_apply\" \"worker\" {}"
+        });
+
+        Assert.Equal("gitops-homelab", profile.ImplementationProfile);
+        Assert.Contains("kubernetes", profile.CapabilityTags!);
+        Assert.Contains("opentofu", profile.CapabilityTags!);
+        Assert.Contains("talos", profile.CapabilityTags!);
+        Assert.Contains("cloudflare-gateway-routing", profile.EnabledSkills);
+        Assert.Contains("cluster-diagnostics", profile.EnabledSkills);
+        Assert.Contains("gitops-app-onboarding", profile.EnabledSkills);
+        Assert.Contains(profile.SkillDrafts!, draft => draft.Name == "gitops-app-onboarding" && draft.Enabled);
+    }
+
+    [Fact]
+    public void Codex_profile_parser_merges_valid_json_into_scanner_profile()
+    {
+        var scanner = RepositoryProfileClassifier.Classify(["kubernetes/applications/application-set.yaml"], new Dictionary<string, string>
+        {
+            ["kubernetes/applications/application-set.yaml"] = "kind: ApplicationSet\napiVersion: argoproj.io/v1alpha1"
+        });
+
+        var profile = RepositoryProfileAiParser.Apply(scanner, """
+        {
+          "implementationProfile": "gitops-homelab",
+          "displayName": "Talos GitOps homelab",
+          "confidence": 0.97,
+          "capabilityTags": ["kubernetes", "argocd", "talos", "opentofu"],
+          "enabledSkills": ["argocd", "cluster-diagnostics"],
+          "instructions": "Keep every cluster change PR-first and let ArgoCD reconcile.",
+          "signals": ["ApplicationSet", "Talos", "OpenTofu"],
+          "skillDrafts": [
+            {
+              "name": "cluster-diagnostics",
+              "description": "Diagnose cluster health using kubectl, ArgoCD and app manifests.",
+              "content": "Check ArgoCD sync and Kubernetes events before changing manifests.",
+              "enabled": true
+            }
+          ]
+        }
+        """, "gpt-5.5");
+
+        Assert.Equal("gitops-homelab", profile.ImplementationProfile);
+        Assert.Equal("Talos GitOps homelab", profile.DisplayName);
+        Assert.Equal("codex", profile.Source);
+        Assert.Equal("gpt-5.5", profile.AnalyzerModel);
+        Assert.Contains("talos", profile.CapabilityTags!);
+        Assert.Contains("cluster-diagnostics", profile.EnabledSkills);
+        var draft = Assert.Single(profile.SkillDrafts!);
+        Assert.Equal("cluster-diagnostics", draft.Name);
+        Assert.True(draft.Enabled);
+    }
+
+    [Fact]
+    public void Codex_profile_parser_keeps_scanner_profile_when_json_is_invalid()
+    {
+        var scanner = RepositoryProfileClassifier.Classify(["kubernetes/applications/application-set.yaml"], new Dictionary<string, string>
+        {
+            ["kubernetes/applications/application-set.yaml"] = "kind: ApplicationSet\napiVersion: argoproj.io/v1alpha1"
+        });
+
+        var profile = RepositoryProfileAiParser.Apply(scanner, "not-json", "gpt-5.5");
+
+        Assert.Equal(scanner.ImplementationProfile, profile.ImplementationProfile);
+        Assert.Equal("scanner", profile.Source);
+        Assert.Contains(profile.Signals, signal => signal.Contains("Codex profile JSON was invalid", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Create_board_persists_modified_repository_profile_draft()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Rosenvalls-Homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var profile = new RepositoryProfileDto(
+            "gitops-homelab",
+            "Talos GitOps homelab",
+            0.97,
+            ["argocd", "cluster-diagnostics"],
+            "Keep every cluster change PR-first.",
+            ["kubernetes/", "ApplicationSet"],
+            "codex",
+            ["kubernetes", "argocd", "talos", "opentofu"],
+            [new RepositorySkillDraftDto("cluster-diagnostics", "Cluster diagnostics", "Check ArgoCD sync first.", true)],
+            "gpt-5.5");
+
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Rosenvalls-Homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            AiContext: new BoardAiContextRequest(profile.Instructions, profile.EnabledSkills, true),
+            RepositoryProfile: profile))!;
+        var reopenedBoard = fixture.Reopen().GetBoard(board.Id)!;
+
+        var linked = Assert.Single(reopenedBoard.Repositories!);
+        Assert.Equal("gitops-homelab", linked.ImplementationProfile);
+        Assert.NotNull(linked.Profile);
+        Assert.Equal("Talos GitOps homelab", linked.Profile!.DisplayName);
+        Assert.Contains("talos", linked.Profile.CapabilityTags!);
+        Assert.Contains(linked.Profile.SkillDrafts!, draft => draft.Name == "cluster-diagnostics");
+        Assert.Contains("cluster-diagnostics", reopenedBoard.AiContext!.EnabledSkills);
+    }
+
+    [Fact]
+    public void Settings_update_persists_modified_repository_profile_draft()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Rosenvalls-Homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "code-repo"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Rosenvalls-Homelab", repository.Id, null, null, null, null, null))!;
+        var profile = new RepositoryProfileDto(
+            "gitops-homelab",
+            "Talos GitOps homelab",
+            0.96,
+            ["argocd", "gitops-app-onboarding"],
+            "Use PR-first GitOps changes.",
+            ["ApplicationSet"],
+            "user",
+            ["kubernetes", "argocd"],
+            [new RepositorySkillDraftDto("gitops-app-onboarding", "App onboarding", "Create kustomization and namespace first.", true)]);
+
+        var updated = store.UpsertBoardRepositoryProfile(board.Id, repository.Id, profile);
+        var reopenedBoard = fixture.Reopen().GetBoard(board.Id)!;
+
+        Assert.NotNull(updated);
+        var linked = Assert.Single(reopenedBoard.Repositories!);
+        Assert.Equal("gitops-homelab", linked.ImplementationProfile);
+        Assert.Equal("Talos GitOps homelab", linked.Profile!.DisplayName);
+        Assert.Contains("gitops-app-onboarding", reopenedBoard.AiContext!.EnabledSkills);
+        Assert.Contains(linked.Profile.SkillDrafts!, draft => draft.Name == "gitops-app-onboarding");
     }
 
     [Fact]
@@ -1755,6 +1974,24 @@ public sealed class DevOpsStoreTests
             {
                 Content = new StringContent(body)
             });
+    }
+
+    private sealed class RoutingHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> route) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(route(request));
+    }
+
+    private static HttpResponseMessage JsonResponse(string json) =>
+        new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+
+    private static HttpResponseMessage JsonContent(string content)
+    {
+        var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(content));
+        return JsonResponse($$"""{"encoding":"base64","content":"{{base64}}"}""");
     }
 
     private sealed class FakePlanProvider(string providerName, string plan) : IAiPlanProvider

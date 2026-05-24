@@ -299,14 +299,14 @@ api.MapGet("/integrations/github/repository-picker", async (long? installationId
         result.Repositories,
         resolvedInstallationId));
 });
-api.MapGet("/integrations/github/repository-profile", async (string owner, string repo, string? branch, long? installationId, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+api.MapGet("/integrations/github/repository-profile", async (string owner, string repo, string? branch, string? mode, long? installationId, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
     {
         return Results.BadRequest("Both owner and repo are required.");
     }
 
-    var result = await github.GetRepositoryProfileAsync(owner, repo, branch, cancellationToken, installationId);
+    var result = await github.GetRepositoryProfileAsync(owner, repo, branch, cancellationToken, installationId, mode);
     return result is null
         ? Results.Ok(RepositoryProfileClassifier.Classify([], null, $"Could not scan {owner}/{repo}; defaulted to code repo."))
         : Results.Ok(result);
@@ -314,6 +314,8 @@ api.MapGet("/integrations/github/repository-profile", async (string owner, strin
 
 api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepositoryRequest request, DevOpsStore store) =>
     store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound());
+api.MapPut("/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile", (Guid boardId, Guid repositoryId, RepositoryProfileDto request, DevOpsStore store) =>
+    store.UpsertBoardRepositoryProfile(boardId, repositoryId, request) is { } board ? Results.Ok(board) : Results.NotFound());
 api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid boardId, Guid repositoryId, DevOpsStore store) =>
     store.UnlinkRepositoryFromBoard(boardId, repositoryId) ? Results.NoContent() : Results.NotFound());
 api.MapGet("/boards/{boardId:guid}/teams", (Guid boardId, DevOpsStore store) =>
@@ -762,7 +764,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record TeamMemberDto(Guid UserId, string Role, string? DisplayName = null, string? Email = null, string? Status = null);
     public sealed record TeamDto(Guid Id, string Name, IReadOnlyList<TeamMemberDto> Members, DateTimeOffset CreatedAt);
     public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt, string? Owner = null, string ImplementationProfile = "react-preview");
-    public sealed record BoardRepositoryDto(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, RepositoryDto Repository);
+    public sealed record BoardRepositoryDto(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, RepositoryDto Repository, RepositoryProfileDto? Profile = null);
     public sealed record BoardTeamAccessDto(Guid BoardId, Guid TeamId, string TeamName, string Role);
     public sealed record BoardGitOpsSettingsDto(Guid BoardId, IReadOnlyList<string> AllowedPaths, string ArgoNamespace, string ArgoApplicationSelector);
     public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain);
@@ -798,7 +800,19 @@ namespace Rosenvall.DevOps.Api
     public sealed record AssigneeDto(string Id, string DisplayName, string Email, string Source);
     public sealed record GitHubInstallUrlDto(string Url);
     public sealed record GitHubRepositoryPickerDto(string Status, string? Message, IReadOnlyList<RepositoryDto> Repositories, long? ActiveInstallationId = null);
-    public sealed record RepositoryProfileDto(string ImplementationProfile, string DisplayName, double Confidence, IReadOnlyList<string> EnabledSkills, string Instructions, IReadOnlyList<string> Signals, string Source = "scanner");
+    public sealed record RepositorySkillDraftDto(string Name, string Description, string Content, bool Enabled = true);
+    public sealed record RepositoryProfileDto(
+        string ImplementationProfile,
+        string DisplayName,
+        double Confidence,
+        IReadOnlyList<string> EnabledSkills,
+        string Instructions,
+        IReadOnlyList<string> Signals,
+        string Source = "scanner",
+        IReadOnlyList<string>? CapabilityTags = null,
+        IReadOnlyList<RepositorySkillDraftDto>? SkillDrafts = null,
+        string? AnalyzerModel = null,
+        DateTimeOffset? AnalyzedAt = null);
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);
     public sealed record CreateTeamRequest(string Name);
@@ -806,7 +820,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record InviteTeamMemberRequest(string Email, string Role);
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
     public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null, string? Owner = null, string? ImplementationProfile = null);
-    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null);
+    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null, RepositoryProfileDto? RepositoryProfile = null);
     public sealed record BoardGitOpsSettingsRequest(IReadOnlyList<string>? AllowedPaths, string? ArgoNamespace, string? ArgoApplicationSelector);
     public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain);
     public sealed record LinkBoardRepositoryRequest(Guid RepositoryId, bool IsPrimary, string? ImplementationProfile = null);
@@ -2894,18 +2908,28 @@ namespace Rosenvall.DevOps.Api
                     0.98,
                     ["unity", "unity-project", "csharp"],
                     "Unity project detected. Prefer Unity-aware implementation steps, inspect Assets/ and ProjectSettings/, and run Unity tests where available.",
-                    MatchingSignals(normalizedPaths, ["ProjectSettings/ProjectVersion.txt", "Assets/", "Packages/manifest.json"]));
+                    MatchingSignals(normalizedPaths, ["ProjectSettings/ProjectVersion.txt", "Assets/", "Packages/manifest.json"]),
+                    CapabilityTags: ["unity", "csharp"]);
             }
 
             if (LooksLikeGitOpsHomelab(normalizedPaths, contents))
             {
+                var capabilityTags = GitOpsCapabilityTags(normalizedPaths, contents);
+                var repoSkills = RepoSkillDrafts(normalizedPaths, contents);
+                var enabledSkills = new[] { "kubernetes", "argocd", "gitops-homelab" }
+                    .Concat(capabilityTags.Where(tag => tag is "opentofu" or "talos" or "cloudflare-gateway-routing" or "cluster-diagnostics" or "gitops-app-onboarding"))
+                    .Concat(repoSkills.Where(draft => draft.Enabled).Select(draft => draft.Name))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
                 return new RepositoryProfileDto(
                     "gitops-homelab",
                     "GitOps homelab",
                     0.94,
-                    ["kubernetes", "argocd", "gitops-homelab"],
+                    enabledSkills,
                     "GitOps homelab repository detected. Keep changes scoped to declared app, cluster, or infrastructure paths and prefer pull requests over direct mutation.",
-                    MatchingSignals(normalizedPaths, ["apps/", "clusters/", "infrastructure/", "kustomization.yaml", "Chart.yaml", "kind: Application"]));
+                    MatchingSignals(normalizedPaths, ["apps/", "clusters/", "infrastructure/", "kubernetes/", "kubernetes/applications/application-set.yaml", "tofu/", "bootstrap.ps1", "kustomization.yaml", "Chart.yaml", "kind: Application", "kind: ApplicationSet"]),
+                    CapabilityTags: capabilityTags,
+                    SkillDrafts: repoSkills);
             }
 
             if (LooksLikeReactPreview(normalizedPaths, contents))
@@ -2916,7 +2940,8 @@ namespace Rosenvall.DevOps.Api
                     0.9,
                     ["react", "vite", "typescript"],
                     "React/Vite project detected. Use the preview implementation flow and verify with the frontend build.",
-                    MatchingSignals(normalizedPaths, ["package.json", "vite.config", "src/App"]));
+                    MatchingSignals(normalizedPaths, ["package.json", "vite.config", "src/App"]),
+                    CapabilityTags: ["react", "vite", "typescript"]);
             }
 
             var signals = string.IsNullOrWhiteSpace(fallbackSignal)
@@ -2928,7 +2953,8 @@ namespace Rosenvall.DevOps.Api
                 0.55,
                 ["code-repo"],
                 "Generic code repository detected. Inspect the repository before choosing framework-specific implementation steps.",
-                signals);
+                signals,
+                CapabilityTags: ["code-repo"]);
         }
 
         private static bool LooksLikeUnity(IReadOnlyList<string> paths) =>
@@ -2938,10 +2964,15 @@ namespace Rosenvall.DevOps.Api
 
         private static bool LooksLikeGitOpsHomelab(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents) =>
             HasPrefix(paths, "clusters/") ||
+            HasPrefix(paths, "kubernetes/") ||
+            HasPath(paths, "kubernetes/applications/application-set.yaml") ||
             (HasPrefix(paths, "apps/") && HasAnyPathEnding(paths, "kustomization.yaml")) ||
             HasPrefix(paths, "infrastructure/") ||
+            HasPrefix(paths, "tofu/") ||
+            HasPath(paths, "bootstrap.ps1") ||
             HasAnyPathEnding(paths, "Chart.yaml") ||
-            contents.Values.Any(content => content.Contains("kind: Application", StringComparison.OrdinalIgnoreCase) && content.Contains("argoproj.io", StringComparison.OrdinalIgnoreCase));
+            contents.Values.Any(content => ContainsAny(content, "kind: Application", "kind: ApplicationSet") && content.Contains("argoproj.io", StringComparison.OrdinalIgnoreCase)) ||
+            contents.Values.Any(content => ContainsAny(content, "GitOps", "Talos", "OpenTofu", "Proxmox", "ExternalSecret", "Gateway API", "Cilium", "Longhorn", "CloudNativePG"));
 
         private static bool LooksLikeReactPreview(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents)
         {
@@ -2979,6 +3010,61 @@ namespace Rosenvall.DevOps.Api
             return signals.Count == 0 ? expected : signals.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
+        private static IReadOnlyList<string> GitOpsCapabilityTags(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents)
+        {
+            var tags = new List<string> { "kubernetes", "argocd", "gitops" };
+            var allContent = string.Join('\n', contents.Values);
+            AddIf(tags, "opentofu", HasPrefix(paths, "tofu/") || HasAnyPathEnding(paths, ".tf") || ContainsAny(allContent, "OpenTofu", "terraform"));
+            AddIf(tags, "talos", paths.Any(path => path.Contains("talos", StringComparison.OrdinalIgnoreCase)) || ContainsAny(allContent, "Talos", "talos_machine"));
+            AddIf(tags, "proxmox", paths.Any(path => path.Contains("proxmox", StringComparison.OrdinalIgnoreCase)) || ContainsAny(allContent, "Proxmox"));
+            AddIf(tags, "external-secrets", paths.Any(path => path.Contains("externalsecret", StringComparison.OrdinalIgnoreCase)) || ContainsAny(allContent, "ExternalSecret"));
+            AddIf(tags, "gateway-api", paths.Any(path => path.Contains("gateway", StringComparison.OrdinalIgnoreCase)) || ContainsAny(allContent, "gateway.networking.k8s.io", "Gateway API"));
+            AddIf(tags, "cilium", paths.Any(path => path.Contains("cilium", StringComparison.OrdinalIgnoreCase)) || ContainsAny(allContent, "Cilium"));
+            AddIf(tags, "longhorn", paths.Any(path => path.Contains("longhorn", StringComparison.OrdinalIgnoreCase)) || ContainsAny(allContent, "Longhorn"));
+            AddIf(tags, "cloudnativepg", paths.Any(path => path.Contains("cloudnativepg", StringComparison.OrdinalIgnoreCase) || path.Contains("cnpg", StringComparison.OrdinalIgnoreCase)) || ContainsAny(allContent, "CloudNativePG", "postgresql.cnpg.io"));
+            AddIf(tags, "application-set", HasPath(paths, "kubernetes/applications/application-set.yaml") || ContainsAny(allContent, "ApplicationSet"));
+            foreach (var skill in RepoSkillNames(paths))
+            {
+                tags.Add(skill);
+            }
+
+            return tags.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        private static IReadOnlyList<RepositorySkillDraftDto> RepoSkillDrafts(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents) =>
+            RepoSkillNames(paths)
+                .Select(name =>
+                {
+                    var path = $".codex/skills/{name}/SKILL.md";
+                    var content = contents.TryGetValue(path, out var body) ? body.Trim() : "";
+                    return new RepositorySkillDraftDto(
+                        name,
+                        $"Repo-specific skill discovered at {path}.",
+                        string.IsNullOrWhiteSpace(content) ? $"Use the repository-local {name} workflow when this board touches matching homelab paths." : content,
+                        true);
+                })
+                .ToArray();
+
+        private static IEnumerable<string> RepoSkillNames(IReadOnlyList<string> paths) =>
+            paths
+                .Where(path => path.StartsWith(".codex/skills/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/SKILL.md", StringComparison.OrdinalIgnoreCase))
+                .Select(path => path.Split('/', StringSplitOptions.RemoveEmptyEntries))
+                .Where(parts => parts.Length >= 3)
+                .Select(parts => parts[2])
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        private static void AddIf(List<string> tags, string tag, bool condition)
+        {
+            if (condition)
+            {
+                tags.Add(tag);
+            }
+        }
+
+        private static bool ContainsAny(string value, params string[] needles) =>
+            needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
+
         private static bool HasPath(IReadOnlyList<string> paths, string expected) =>
             paths.Any(path => path.Equals(expected, StringComparison.OrdinalIgnoreCase));
 
@@ -2987,6 +3073,171 @@ namespace Rosenvall.DevOps.Api
 
         private static bool HasAnyPathEnding(IReadOnlyList<string> paths, string expectedSuffix) =>
             paths.Any(path => path.EndsWith(expectedSuffix, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static class RepositoryProfileAiParser
+    {
+        public static RepositoryProfileDto Apply(RepositoryProfileDto scannerProfile, string json, string model)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(ExtractJsonObject(json));
+                var root = document.RootElement;
+                var implementationProfile = NormalizeImplementationProfile(ReadString(root, "implementationProfile", scannerProfile.ImplementationProfile));
+                var displayName = ReadString(root, "displayName", scannerProfile.DisplayName);
+                var confidence = ReadDouble(root, "confidence", scannerProfile.Confidence);
+                return NormalizeRepositoryProfile(new RepositoryProfileDto(
+                    implementationProfile,
+                    string.IsNullOrWhiteSpace(displayName) ? scannerProfile.DisplayName : displayName,
+                    Math.Clamp(confidence, scannerProfile.Confidence, 1),
+                    ReadStringArray(root, "enabledSkills", scannerProfile.EnabledSkills),
+                    ReadString(root, "instructions", scannerProfile.Instructions),
+                    ReadStringArray(root, "signals", scannerProfile.Signals),
+                    "codex",
+                    ReadStringArray(root, "capabilityTags", scannerProfile.CapabilityTags ?? []),
+                    ReadSkillDrafts(root, scannerProfile.SkillDrafts ?? []),
+                    string.IsNullOrWhiteSpace(model) ? "codex" : model.Trim(),
+                    DateTimeOffset.UtcNow));
+            }
+            catch (JsonException)
+            {
+                return scannerProfile with
+                {
+                    Source = "scanner",
+                    Signals = scannerProfile.Signals
+                        .Concat(["Codex profile JSON was invalid; scanner profile kept."])
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray()
+                };
+            }
+        }
+
+        public static RepositoryProfileDto NormalizeRepositoryProfile(RepositoryProfileDto profile)
+        {
+            var implementationProfile = NormalizeImplementationProfile(profile.ImplementationProfile);
+            return profile with
+            {
+                ImplementationProfile = implementationProfile,
+                DisplayName = NormalizeTextValue(profile.DisplayName, ProfileDisplayName(implementationProfile)),
+                Confidence = Math.Clamp(profile.Confidence, 0, 1),
+                EnabledSkills = NormalizeList(profile.EnabledSkills),
+                Instructions = string.IsNullOrWhiteSpace(profile.Instructions)
+                    ? "Inspect the repository before choosing framework-specific implementation steps."
+                    : profile.Instructions.Trim(),
+                Signals = NormalizeList(profile.Signals),
+                Source = NormalizeTextValue(profile.Source, "scanner"),
+                CapabilityTags = NormalizeList(profile.CapabilityTags ?? []),
+                SkillDrafts = NormalizeSkillDrafts(profile.SkillDrafts ?? []),
+                AnalyzerModel = string.IsNullOrWhiteSpace(profile.AnalyzerModel) ? null : profile.AnalyzerModel.Trim(),
+                AnalyzedAt = profile.AnalyzedAt ?? DateTimeOffset.UtcNow
+            };
+        }
+
+        private static string ExtractJsonObject(string value)
+        {
+            var trimmed = value.Trim();
+            if (trimmed.StartsWith("{", StringComparison.Ordinal) && trimmed.EndsWith("}", StringComparison.Ordinal))
+            {
+                return trimmed;
+            }
+
+            var start = trimmed.IndexOf('{');
+            var end = trimmed.LastIndexOf('}');
+            return start >= 0 && end > start ? trimmed[start..(end + 1)] : trimmed;
+        }
+
+        private static string ReadString(JsonElement root, string name, string fallback) =>
+            root.TryGetProperty(name, out var element) && element.ValueKind == JsonValueKind.String
+                ? element.GetString() ?? fallback
+                : fallback;
+
+        private static double ReadDouble(JsonElement root, string name, double fallback) =>
+            root.TryGetProperty(name, out var element) && element.TryGetDouble(out var value)
+                ? value
+                : fallback;
+
+        private static IReadOnlyList<string> ReadStringArray(JsonElement root, string name, IReadOnlyList<string> fallback) =>
+            root.TryGetProperty(name, out var element) && element.ValueKind == JsonValueKind.Array
+                ? NormalizeList(element.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString() ?? ""))
+                : NormalizeList(fallback);
+
+        private static IReadOnlyList<RepositorySkillDraftDto> ReadSkillDrafts(JsonElement root, IReadOnlyList<RepositorySkillDraftDto> fallback)
+        {
+            if (!root.TryGetProperty("skillDrafts", out var draftsElement) || draftsElement.ValueKind != JsonValueKind.Array)
+            {
+                return NormalizeSkillDrafts(fallback);
+            }
+
+            var drafts = new List<RepositorySkillDraftDto>();
+            foreach (var item in draftsElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var name = ReadString(item, "name", "");
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    continue;
+                }
+
+                var enabled = !item.TryGetProperty("enabled", out var enabledElement) || enabledElement.ValueKind != JsonValueKind.False;
+                drafts.Add(new RepositorySkillDraftDto(
+                    name,
+                    ReadString(item, "description", ""),
+                    ReadString(item, "content", ""),
+                    enabled));
+            }
+
+            return NormalizeSkillDrafts(drafts);
+        }
+
+        private static IReadOnlyList<string> NormalizeList(IEnumerable<string> values) =>
+            values
+                .Select(value => value.Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+        private static IReadOnlyList<RepositorySkillDraftDto> NormalizeSkillDrafts(IEnumerable<RepositorySkillDraftDto> drafts) =>
+            drafts
+                .Where(draft => !string.IsNullOrWhiteSpace(draft.Name))
+                .GroupBy(draft => draft.Name.Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(group =>
+                {
+                    var draft = group.First();
+                    return new RepositorySkillDraftDto(
+                        draft.Name.Trim(),
+                        string.IsNullOrWhiteSpace(draft.Description) ? $"Repo-specific skill draft for {draft.Name.Trim()}." : draft.Description.Trim(),
+                        string.IsNullOrWhiteSpace(draft.Content) ? $"Use the {draft.Name.Trim()} workflow for matching repository tasks." : draft.Content.Trim(),
+                        draft.Enabled);
+                })
+                .ToArray();
+
+        private static string NormalizeImplementationProfile(string? value)
+        {
+            var normalized = string.IsNullOrWhiteSpace(value) ? "code-repo" : value.Trim().ToLowerInvariant();
+            return normalized switch
+            {
+                "unity" => "unity",
+                "react" or "react-preview" or "preview" => "react-preview",
+                "gitops" or "gitops-homelab" or "homelab" => "gitops-homelab",
+                "code" or "code-repo" or "repo" => "code-repo",
+                _ => "code-repo"
+            };
+        }
+
+        private static string NormalizeTextValue(string? value, string fallback) =>
+            string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+        private static string ProfileDisplayName(string implementationProfile) => implementationProfile switch
+        {
+            "gitops-homelab" => "GitOps homelab",
+            "unity" => "Unity",
+            "react-preview" => "React preview",
+            _ => "Code repo"
+        };
     }
 
     public sealed class GitHubRepositoryClient(HttpClient httpClient, IConfiguration configuration)
@@ -3203,7 +3454,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public async Task<RepositoryProfileDto?> GetRepositoryProfileAsync(string owner, string repo, string? branch, CancellationToken cancellationToken, long? installationId = null)
+        public async Task<RepositoryProfileDto?> GetRepositoryProfileAsync(string owner, string repo, string? branch, CancellationToken cancellationToken, long? installationId = null, string? mode = null)
         {
             try
             {
@@ -3215,26 +3466,31 @@ namespace Rosenvall.DevOps.Api
                     return RepositoryProfileClassifier.Classify([], null, "No GitHub token or GitHub App installation token was available for repository profiling.");
                 }
 
-                var defaultBranch = string.IsNullOrWhiteSpace(branch) ? "main" : branch.Trim();
-                var paths = await GetRepositoryTreePathsAsync(owner, repo, defaultBranch, token, cancellationToken);
-                var contents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                if (paths.Any(path => path.Equals("package.json", StringComparison.OrdinalIgnoreCase)))
+                var defaultBranch = string.IsNullOrWhiteSpace(branch) ? await GetRepositoryDefaultBranchAsync(owner, repo, token, cancellationToken) ?? "main" : branch.Trim();
+                IReadOnlyList<string> paths;
+                try
                 {
-                    if (await GetRepositoryFileContentAsync(owner, repo, "package.json", defaultBranch, token, cancellationToken) is { } packageJson)
-                    {
-                        contents["package.json"] = packageJson;
-                    }
+                    paths = await GetRepositoryTreePathsAsync(owner, repo, defaultBranch, token, cancellationToken);
+                }
+                catch (HttpRequestException) when (!string.IsNullOrWhiteSpace(branch))
+                {
+                    defaultBranch = await GetRepositoryDefaultBranchAsync(owner, repo, token, cancellationToken) ?? defaultBranch;
+                    paths = await GetRepositoryTreePathsAsync(owner, repo, defaultBranch, token, cancellationToken);
                 }
 
-                foreach (var path in paths.Where(IsProfileRelevantYaml).Take(3))
+                var contents = await GetRepositoryProfileContentsAsync(owner, repo, defaultBranch, token, paths, cancellationToken);
+                var scannerProfile = RepositoryProfileClassifier.Classify(paths, contents);
+                if (!string.Equals(mode, "full", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (await GetRepositoryFileContentAsync(owner, repo, path, defaultBranch, token, cancellationToken) is { } yaml)
-                    {
-                        contents[path] = yaml;
-                    }
+                    return scannerProfile;
                 }
 
-                return RepositoryProfileClassifier.Classify(paths, contents);
+                if (await TryAnalyzeRepositoryProfileWithCodexAsync(owner, repo, defaultBranch, paths, contents, scannerProfile, cancellationToken) is { } aiProfile)
+                {
+                    return aiProfile;
+                }
+
+                return scannerProfile;
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -3248,6 +3504,195 @@ namespace Rosenvall.DevOps.Api
             {
                 return RepositoryProfileClassifier.Classify([], null, $"GitHub repository profile response could not be parsed: {ex.Message}");
             }
+        }
+
+        private async Task<IReadOnlyDictionary<string, string>> GetRepositoryProfileContentsAsync(string owner, string repo, string branch, string token, IReadOnlyList<string> paths, CancellationToken cancellationToken)
+        {
+            var contents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var wanted = new List<string>();
+            foreach (var path in new[] { "README.md", "AGENTS.md", "package.json", "Packages/manifest.json" })
+            {
+                if (paths.Any(entry => entry.Equals(path, StringComparison.OrdinalIgnoreCase)))
+                {
+                    wanted.Add(path);
+                }
+            }
+
+            wanted.AddRange(paths.Where(path => path.StartsWith(".codex/skills/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/SKILL.md", StringComparison.OrdinalIgnoreCase)).Take(6));
+            wanted.AddRange(paths.Where(IsProfileRelevantYaml).Take(10));
+            wanted.AddRange(paths.Where(path => path.StartsWith("tofu/", StringComparison.OrdinalIgnoreCase) && path.EndsWith(".tf", StringComparison.OrdinalIgnoreCase)).Take(4));
+            foreach (var path in wanted.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (await GetRepositoryFileContentAsync(owner, repo, path, branch, token, cancellationToken) is { } content)
+                {
+                    contents[path] = content.Length > 12000 ? content[..12000] : content;
+                }
+            }
+
+            return contents;
+        }
+
+        private async Task<RepositoryProfileDto?> TryAnalyzeRepositoryProfileWithCodexAsync(string owner, string repo, string branch, IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents, RepositoryProfileDto scannerProfile, CancellationToken cancellationToken)
+        {
+            var codexPath = CodexExecutableResolver.Resolve(configuration["Ai:Codex:Path"] ?? "codex");
+            var model = NormalizeTextValue(configuration["Ai:Codex:Model"], "gpt-5.5");
+            var timeout = TimeSpan.FromSeconds(Math.Clamp(configuration.GetValue("Ai:Codex:ProfileTimeoutSeconds", 25), 5, 90));
+            var outputPath = Path.Combine(Path.GetTempPath(), $"rosenvall-codex-repository-profile-{Guid.NewGuid():N}.json");
+            try
+            {
+                using var process = new Process
+                {
+                    StartInfo = BuildCodexProfileStartInfo(codexPath, model, outputPath),
+                    EnableRaisingEvents = true
+                };
+                if (!process.Start())
+                {
+                    return null;
+                }
+
+                var stdOut = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var stdErr = process.StandardError.ReadToEndAsync(cancellationToken);
+                await process.StandardInput.WriteAsync(BuildRepositoryProfilePrompt(owner, repo, branch, paths, contents, scannerProfile).AsMemory(), cancellationToken);
+                process.StandardInput.Close();
+
+                using var timeoutCancellation = new CancellationTokenSource(timeout);
+                using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
+                try
+                {
+                    await process.WaitForExitAsync(linkedCancellation.Token);
+                }
+                catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    TryKill(process);
+                    return null;
+                }
+
+                var output = await stdOut;
+                var error = await stdErr;
+                if (process.ExitCode != 0)
+                {
+                    return scannerProfile with
+                    {
+                        Signals = scannerProfile.Signals.Concat([$"Codex profile analysis failed: {FirstUsefulLine(error, output)}"]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+                    };
+                }
+
+                var json = File.Exists(outputPath) ? await File.ReadAllTextAsync(outputPath, cancellationToken) : output;
+                return string.IsNullOrWhiteSpace(json) ? null : RepositoryProfileAiParser.Apply(scannerProfile, json, model);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(outputPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup for transient Codex output.
+                }
+            }
+        }
+
+        private ProcessStartInfo BuildCodexProfileStartInfo(string codexPath, string model, string outputPath)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = codexPath,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardInputEncoding = Encoding.UTF8,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("exec");
+            startInfo.ArgumentList.Add("--ephemeral");
+            startInfo.ArgumentList.Add("--ignore-user-config");
+            startInfo.ArgumentList.Add("--ignore-rules");
+            startInfo.ArgumentList.Add("--skip-git-repo-check");
+            startInfo.ArgumentList.Add("--sandbox");
+            startInfo.ArgumentList.Add("read-only");
+            startInfo.ArgumentList.Add("--output-last-message");
+            startInfo.ArgumentList.Add(outputPath);
+            startInfo.ArgumentList.Add("-m");
+            startInfo.ArgumentList.Add(model);
+            CodexCliArguments.AddReasoningEffort(startInfo, configuration["Ai:Codex:ReasoningEffort"] ?? "high");
+            startInfo.ArgumentList.Add("-");
+            var codexHome = configuration["Ai:Codex:Home"];
+            if (!string.IsNullOrWhiteSpace(codexHome))
+            {
+                startInfo.Environment["CODEX_HOME"] = codexHome.Trim();
+            }
+
+            return startInfo;
+        }
+
+        private static string BuildRepositoryProfilePrompt(string owner, string repo, string branch, IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> contents, RepositoryProfileDto scannerProfile)
+        {
+            var tree = string.Join('\n', paths.Take(600));
+            var selectedFiles = string.Join("\n\n", contents.Select(entry => $"--- {entry.Key} ---\n{entry.Value}"));
+            return $$"""
+              You are Rosenvall DevOps repository profiler. Return strict JSON only, no Markdown.
+
+              Repository: {{owner}}/{{repo}}
+              Default branch: {{branch}}
+              Scanner profile JSON:
+              {{JsonSerializer.Serialize(scannerProfile)}}
+
+              Repository tree sample:
+              {{tree}}
+
+              Selected file contents:
+              {{selectedFiles}}
+
+              JSON schema:
+              {
+                "implementationProfile": "gitops-homelab|unity|react-preview|code-repo",
+                "displayName": "short readable name",
+                "confidence": 0.0,
+                "capabilityTags": ["kubernetes", "argocd"],
+                "enabledSkills": ["skill-name"],
+                "instructions": "board-level implementation guidance",
+                "signals": ["concrete evidence"],
+                "skillDrafts": [
+                  { "name": "skill-name", "description": "what it is for", "content": "editable repository-specific skill guidance", "enabled": true }
+                ]
+              }
+
+              Rules:
+              - Prefer scanner evidence when uncertain.
+              - Rosenvalls-Homelab style repos with kubernetes/, ApplicationSet, tofu/, Talos, Proxmox/OpenTofu, ExternalSecrets, Gateway API, Cilium, Longhorn, CloudNativePG, or .codex/skills are gitops-homelab.
+              - Do not propose global skill installation or file creation. Return editable drafts only.
+              """;
+        }
+
+        private static void TryKill(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // Best-effort timeout cleanup.
+            }
+        }
+
+        private static string FirstUsefulLine(string error, string output)
+        {
+            var line = (error + "\n" + output)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault();
+            return string.IsNullOrWhiteSpace(line) ? "unknown Codex CLI error." : line;
         }
 
         public async Task<string?> CreateInstallationTokenAsync(long installationId, CancellationToken cancellationToken)
@@ -3313,6 +3758,23 @@ namespace Rosenvall.DevOps.Api
                 .ToArray();
         }
 
+        private async Task<string?> GetRepositoryDefaultBranchAsync(string owner, string repo, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}";
+            using var request = CreateGitHubRequest(HttpMethod.Get, url, token);
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var defaultBranch = GetString(document.RootElement, "default_branch");
+            return string.IsNullOrWhiteSpace(defaultBranch) ? null : defaultBranch;
+        }
+
         private async Task<string?> GetRepositoryFileContentAsync(string owner, string repo, string path, string branch, string token, CancellationToken cancellationToken)
         {
             var escapedPath = string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));
@@ -3373,7 +3835,13 @@ namespace Rosenvall.DevOps.Api
             (path.Contains("argocd", StringComparison.OrdinalIgnoreCase) ||
              path.StartsWith("apps/", StringComparison.OrdinalIgnoreCase) ||
              path.StartsWith("clusters/", StringComparison.OrdinalIgnoreCase) ||
-             path.StartsWith("infrastructure/", StringComparison.OrdinalIgnoreCase));
+             path.StartsWith("infrastructure/", StringComparison.OrdinalIgnoreCase) ||
+             path.StartsWith("kubernetes/", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("cilium", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("longhorn", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("externalsecret", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("gateway", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("cloudnativepg", StringComparison.OrdinalIgnoreCase));
 
         private static string CreateAppJwt(string appId, string privateKey)
         {
@@ -4197,6 +4665,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<BoardAccessDtoRecord> _boardAccess = [];
         private readonly List<BoardTeamAccessRecord> _boardTeamAccess = [];
         private readonly List<BoardRepositoryLinkRecord> _boardRepositoryLinks = [];
+        private readonly List<BoardRepositoryProfileRecord> _boardRepositoryProfiles = [];
         private readonly List<GitHubIntegrationDto> _githubIntegrations = [];
         private readonly List<BoardSecretDto> _boardSecrets = [];
         private readonly List<AiSessionDto> _aiSessions = [];
@@ -4481,7 +4950,12 @@ namespace Rosenvall.DevOps.Api
                 _boards.Add(board);
                 if (repository is not null)
                 {
-                    UpsertBoardRepositoryLinkWithoutLock(board.Id, repository.Id, true, NormalizeImplementationProfile(request.ImplementationProfile ?? repository.ImplementationProfile));
+                    var implementationProfile = NormalizeImplementationProfile(request.RepositoryProfile?.ImplementationProfile ?? request.ImplementationProfile ?? repository.ImplementationProfile);
+                    UpsertBoardRepositoryLinkWithoutLock(board.Id, repository.Id, true, implementationProfile);
+                    if (request.RepositoryProfile is not null)
+                    {
+                        UpsertBoardRepositoryProfileWithoutLock(board.Id, repository.Id, request.RepositoryProfile with { ImplementationProfile = implementationProfile });
+                    }
                 }
                 var boardProfile = BoardImplementationProfile(board.Id);
                 if (request.GitOpsSettings is not null || string.Equals(boardProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase))
@@ -4537,6 +5011,33 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public BoardDto? UpsertBoardRepositoryProfile(Guid boardId, Guid repositoryId, RepositoryProfileDto profile)
+        {
+            lock (_lock)
+            {
+                var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+                var repository = _repositories.SingleOrDefault(entry => entry.Id == repositoryId);
+                var link = _boardRepositoryLinks.SingleOrDefault(entry => entry.BoardId == boardId && entry.RepositoryId == repositoryId);
+                if (board is null || repository is null || link is null)
+                {
+                    return null;
+                }
+
+                var normalized = RepositoryProfileAiParser.NormalizeRepositoryProfile(profile);
+                UpsertBoardRepositoryLinkWithoutLock(boardId, repositoryId, link.IsPrimary, normalized.ImplementationProfile);
+                UpsertBoardRepositoryProfileWithoutLock(boardId, repositoryId, normalized);
+                _boardAiContexts.RemoveAll(existing => existing.BoardId == boardId);
+                _boardAiContexts.Add(CreateAiContext(boardId, new BoardAiContextRequest(normalized.Instructions, normalized.EnabledSkills, true), defaultAskWhenUncertain: string.Equals(normalized.ImplementationProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase)));
+                if (string.Equals(normalized.ImplementationProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase) && _boardGitOpsSettings.All(settings => settings.BoardId != boardId))
+                {
+                    _boardGitOpsSettings.Add(CreateGitOpsSettings(boardId, null));
+                }
+
+                Persist();
+                return ToBoardDto(board);
+            }
+        }
+
         public bool UnlinkRepositoryFromBoard(Guid boardId, Guid repositoryId)
         {
             lock (_lock)
@@ -4548,6 +5049,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _boardRepositoryLinks.RemoveAll(link => link.BoardId == boardId && link.RepositoryId == repositoryId);
+                _boardRepositoryProfiles.RemoveAll(profile => profile.BoardId == boardId && profile.RepositoryId == repositoryId);
                 if (board.RepositoryId == repositoryId)
                 {
                     var nextPrimary = _boardRepositoryLinks.FirstOrDefault(link => link.BoardId == boardId);
@@ -6331,7 +6833,13 @@ namespace Rosenvall.DevOps.Api
             return links
                 .Select(link => (link, repository: _repositories.SingleOrDefault(repository => repository.Id == link.RepositoryId)))
                 .Where(entry => entry.repository is not null)
-                .Select(entry => new BoardRepositoryDto(entry.link.BoardId, entry.link.RepositoryId, entry.link.IsPrimary, entry.link.ImplementationProfile, entry.repository!))
+                .Select(entry => new BoardRepositoryDto(
+                    entry.link.BoardId,
+                    entry.link.RepositoryId,
+                    entry.link.IsPrimary,
+                    entry.link.ImplementationProfile,
+                    entry.repository!,
+                    _boardRepositoryProfiles.SingleOrDefault(profile => profile.BoardId == entry.link.BoardId && profile.RepositoryId == entry.link.RepositoryId)?.Profile))
                 .OrderByDescending(entry => entry.IsPrimary)
                 .ThenBy(entry => entry.Repository.Name)
                 .ToArray();
@@ -6353,6 +6861,13 @@ namespace Rosenvall.DevOps.Api
 
             _boardRepositoryLinks.RemoveAll(link => link.BoardId == boardId && link.RepositoryId == repositoryId);
             _boardRepositoryLinks.Add(new BoardRepositoryLinkRecord(boardId, repositoryId, isPrimary, NormalizeImplementationProfile(implementationProfile)));
+        }
+
+        private void UpsertBoardRepositoryProfileWithoutLock(Guid boardId, Guid repositoryId, RepositoryProfileDto profile)
+        {
+            var normalized = RepositoryProfileAiParser.NormalizeRepositoryProfile(profile);
+            _boardRepositoryProfiles.RemoveAll(existing => existing.BoardId == boardId && existing.RepositoryId == repositoryId);
+            _boardRepositoryProfiles.Add(new BoardRepositoryProfileRecord(boardId, repositoryId, normalized));
         }
 
         private void UpsertBoardTeamAccessWithoutLock(Guid boardId, Guid teamId, string role)
@@ -6867,6 +7382,7 @@ namespace Rosenvall.DevOps.Api
             _boardAccess.AddRange(snapshot.BoardAccess ?? []);
             _boardTeamAccess.AddRange(snapshot.BoardTeamAccess ?? []);
             _boardRepositoryLinks.AddRange(snapshot.BoardRepositoryLinks ?? []);
+            _boardRepositoryProfiles.AddRange(snapshot.BoardRepositoryProfiles ?? []);
             BackfillBoardTeamAccessWithoutLock();
             foreach (var board in _boards.Where(board => board.RepositoryId is not null && _boardRepositoryLinks.All(link => link.BoardId != board.Id)))
             {
@@ -6910,7 +7426,8 @@ namespace Rosenvall.DevOps.Api
                 _boardSecrets.ToArray(),
                 _aiSessions.ToArray(),
                 _boardGitOpsSettings.ToArray(),
-                _boardAiContexts.ToArray());
+                _boardAiContexts.ToArray(),
+                _boardRepositoryProfiles.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
 
             using var db = _dbFactory.CreateDbContext();
@@ -6966,7 +7483,8 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardAccessDtoRecord(Guid BoardId, Guid UserId, string Role);
     internal sealed record BoardTeamAccessRecord(Guid BoardId, Guid TeamId, string Role);
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null);
+    internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);
