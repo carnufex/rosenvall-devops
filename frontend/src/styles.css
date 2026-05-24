@@ -210,6 +210,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--focus); box-shad
 .plan-tab small { color: var(--muted); }
 .plan-tab.active { border-color: var(--focus); box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.12); }
 .plan-markdown { background: #090a0b; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.plan-question-panel { border: 1px solid rgba(245, 158, 11, 0.42); background: rgba(245, 158, 11, 0.06); border-radius: 8px; padding: 14px; display: grid; gap: 14px; }
+.plan-question-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.plan-question-head p { margin-top: 4px; color: var(--muted); }
+.question-stepper { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.question-step button { width: 100%; min-height: 44px; border: 1px solid var(--line); background: #101112; color: var(--muted-strong); border-radius: 8px; padding: 8px 10px; display: flex; align-items: center; gap: 8px; text-align: left; }
+.question-step span { width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 999px; display: grid; place-items: center; flex: 0 0 auto; font-size: 12px; font-weight: 800; }
+.question-step.active button { border-color: rgba(245, 158, 11, 0.62); background: rgba(245, 158, 11, 0.1); color: #fcd34d; }
+.question-step.done span { color: var(--secondary); border-color: rgba(45, 212, 191, 0.38); background: rgba(45, 212, 191, 0.08); }
+.question-answer-editor { border: 1px solid var(--line); background: #101112; border-radius: 8px; padding: 12px; display: grid; gap: 12px; }
+.question-answer-editor p { color: var(--muted-strong); line-height: 22px; }
+.question-step-actions { display: flex; gap: 8px; }
 .compact-plan-comment { padding: 14px; }
 .compact-plan-comment p { color: var(--muted-strong); margin-bottom: 8px; }
 .plan-reference { border: 1px solid rgba(103, 232, 249, 0.28); background: rgba(103, 232, 249, 0.06); color: var(--focus); border-radius: 8px; min-height: 38px; padding: 8px 12px; justify-content: flex-start; text-align: left; width: 100%; }

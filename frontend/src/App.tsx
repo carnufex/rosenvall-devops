@@ -1,6 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
+import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
   Activity,
   Bot,
@@ -1692,6 +1693,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
   const previewRunning = detail.preview?.status === 'Running';
   const previewHasGeneratedSource = (detail.preview?.sourceFiles?.length ?? 0) > 0;
+  const planQuestions = React.useMemo(() => selectedPlan?.plan ? extractPlanQuestions(selectedPlan.plan) : [], [selectedPlan?.plan]);
   const canImplementSelected = !!selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && (
     isRepositoryImplementation
       ? repositoryCanRunImplementation && gitOpsSettingsReady && !pendingRun && !hasReadyPullRequest
@@ -1735,6 +1737,13 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
                   {boardRepositories.map((entry) => <option key={entry.repositoryId} value={entry.repositoryId}>{repositoryLabel(entry.repository)} {entry.isPrimary ? '(primary)' : ''} - {profileLabel(entry.implementationProfile)}</option>)}
                 </select></label>
               )}
+              {planQuestions.length > 0 && (
+                <PlanQuestionStepper
+                  busy={busy}
+                  questions={planQuestions}
+                  onSubmit={(answers) => actions.addCommentAndAskAi(detail.item.id, formatPlanQuestionAnswers(planQuestions, answers))}
+                />
+              )}
               <div className="plan-markdown"><CommentBody body={selectedPlan.plan} /></div>
             </>
           )
@@ -1746,6 +1755,86 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
         {selectedPlan?.status === 'NeedsInput' && <p className="plan-help">Add a comment with answers, then generate a revised AI plan.</p>}
         {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{isRepositoryImplementation ? !repositoryCanRunImplementation ? 'Custom URL boards are public clone-only in v1. Connect the repository through the GitHub App to run implementation jobs and create pull requests.' : !gitOpsSettingsReady ? 'GitOps settings are required before this repository can be implemented.' : 'Runs a Kubernetes job that clones the linked repository, asks Codex to make a focused code change, pushes a branch and opens a pull request.' : 'Uses Codex to generate React/Tailwind preview source from the approved plan and deploys it to Kubernetes.'}</p>}
         {aiRuns.some((run) => run.status === 'Discarded') && <p>Discarded plans are kept in history but hidden from approval.</p>}
+      </div>
+    </section>
+  );
+}
+
+function PlanQuestionStepper({ questions, busy, onSubmit }: {
+  questions: PlanQuestion[];
+  busy: boolean;
+  onSubmit: (answers: Record<string, string>) => Promise<void>;
+}) {
+  const [activeIndex, setActiveIndex] = React.useState(0);
+  const [answers, setAnswers] = React.useState<Record<string, string>>({});
+  const [customText, setCustomText] = React.useState<Record<string, string>>({});
+
+  React.useEffect(() => {
+    setActiveIndex(0);
+    setAnswers({});
+    setCustomText({});
+  }, [questions]);
+
+  const activeQuestion = questions[Math.min(activeIndex, questions.length - 1)];
+  const activeAnswer = activeQuestion ? answers[activeQuestion.id] ?? '' : '';
+  const customValue = activeQuestion ? customText[activeQuestion.id] ?? '' : '';
+  const answeredCount = questions.filter((question) => (answers[question.id] ?? '').trim()).length;
+  const canSubmit = answeredCount === questions.length && !busy;
+
+  const setAnswer = (question: PlanQuestion, value: string) => {
+    setAnswers((current) => ({ ...current, [question.id]: value }));
+  };
+
+  if (!activeQuestion) return null;
+
+  return (
+    <section className="plan-question-panel">
+      <div className="plan-question-head">
+        <div>
+          <strong>Blocking questions</strong>
+          <p>{answeredCount} of {questions.length} answered. Answers will be sent back as a comment and revised AI plan.</p>
+        </div>
+        <button className="primary-action compact" disabled={!canSubmit} onClick={() => void onSubmit(answers)} type="button"><Sparkles size={14} />Send answers</button>
+      </div>
+      <ol className="question-stepper" aria-label="Blocking questions">
+        {questions.map((question, index) => {
+          const answered = !!answers[question.id]?.trim();
+          const state = index === activeIndex ? 'active' : answered ? 'done' : 'pending';
+          return (
+            <li className={`question-step ${state}`} key={question.id}>
+              <button type="button" onClick={() => setActiveIndex(index)}>
+                <span>{answered ? <CheckCircle2 size={13} /> : index + 1}</span>
+                <strong>Question {index + 1}</strong>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+      <div className="question-answer-editor">
+        <p>{renderInlineMarkdown(activeQuestion.text)}</p>
+        <label>Answer<select value={activeAnswer && activeAnswer === customValue ? '__custom__' : activeQuestion.options.includes(activeAnswer) ? activeAnswer : activeAnswer ? '__custom__' : ''} onChange={(event) => {
+          const value = event.target.value;
+          if (value === '__custom__') {
+            setAnswer(activeQuestion, customValue);
+          } else {
+            setAnswer(activeQuestion, value);
+          }
+        }}>
+          <option value="">Choose answer...</option>
+          {activeQuestion.options.map((option) => <option value={option} key={option}>{option}</option>)}
+          <option value="__custom__">Custom answer</option>
+        </select></label>
+        {(!activeQuestion.options.includes(activeAnswer) || activeAnswer === customValue) && (
+          <label>Custom answer<input value={customValue} onChange={(event) => {
+            const value = event.target.value;
+            setCustomText((current) => ({ ...current, [activeQuestion.id]: value }));
+            setAnswer(activeQuestion, value);
+          }} placeholder="Write the answer for this question" /></label>
+        )}
+        <div className="question-step-actions">
+          <button className="secondary compact inline" disabled={activeIndex === 0} onClick={() => setActiveIndex((index) => Math.max(0, index - 1))} type="button">Previous</button>
+          <button className="secondary compact inline" disabled={activeIndex >= questions.length - 1} onClick={() => setActiveIndex((index) => Math.min(questions.length - 1, index + 1))} type="button">Next</button>
+        </div>
       </div>
     </section>
   );
