@@ -512,7 +512,7 @@ const emptyBoardForm: CreateBoardForm = {
   repositoryDefaultBranch: 'main',
   implementationProfile: 'code-repo',
   teamIds: [],
-  gitOpsAllowedPaths: 'apps/\nclusters/\ninfrastructure/',
+  gitOpsAllowedPaths: 'apps/\nclusters/\ninfrastructure/\nkubernetes/\ntofu/',
   argoNamespace: 'argocd',
   argoApplicationSelector: '',
   aiInstructions: '',
@@ -1991,12 +1991,9 @@ function PreviewHistoryPanel({ detail, aiRuns }: { detail: WorkItemDetail; aiRun
 
 function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; active: boolean }) {
   const [expanded, setExpanded] = React.useState(false);
-  const terminalRef = React.useRef<HTMLDivElement | null>(null);
-  React.useEffect(() => {
-    terminalRef.current?.scrollTo({ top: terminalRef.current.scrollHeight });
-  }, [lines.length]);
   const visibleLines = lines.slice(-160);
-  const terminalContent = <TerminalLog lines={visibleLines} terminalRef={terminalRef} />;
+  const resetKey = lines[0] ? `${lines[0].createdAt}-${lines[0].message}` : 'empty';
+  const terminalContent = <TerminalLog lines={visibleLines} resetKey={resetKey} />;
   return (
     <>
       <div className="preview-terminal">
@@ -2016,7 +2013,7 @@ function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; a
               <span>{lines.length} log lines</span>
               {active && <span className="terminal-live"><span className="spinner" />live</span>}
             </div>
-            <TerminalLog lines={lines} expanded />
+            <TerminalLog lines={lines} expanded resetKey={resetKey} />
           </div>
         </ModalFrame>
       )}
@@ -2024,9 +2021,31 @@ function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; a
   );
 }
 
-function TerminalLog({ lines, expanded = false, terminalRef }: { lines: PreviewTerminalLineDto[]; expanded?: boolean; terminalRef?: React.RefObject<HTMLDivElement | null> }) {
+function TerminalLog({ lines, expanded = false, resetKey }: { lines: PreviewTerminalLineDto[]; expanded?: boolean; resetKey: string }) {
+  const terminalRef = React.useRef<HTMLDivElement | null>(null);
+  const bottomRef = React.useRef<HTMLDivElement | null>(null);
+  const autoFollowRef = React.useRef(true);
+  const previousResetKey = React.useRef(resetKey);
+
+  React.useEffect(() => {
+    if (previousResetKey.current !== resetKey) {
+      autoFollowRef.current = true;
+      previousResetKey.current = resetKey;
+    }
+
+    if (autoFollowRef.current) {
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+    }
+  }, [lines.length, resetKey]);
+
+  const handleScroll = React.useCallback(() => {
+    const element = terminalRef.current;
+    if (!element) return;
+    autoFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 36;
+  }, []);
+
   return (
-    <div className={expanded ? 'terminal-body expanded' : 'terminal-body'} ref={terminalRef}>
+    <div className={expanded ? 'terminal-body expanded' : 'terminal-body'} ref={terminalRef} onScroll={handleScroll}>
       {lines.length === 0
         ? <p className="terminal-empty">Waiting for Codex output...</p>
         : lines.map((line, index) => (
@@ -2035,6 +2054,7 @@ function TerminalLog({ lines, expanded = false, terminalRef }: { lines: PreviewT
             <code><strong>{terminalStreamLabel(line.stream)}</strong>{line.message}</code>
           </div>
         ))}
+      <div className="terminal-bottom-sentinel" ref={bottomRef} aria-hidden="true" />
     </div>
   );
 }
@@ -3430,7 +3450,7 @@ function createBoardFormFromRepositoryProfile(board: Board, entry: BoardReposito
 function defaultGitOpsSettings(boardId: string): BoardGitOpsSettingsDto {
   return {
     boardId,
-    allowedPaths: ['apps/', 'clusters/', 'infrastructure/'],
+    allowedPaths: ['apps/', 'clusters/', 'infrastructure/', 'kubernetes/', 'tofu/'],
     argoNamespace: 'argocd',
     argoApplicationSelector: ''
   };

@@ -690,6 +690,17 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         return Results.NotFound();
     }
 
+    if (store.RenderPreviousImplementationRunCleanupManifest(workItemId, run.Id) is { } retryCleanupManifest)
+    {
+        var cleanup = await jobs.DeleteAsync(retryCleanupManifest, cancellationToken);
+        if (!cleanup.Succeeded)
+        {
+            var failed = store.UpdateImplementationRun(run.Id, "Failed", cleanup.Message, $"Retry cleanup failed: {cleanup.Message}");
+            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            return Results.Problem(failed?.FailureReason ?? cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
     await hub.Clients.All.SendAsync("implementationRunChanged", run);
     var githubSecretName = configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github";
     var repository = store.GetImplementationRunRepository(run.Id);
@@ -1742,6 +1753,9 @@ namespace Rosenvall.DevOps.Api
     {
         public Task<PreviewCleanupResult> ApplyAsync(string manifest, CancellationToken cancellationToken) =>
             RunKubectlAsync("apply -f -", manifest, cancellationToken);
+
+        public Task<PreviewCleanupResult> DeleteAsync(string manifest, CancellationToken cancellationToken) =>
+            RunKubectlAsync("delete -f - --ignore-not-found=true", manifest, cancellationToken);
 
         public Task<PreviewCleanupResult> GetOutputAsync(string command, CancellationToken cancellationToken) =>
             RunKubectlOutputAsync(command, cancellationToken);
@@ -6810,16 +6824,7 @@ namespace Rosenvall.DevOps.Api
                     documents.Add(previewManifest);
                 }
 
-                var cleanupContext = ToWorkItemDetailForCleanup(item);
-                foreach (var run in _implementationRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.CreatedAt))
-                {
-                    var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, cleanupContext);
-                    var tokenSecretName = RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(run);
-                    documents.Add(RenderDeleteStub("batch/v1", "Job", jobName, RepositoryImplementationJobManifestRenderer.Namespace));
-                    documents.Add(RenderDeleteStub("v1", "Secret", tokenSecretName, RepositoryImplementationJobManifestRenderer.Namespace));
-                    documents.Add(RenderDeleteStub("batch/v1", "Job", jobName, PipelineJobManifestRenderer.Namespace));
-                    documents.Add(RenderDeleteStub("v1", "Secret", tokenSecretName, PipelineJobManifestRenderer.Namespace));
-                }
+                documents.AddRange(RenderImplementationRunCleanupDocuments(item, _implementationRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.CreatedAt)));
 
                 foreach (var run in _pipelineRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.StartedAt))
                 {
@@ -6832,6 +6837,43 @@ namespace Rosenvall.DevOps.Api
 
                 return documents.Count == 0 ? null : string.Join("\n---\n", documents);
             }
+        }
+
+        public string? RenderPreviousImplementationRunCleanupManifest(Guid workItemId, Guid currentImplementationRunId)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                var currentRun = _implementationRuns.SingleOrDefault(run => run.Id == currentImplementationRunId && run.WorkItemId == workItemId);
+                if (item is null || currentRun is null)
+                {
+                    return null;
+                }
+
+                var documents = RenderImplementationRunCleanupDocuments(
+                    item,
+                    _implementationRuns
+                        .Where(run => run.WorkItemId == workItemId && run.CreatedAt < currentRun.CreatedAt)
+                        .OrderBy(run => run.CreatedAt));
+                return documents.Count == 0 ? null : string.Join("\n---\n", documents);
+            }
+        }
+
+        private IReadOnlyList<string> RenderImplementationRunCleanupDocuments(WorkItemRecord item, IEnumerable<ImplementationRunDto> runs)
+        {
+            var documents = new List<string>();
+            var cleanupContext = ToWorkItemDetailForCleanup(item);
+            foreach (var run in runs)
+            {
+                var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, cleanupContext);
+                var tokenSecretName = RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(run);
+                documents.Add(RenderDeleteStub("batch/v1", "Job", jobName, RepositoryImplementationJobManifestRenderer.Namespace));
+                documents.Add(RenderDeleteStub("v1", "Secret", tokenSecretName, RepositoryImplementationJobManifestRenderer.Namespace));
+                documents.Add(RenderDeleteStub("batch/v1", "Job", jobName, PipelineJobManifestRenderer.Namespace));
+                documents.Add(RenderDeleteStub("v1", "Secret", tokenSecretName, PipelineJobManifestRenderer.Namespace));
+            }
+
+            return documents;
         }
 
         private WorkItemDetailDto ToWorkItemDetailForCleanup(WorkItemRecord item) =>
@@ -7251,7 +7293,10 @@ namespace Rosenvall.DevOps.Api
             var configured = _boardGitOpsSettings.SingleOrDefault(settings => settings.BoardId == boardId);
             if (configured is not null)
             {
-                return configured;
+                return string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase) &&
+                    IsLegacyDefaultGitOpsPaths(configured.AllowedPaths)
+                    ? configured with { AllowedPaths = DefaultGitOpsAllowedPaths }
+                    : configured;
             }
 
             return string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase)
@@ -7272,8 +7317,15 @@ namespace Rosenvall.DevOps.Api
                 : null;
         }
 
+        private static readonly string[] LegacyDefaultGitOpsAllowedPaths = ["apps/", "clusters/", "infrastructure/"];
+        private static readonly string[] DefaultGitOpsAllowedPaths = ["apps/", "clusters/", "infrastructure/", "kubernetes/", "tofu/"];
+
         private static BoardGitOpsSettingsDto DefaultGitOpsSettings(Guid boardId) =>
-            new(boardId, ["apps/", "clusters/", "infrastructure/"], "argocd", "");
+            new(boardId, DefaultGitOpsAllowedPaths, "argocd", "");
+
+        private static bool IsLegacyDefaultGitOpsPaths(IReadOnlyList<string> paths) =>
+            paths.Count == LegacyDefaultGitOpsAllowedPaths.Length &&
+            paths.Zip(LegacyDefaultGitOpsAllowedPaths).All(pair => string.Equals(pair.First, pair.Second, StringComparison.OrdinalIgnoreCase));
 
         private static BoardAiContextDto DefaultAiContext(Guid boardId) =>
             new(boardId, "", [], true);

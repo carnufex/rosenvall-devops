@@ -275,6 +275,7 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .terminal-line.stderr code { color: #e5e7eb; }
 .terminal-line.system strong { color: #fcd34d; }
 .terminal-line code { color: #d1d5db; background: transparent; border: 0; padding: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.terminal-bottom-sentinel { height: 1px; }
 .terminal-modal-content { padding: 16px; display: grid; gap: 12px; }
 .terminal-modal-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 13px; }
 .split-stats { justify-content: space-between; }

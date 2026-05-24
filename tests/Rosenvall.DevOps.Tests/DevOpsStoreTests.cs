@@ -207,7 +207,7 @@ public sealed class DevOpsStoreTests
             null,
             ImplementationProfile: "gitops-homelab"))!;
 
-        Assert.Equal(["apps/", "clusters/", "infrastructure/"], board.GitOpsSettings!.AllowedPaths);
+        Assert.Equal(["apps/", "clusters/", "infrastructure/", "kubernetes/", "tofu/"], board.GitOpsSettings!.AllowedPaths);
         Assert.Equal("argocd", board.GitOpsSettings.ArgoNamespace);
         Assert.True(board.AiContext!.AskWhenUncertain);
 
@@ -222,6 +222,38 @@ public sealed class DevOpsStoreTests
         Assert.Equal(["kubernetes", "argocd", "gitops-homelab"], reopened.GetBoardAiContext(board.Id)!.EnabledSkills);
         Assert.Equal("argocd-prod", reopenedBoard.GitOpsSettings!.ArgoNamespace);
         Assert.Contains("argocd", reopenedBoard.AiContext!.EnabledSkills);
+    }
+
+    [Fact]
+    public void Legacy_gitops_default_paths_are_upgraded_without_overriding_custom_paths()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/rosenvall/rosenvalls-homelab.git", "main", "https://github.com/rosenvall/rosenvalls-homelab", "rosenvall", "gitops-homelab"));
+        var legacyBoard = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "legacy homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            GitOpsSettings: new BoardGitOpsSettingsRequest(["apps/", "clusters/", "infrastructure/"], "argocd", "")))!;
+        var customBoard = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "custom homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            GitOpsSettings: new BoardGitOpsSettingsRequest(["clusters/prod/"], "argocd", "")))!;
+
+        Assert.Equal(["apps/", "clusters/", "infrastructure/", "kubernetes/", "tofu/"], store.GetBoardGitOpsSettings(legacyBoard.Id)!.AllowedPaths);
+        Assert.Equal(["clusters/prod/"], store.GetBoardGitOpsSettings(customBoard.Id)!.AllowedPaths);
     }
 
     [Fact]
@@ -996,12 +1028,18 @@ public sealed class DevOpsStoreTests
         store.UpdateImplementationRun(failedAttempt.Id, "Failed", "RDO_FAILURE=Codex CLI failed", "Codex CLI failed");
         var retryAttempt = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
         var runs = store.GetImplementationRuns(item.Id);
+        var retryCleanup = store.RenderPreviousImplementationRunCleanupManifest(item.Id, retryAttempt.Id)!;
         var cleanup = store.RenderWorkItemCleanupManifest(item.Id)!;
 
         Assert.Equal(2, runs.Count);
         Assert.EndsWith("-retry-2", retryAttempt.Branch, StringComparison.Ordinal);
         Assert.Contains(runs, run => run.Id == failedAttempt.Id && run.Status == "Failed");
         Assert.Contains(runs, run => run.Id == retryAttempt.Id && run.Status == "Queued");
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(failedAttempt, store.GetWorkItemDetail(item.Id)!), retryCleanup);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(failedAttempt), retryCleanup);
+        Assert.DoesNotContain(RepositoryImplementationJobManifestRenderer.JobName(retryAttempt, store.GetWorkItemDetail(item.Id)!), retryCleanup);
+        Assert.DoesNotContain(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(retryAttempt), retryCleanup);
+        Assert.DoesNotContain("rosenvall-devops-codex-home", retryCleanup);
         Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(failedAttempt, store.GetWorkItemDetail(item.Id)!), cleanup);
         Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(retryAttempt, store.GetWorkItemDetail(item.Id)!), cleanup);
         Assert.Contains(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(failedAttempt), cleanup);
@@ -1156,6 +1194,36 @@ public sealed class DevOpsStoreTests
         Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
         Assert.Contains("Leave all file changes uncommitted in the current checkout; the runner owns commit, push, and pull request creation.", prompt);
         Assert.Contains("Do not open a pull request yourself.", prompt);
+    }
+
+    [Fact]
+    public void Implementation_manifest_uses_upgraded_gitops_paths_for_legacy_homelab_defaults()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/rosenvall/rosenvalls-homelab.git", "main", "https://github.com/rosenvall/rosenvalls-homelab", "rosenvall", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            GitOpsSettings: new BoardGitOpsSettingsRequest(["apps/", "clusters/", "infrastructure/"], "argocd", "")))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add Kubernetes app", "Add kubernetes/applications/test.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Add kubernetes/applications/test.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var manifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build())!;
+        var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_PROMPT_B64");
+        var allowedPaths = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_ALLOWED_PATHS_B64");
+
+        Assert.Contains("Allowed GitOps paths: apps/, clusters/, infrastructure/, kubernetes/, tofu/", prompt);
+        Assert.Contains("kubernetes/", allowedPaths);
+        Assert.Contains("tofu/", allowedPaths);
     }
 
     [Fact]
