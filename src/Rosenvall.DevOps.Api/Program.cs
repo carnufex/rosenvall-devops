@@ -3318,6 +3318,7 @@ namespace Rosenvall.DevOps.Api
                 builder.AppendLine($"ArgoCD namespace: {board.GitOpsSettings.ArgoNamespace}");
                 builder.AppendLine($"ArgoCD Application selector: {EmptyAsNone(board.GitOpsSettings.ArgoApplicationSelector)}");
                 builder.AppendLine("GitOps mode is PR-first: generate a plan for repository changes only; do not directly apply Kubernetes manifests.");
+                AppendApplicationSetAppRule(builder, board);
             }
 
             return builder.ToString().TrimEnd();
@@ -3347,6 +3348,7 @@ namespace Rosenvall.DevOps.Api
                 builder.AppendLine($"ArgoCD namespace: {board.GitOpsSettings.ArgoNamespace}");
                 builder.AppendLine($"ArgoCD Application selector: {EmptyAsNone(board.GitOpsSettings.ArgoApplicationSelector)}");
                 builder.AppendLine("PR-first rule: edit the repository, push a branch, and open a pull request. Do not run kubectl apply, auto-merge, or mutate the cluster directly.");
+                AppendApplicationSetAppRule(builder, board);
             }
 
             return builder.ToString().TrimEnd();
@@ -3391,6 +3393,22 @@ namespace Rosenvall.DevOps.Api
                 builder.AppendLine($"- {draft.Name}: {EmptyAsNone(draft.Description)}");
                 builder.AppendLine(TrimSkillContent(draft.Content));
             }
+        }
+
+        private static void AppendApplicationSetAppRule(StringBuilder builder, BoardPlanningContextDto board)
+        {
+            var isGitOpsHomelab = string.Equals(board.RepositoryProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(board.RepositoryProfileDraft?.ImplementationProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase);
+            var usesApplicationSetApps = board.GitOpsSettings?.AllowedPaths.Any(path => path.StartsWith("kubernetes/applications", StringComparison.OrdinalIgnoreCase)) == true ||
+                board.RepositoryProfileDraft?.Signals.Any(signal => signal.Contains("kubernetes/applications/application-set.yaml", StringComparison.OrdinalIgnoreCase) || signal.Contains("ApplicationSet", StringComparison.OrdinalIgnoreCase)) == true ||
+                board.RepositoryProfileDraft?.CapabilityTags?.Any(tag => tag.Equals("application-set", StringComparison.OrdinalIgnoreCase)) == true;
+            if (!isGitOpsHomelab || !usesApplicationSetApps)
+            {
+                return;
+            }
+
+            builder.AppendLine("New ApplicationSet app rule: when adding a new app under kubernetes/applications/<app-name>/, also ensure kubernetes/applications/project.yaml allows destination namespace <app-name> in AppProject/applications.");
+            builder.AppendLine("Validation must include kubectl kustomize kubernetes/applications/<app-name> and a check that project.yaml contains namespace: <app-name>.");
         }
 
         private static string TrimSkillContent(string content)

@@ -1140,6 +1140,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("Enabled repo skill drafts:", prompt);
         Assert.Contains("gitops-app-onboarding", prompt);
         Assert.Contains("Use kubernetes/applications/<app-name>/ and namespace <app-name>", prompt);
+        Assert.Contains("AppProject", prompt);
+        Assert.Contains("destination namespace", prompt);
         Assert.Contains("cloudflare-gateway-routing", prompt);
         Assert.Contains("HTTPRoute/Gateway API", prompt);
         Assert.Contains("Return blocking questions only for facts that cannot be answered by that context", prompt);
@@ -1194,6 +1196,38 @@ public sealed class DevOpsStoreTests
         Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
         Assert.Contains("Leave all file changes uncommitted in the current checkout; the runner owns commit, push, and pull request creation.", prompt);
         Assert.Contains("Do not open a pull request yourself.", prompt);
+    }
+
+    [Fact]
+    public void Gitops_homelab_implementation_prompt_requires_appproject_destination_for_new_application_namespaces()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest(
+            "Homelab",
+            repository.Id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ImplementationProfile: "gitops-homelab",
+            GitOpsSettings: new BoardGitOpsSettingsRequest(["kubernetes/applications/", "tofu/"], "argocd", ""),
+            AiContext: new BoardAiContextRequest("Use ApplicationSet conventions.", ["argocd", "gitops-app-onboarding"], true)))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add demo app", "Create a new app namespace called demo.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Add kubernetes/applications/demo.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var manifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build())!;
+        var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_PROMPT_B64");
+
+        Assert.Contains("New ApplicationSet app rule", prompt);
+        Assert.Contains("kubernetes/applications/<app-name>/", prompt);
+        Assert.Contains("kubernetes/applications/project.yaml", prompt);
+        Assert.Contains("destination namespace <app-name>", prompt);
+        Assert.Contains("kubectl kustomize kubernetes/applications/<app-name>", prompt);
     }
 
     [Fact]
