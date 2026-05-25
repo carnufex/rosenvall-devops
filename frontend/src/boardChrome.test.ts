@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, filterTimelineFlowRows, timelineLaneForKind } from './boardChrome.ts';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -71,4 +71,11 @@ test('timeline flow search matches topic, task key and node text', () => {
   assert.equal(filterTimelineFlowRows(rows, 'test project').length, 1);
   assert.equal(filterTimelineFlowRows(rows, '4826')[0].taskKey, 'TASK-4826');
   assert.equal(filterTimelineFlowRows(rows, 'cleanup pull')[0].taskKey, 'TASK-4826');
+});
+
+test('contained wheel scroll clamps inside flow list bounds', () => {
+  assert.equal(containedWheelScrollTop(100, 40, 240), 140);
+  assert.equal(containedWheelScrollTop(230, 40, 240), 240);
+  assert.equal(containedWheelScrollTop(10, -40, 240), 0);
+  assert.equal(containedWheelScrollTop(10, 40, 0), 10);
 });

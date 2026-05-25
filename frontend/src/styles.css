@@ -378,8 +378,8 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .timeline-flow-toolbar span { color: var(--muted); font-size: 12px; font-weight: 700; }
 .timeline-flow-search { width: min(320px, 42vw); height: 34px; border: 1px solid var(--line); background: #0f1011; color: var(--muted); border-radius: 8px; display: flex; align-items: center; gap: 8px; padding: 0 10px; }
 .timeline-flow-search input { width: 100%; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; color: var(--text); padding: 0; font-size: 13px; }
-.timeline-flow-scroll { overflow-x: auto; }
-.timeline-flow-body { max-height: 310px; overflow-y: auto; min-width: 840px; }
+.timeline-flow-scroll { overflow-x: auto; overscroll-behavior: contain; }
+.timeline-flow-body { max-height: 310px; overflow-y: auto; min-width: 840px; overscroll-behavior: contain; }
 .timeline-flow-head, .timeline-flow-row { min-width: 840px; display: grid; grid-template-columns: 180px repeat(5, minmax(112px, 1fr)); gap: 8px; align-items: center; }
 .timeline-flow-head { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; padding: 0 4px 10px; }
 .timeline-flow-row { position: relative; min-height: 62px; border-top: 1px solid rgba(48, 50, 54, 0.72); }

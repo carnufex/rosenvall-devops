@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, filterTimelineFlowRows, timelineLanes, type TimelineLane } from './boardChrome';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, timelineLanes, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -1664,9 +1664,19 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
 }) {
   const rows = buildTimelineFlow(events);
   const [query, setQuery] = React.useState('');
+  const bodyRef = React.useRef<HTMLDivElement | null>(null);
   const visibleRows = filterTimelineFlowRows(rows, query);
+  const handleWheel = (event: React.WheelEvent<HTMLElement>) => {
+    if (event.deltaY === 0) return;
+    const body = bodyRef.current;
+    if (!body) return;
+    const maxScrollTop = body.scrollHeight - body.clientHeight;
+    if (maxScrollTop <= 0) return;
+    event.preventDefault();
+    body.scrollTop = containedWheelScrollTop(body.scrollTop, event.deltaY, maxScrollTop);
+  };
   return (
-    <section className="panel timeline-flow-panel" aria-label="Timeline flow graph">
+    <section className="panel timeline-flow-panel" aria-label="Timeline flow graph" onWheel={handleWheel}>
       <div className="timeline-flow-toolbar">
         <div>
           <strong>Flow</strong>
@@ -1682,7 +1692,7 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
           <div />
           {timelineLanes.map((lane) => <span key={lane}>{lane}</span>)}
         </div>
-        <div className="timeline-flow-body">
+        <div className="timeline-flow-body" ref={bodyRef}>
           {rows.length > 0 && visibleRows.length === 0 && <EmptyState>No matching flow rows.</EmptyState>}
           {visibleRows.map((row) => (
             <div className="timeline-flow-row" key={row.id}>

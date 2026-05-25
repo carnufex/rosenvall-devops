@@ -97,6 +97,11 @@ export function filterTimelineFlowRows(rows: TimelineFlowRow[], query: string): 
   });
 }
 
+export function containedWheelScrollTop(currentScrollTop: number, deltaY: number, maxScrollTop: number): number {
+  if (maxScrollTop <= 0) return currentScrollTop;
+  return Math.min(Math.max(currentScrollTop + deltaY, 0), maxScrollTop);
+}
+
 function taskKeyFromTimelineEvent(event: TimelineChromeEvent): string | null {
   return /\bTASK-\d+\b/i.exec(`${event.title} ${event.message ?? ''}`)?.[0].toUpperCase() ?? null;
 }
