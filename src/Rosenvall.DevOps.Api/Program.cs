@@ -7452,13 +7452,16 @@ namespace Rosenvall.DevOps.Api
                         .ToArray();
                 var pullRequestUrl = FirstMarkerValue(logs, "RDO_PULL_REQUEST_URL=") ?? existing.PullRequestUrl;
                 var commitSha = FirstMarkerValue(logs, "RDO_COMMIT=") ?? existing.CommitSha;
+                var sanitizedFailureReason = string.IsNullOrWhiteSpace(failureReason)
+                    ? existing.FailureReason
+                    : RedactTerminalMessage(failureReason);
                 var updated = existing with
                 {
                     Status = NormalizeText(status, existing.Status),
                     UpdatedAt = DateTimeOffset.UtcNow,
                     PullRequestUrl = string.IsNullOrWhiteSpace(pullRequestUrl) ? existing.PullRequestUrl : pullRequestUrl,
                     CommitSha = string.IsNullOrWhiteSpace(commitSha) ? existing.CommitSha : commitSha,
-                    FailureReason = string.IsNullOrWhiteSpace(failureReason) ? existing.FailureReason : failureReason,
+                    FailureReason = sanitizedFailureReason,
                     TerminalLines = lines
                 };
                 _implementationRuns[index] = updated;
@@ -7640,13 +7643,16 @@ namespace Rosenvall.DevOps.Api
                         .ToArray();
                 var pullRequestUrl = FirstMarkerValue(logs, "RDO_CLEANUP_PULL_REQUEST_URL=") ?? existing.CleanupPullRequestUrl;
                 var commitSha = FirstMarkerValue(logs, "RDO_COMMIT=") ?? existing.CommitSha;
+                var sanitizedFailureReason = string.IsNullOrWhiteSpace(failureReason)
+                    ? existing.FailureReason
+                    : RedactTerminalMessage(failureReason);
                 var updated = existing with
                 {
                     Status = NormalizeText(status, existing.Status),
                     UpdatedAt = DateTimeOffset.UtcNow,
                     CleanupPullRequestUrl = string.IsNullOrWhiteSpace(pullRequestUrl) ? existing.CleanupPullRequestUrl : pullRequestUrl,
                     CommitSha = string.IsNullOrWhiteSpace(commitSha) ? existing.CommitSha : commitSha,
-                    FailureReason = string.IsNullOrWhiteSpace(failureReason) ? existing.FailureReason : failureReason,
+                    FailureReason = sanitizedFailureReason,
                     TerminalLines = lines
                 };
                 _repositoryCleanupRuns[index] = updated;
@@ -7685,11 +7691,14 @@ namespace Rosenvall.DevOps.Api
                 var existing = _repositoryCleanupRuns[index];
                 var message = "Cleanup job produced no runner output before timeout.";
                 var now = DateTimeOffset.UtcNow;
+                var sanitizedEventSummary = string.IsNullOrWhiteSpace(eventSummary)
+                    ? null
+                    : RedactTerminalMessage(eventSummary);
                 var lines = (existing.TerminalLines ?? [])
                     .Concat([
                         new PreviewTerminalLineDto(now, "system", message),
                         new PreviewTerminalLineDto(now, "system", $"Job: {jobName}. Pod: {podName ?? "unknown"}. Condition: {condition ?? "unknown"}."),
-                        new PreviewTerminalLineDto(now, "system", $"Last event: {eventSummary ?? "No Kubernetes event summary was available."}")
+                        new PreviewTerminalLineDto(now, "system", $"Last event: {sanitizedEventSummary ?? "No Kubernetes event summary was available."}")
                     ])
                     .TakeLast(200)
                     .ToArray();
@@ -7702,7 +7711,7 @@ namespace Rosenvall.DevOps.Api
                     JobName = jobName,
                     PodName = podName,
                     LastCondition = condition,
-                    LastEventSummary = eventSummary
+                    LastEventSummary = sanitizedEventSummary
                 };
                 _repositoryCleanupRuns[index] = updated;
 
@@ -8474,25 +8483,34 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _previews.Remove(preview);
+                var sanitizedMessage = string.IsNullOrWhiteSpace(health.Message)
+                    ? health.Message
+                    : RedactTerminalMessage(health.Message);
+                var sanitizedFailureReason = string.IsNullOrWhiteSpace(health.FailureReason)
+                    ? health.FailureReason
+                    : RedactTerminalMessage(health.FailureReason);
+                var sanitizedFailureLog = string.IsNullOrWhiteSpace(health.FailureLog)
+                    ? health.FailureLog
+                    : RedactTerminalMessage(health.FailureLog);
                 var updated = preview with
                 {
                     Status = health.Status,
                     Phase = health.Phase,
-                    Message = health.Message,
+                    Message = sanitizedMessage,
                     LastCheckedAt = DateTimeOffset.UtcNow,
                     PodName = health.PodName,
-                    FailureReason = health.FailureReason,
-                    FailureLog = health.FailureLog,
+                    FailureReason = sanitizedFailureReason,
+                    FailureLog = sanitizedFailureLog,
                     ExpiresAt = string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase) ? DateTimeOffset.UtcNow.AddDays(7) : preview.ExpiresAt
                 };
                 _previews.Add(updated);
                 if (string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase))
                 {
-                    AddPreviewEvent(item, updated, "Started", "health-check", health.Message);
+                    AddPreviewEvent(item, updated, "Started", "health-check", sanitizedMessage);
                 }
                 else if (string.Equals(health.Status, "Failed", StringComparison.OrdinalIgnoreCase))
                 {
-                    AddPreviewEvent(item, updated, "HealthFailed", "health-check", health.Message);
+                    AddPreviewEvent(item, updated, "HealthFailed", "health-check", sanitizedMessage);
                 }
                 Persist();
                 return GetWorkItemDetail(workItemId);
@@ -8548,22 +8566,23 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _previews.Remove(preview);
+                var sanitizedMessage = RedactTerminalMessage(message);
                 var terminalLines = (preview.TerminalLines ?? [])
-                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", message)])
+                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", sanitizedMessage)])
                     .TakeLast(200)
                     .ToArray();
                 var failed = preview with
                 {
                     Status = "Failed",
                     Phase = "Failed",
-                    Message = message,
+                    Message = sanitizedMessage,
                     LastCheckedAt = DateTimeOffset.UtcNow,
                     FailureReason = eventType,
                     FailureLog = null,
                     TerminalLines = terminalLines
                 };
                 _previews.Add(failed);
-                AddPreviewEvent(item, failed, eventType, actor, message);
+                AddPreviewEvent(item, failed, eventType, actor, sanitizedMessage);
                 Persist();
             }
         }

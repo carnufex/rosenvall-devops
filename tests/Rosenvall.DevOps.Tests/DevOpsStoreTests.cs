@@ -2141,15 +2141,20 @@ public sealed class DevOpsStoreTests
             implementationRun.Id,
             "Failed",
             "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\nremote https://x-access-token:github_pat_abcdefghijklmnopqrstuvwxyz123456@github.com/rosenvall/secure-demo.git\nAuthorization: Bearer secret-token-value",
-            "failed")!;
+            "failed with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456")!;
         var updatedPreview = store.AppendPreviewTerminalLine(item.Id, "stderr", "CLOUDFLARE_API_TOKEN=abc123 PASSWORD=hunter2");
+        store.RecordPreviewFailure(item.Id, "ApplyFailed", "runner", "Authorization: Bearer preview-secret-token");
+        var failedPreview = store.GetWorkItemDetail(item.Id)!.Preview!;
 
+        Assert.DoesNotContain("ghp_", updatedRun.FailureReason);
         Assert.DoesNotContain(updatedRun.TerminalLines!, line => line.Message.Contains("ghp_", StringComparison.Ordinal) || line.Message.Contains("github_pat_", StringComparison.Ordinal) || line.Message.Contains("secret-token-value", StringComparison.Ordinal));
         Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("GITHUB_TOKEN=[redacted]", StringComparison.Ordinal));
         Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("x-access-token:[redacted]@github.com", StringComparison.Ordinal));
         Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("Authorization: Bearer [redacted]", StringComparison.Ordinal));
-        Assert.DoesNotContain(updatedPreview!.Preview!.TerminalLines!, line => line.Message.Contains("abc123", StringComparison.Ordinal) || line.Message.Contains("hunter2", StringComparison.Ordinal));
-        Assert.Contains(updatedPreview.Preview.TerminalLines!, line => line.Message.Contains("CLOUDFLARE_API_TOKEN=[redacted]", StringComparison.Ordinal));
+        Assert.DoesNotContain(failedPreview.TerminalLines!, line => line.Message.Contains("abc123", StringComparison.Ordinal) || line.Message.Contains("hunter2", StringComparison.Ordinal) || line.Message.Contains("preview-secret-token", StringComparison.Ordinal));
+        Assert.Contains(failedPreview.TerminalLines!, line => line.Message.Contains("CLOUDFLARE_API_TOKEN=[redacted]", StringComparison.Ordinal));
+        Assert.Contains(failedPreview.TerminalLines!, line => line.Message.Contains("Authorization: Bearer [redacted]", StringComparison.Ordinal));
+        Assert.DoesNotContain("preview-secret-token", failedPreview.Message);
     }
 
     [Fact]
