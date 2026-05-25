@@ -1818,6 +1818,7 @@ namespace Rosenvall.DevOps.Api
                                  auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${GITHUB_TOKEN}@github.com/#")"
                                  git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
                                  cd "$workspace/repo"
+                                  git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                   git config user.name "Rosenvall DevOps"
                                   git config user.email "devops@rosenvall.se"
                                   git switch -c "$ROSENVALL_BRANCH"
@@ -1826,7 +1827,11 @@ namespace Rosenvall.DevOps.Api
                                   printf '%s' "$ROSENVALL_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
                                   printf '%s' "$ROSENVALL_ALLOWED_PATHS_B64" | base64 -d > "$workspace/allowed-paths.txt"
                                   echo "RDO_STEP=Implementing"
+                                  github_token_for_runner="$GITHUB_TOKEN"
+                                  unset GITHUB_TOKEN
                                   {{codexCommand}}
+                                  GITHUB_TOKEN="$github_token_for_runner"
+                                  export GITHUB_TOKEN
                                   if [ -f package.json ]; then
                                     echo "RDO_STEP=Testing"
                                     if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
@@ -1870,6 +1875,7 @@ namespace Rosenvall.DevOps.Api
                                  commit="$(git rev-parse HEAD)"
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
+                                 git remote set-url origin "$auth_remote"
                                  git push --set-upstream origin "$ROSENVALL_BRANCH"
                                  repo_owner="${ROSENVALL_REPOSITORY%%/*}"
                                  existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
@@ -2166,6 +2172,7 @@ namespace Rosenvall.DevOps.Api
                                  auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${GITHUB_TOKEN}@github.com/#")"
                                  git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
                                  cd "$workspace/repo"
+                                 git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                  git config user.name "Rosenvall DevOps"
                                  git config user.email "devops@rosenvall.se"
                                  git switch -c "$ROSENVALL_BRANCH"
@@ -2173,7 +2180,11 @@ namespace Rosenvall.DevOps.Api
                                  printf '%s' "$ROSENVALL_SOURCE_PR_DIFF_B64" | base64 -d > "$workspace/source-pr.diff"
                                  printf '%s' "$ROSENVALL_ALLOWED_PATHS_B64" | base64 -d > "$workspace/allowed-paths.txt"
                                  echo "RDO_STEP=Implementing"
+                                 github_token_for_runner="$GITHUB_TOKEN"
+                                 unset GITHUB_TOKEN
                                  codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md"
+                                 GITHUB_TOKEN="$github_token_for_runner"
+                                 export GITHUB_TOKEN
                                  echo "RDO_STEP=Validating"
                                  git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/changed-files.txt"
                                  if [ ! -s "$workspace/changed-files.txt" ]; then echo "RDO_FAILURE=No cleanup changes produced"; exit 20; fi
@@ -2196,6 +2207,7 @@ namespace Rosenvall.DevOps.Api
                                  commit="$(git rev-parse HEAD)"
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
+                                 git remote set-url origin "$auth_remote"
                                  git push --set-upstream origin "$ROSENVALL_BRANCH"
                                  repo_owner="${ROSENVALL_REPOSITORY%%/*}"
                                  existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
@@ -7772,8 +7784,9 @@ namespace Rosenvall.DevOps.Api
                 var secret = string.IsNullOrWhiteSpace(githubSecretName)
                     ? configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github"
                     : githubSecretName.Trim();
+                var exposeBoardSecrets = configuration.GetValue("RepositoryRuns:ExposeBoardSecretsToCodex", false);
                 var item = _items.SingleOrDefault(entry => entry.Id == run.WorkItemId);
-                var boardSecrets = item is null
+                var boardSecrets = item is null || !exposeBoardSecrets
                     ? []
                     : _boardSecrets
                         .Where(boardSecret => boardSecret.BoardId == item.BoardId && (boardSecret.RepositoryId is null || boardSecret.RepositoryId == repository.Id))

@@ -818,6 +818,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("chown -R 1000:1000 /app/codex-home", manifest);
         Assert.Contains("chmod 600 /app/codex-home/auth.json", manifest);
         Assert.Contains("mountPath: /app/codex-home", manifest);
+        Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
+        Assert.Contains("unset GITHUB_TOKEN", manifest);
+        Assert.Contains("GITHUB_TOKEN=\"$github_token_for_runner\"", manifest);
+        Assert.Contains("git remote set-url origin \"$auth_remote\"", manifest);
         Assert.DoesNotContain("name: codex-home\n                             persistentVolumeClaim:", manifest);
         Assert.Contains("codex exec", manifest);
         Assert.Contains("codex exec --ephemeral", manifest);
@@ -1177,7 +1181,8 @@ public sealed class DevOpsStoreTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["GitHub:TokenSecretName"] = "rosenvall-devops-github",
-                ["Secrets:Namespace"] = "rosenvall-devops"
+                ["Secrets:Namespace"] = "rosenvall-devops",
+                ["RepositoryRuns:ExposeBoardSecretsToCodex"] = "true"
             })
             .Build();
 
@@ -1198,6 +1203,28 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_runner_does_not_expose_board_secrets_to_codex_by_default()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Gatebound", repository.Id, null, null, null, null, null))!;
+        var secret = store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("UNITY_LICENSE", "super-secret-license", repository.Id))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Add dash", "Implement dash in Unity.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Add a focused dash implementation.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var runnerManifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build())!;
+        var fetched = store.GetBoardSecret(board.Id, secret.Id);
+
+        Assert.DoesNotContain("UNITY_LICENSE", runnerManifest);
+        Assert.DoesNotContain(BoardSecretManifestRenderer.SecretName(secret), runnerManifest);
+        Assert.NotNull(fetched);
+        Assert.Null(fetched.LastUsedAt);
+    }
+
+    [Fact]
     public void Repository_runner_manifest_keeps_environment_entries_in_one_yaml_list()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -1210,7 +1237,14 @@ public sealed class DevOpsStoreTests
         var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Add apps/test.\n2. Use Gateway API.")!;
         var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
 
-        var manifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build())!;
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["RepositoryRuns:ExposeBoardSecretsToCodex"] = "true"
+            })
+            .Build();
+
+        var manifest = store.RenderImplementationRunManifest(implementationRun.Id, configuration)!;
 
         AssertImplementationManifestEnvListIsWellFormed(manifest);
         Assert.Contains("ROSENVALL_PROMPT_B64", manifest);
@@ -1496,6 +1530,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("kubernetes/applications/test/kustomization.yaml", sourceDiff);
         Assert.Contains("codex exec --ephemeral", manifest);
         Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
+        Assert.Contains("unset GITHUB_TOKEN", manifest);
+        Assert.Contains("GITHUB_TOKEN=\"$github_token_for_runner\"", manifest);
+        Assert.Contains("git remote set-url origin \"$auth_remote\"", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("activeDeadlineSeconds: 3600", manifest);
         Assert.Contains("ROSENVALL_SOURCE_PR_DIFF_B64", manifest);
