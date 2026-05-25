@@ -86,6 +86,17 @@ export function buildTimelineFlow(events: TimelineChromeEvent[]): TimelineFlowRo
   });
 }
 
+export function filterTimelineFlowRows(rows: TimelineFlowRow[], query: string): TimelineFlowRow[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return rows;
+
+  return rows.filter((row) => {
+    const rowText = `${row.topic} ${row.taskKey ?? ''}`.toLowerCase();
+    if (rowText.includes(normalized)) return true;
+    return row.nodes.some((node) => `${node.title} ${node.kind} ${node.message ?? ''}`.toLowerCase().includes(normalized));
+  });
+}
+
 function taskKeyFromTimelineEvent(event: TimelineChromeEvent): string | null {
   return /\bTASK-\d+\b/i.exec(`${event.title} ${event.message ?? ''}`)?.[0].toUpperCase() ?? null;
 }

@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, timelineLanes, type TimelineLane } from './boardChrome';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, filterTimelineFlowRows, timelineLanes, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -1663,39 +1663,56 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
   onSelect: (eventId: string) => void;
 }) {
   const rows = buildTimelineFlow(events);
+  const [query, setQuery] = React.useState('');
+  const visibleRows = filterTimelineFlowRows(rows, query);
   return (
     <section className="panel timeline-flow-panel" aria-label="Timeline flow graph">
-      <div className="timeline-flow-head">
-        <div />
-        {timelineLanes.map((lane) => <span key={lane}>{lane}</span>)}
+      <div className="timeline-flow-toolbar">
+        <div>
+          <strong>Flow</strong>
+          <span>{visibleRows.length} of {rows.length} tasks</span>
+        </div>
+        <label className="timeline-flow-search">
+          <Search size={15} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search topic or task id..." />
+        </label>
       </div>
-      {rows.length === 0 && <EmptyState>No flow events for this filter.</EmptyState>}
-      {rows.map((row) => (
-        <div className="timeline-flow-row" key={row.id}>
-          <div className="timeline-flow-title" title={row.taskKey ? `${row.topic} ${row.taskKey}` : row.topic}>
-            <strong>{row.topic}</strong>
-            {row.taskKey && <span>{row.taskKey}</span>}
-          </div>
-          <div className="timeline-flow-track">
-            {timelineLanes.map((lane) => (
-              <div className="timeline-flow-cell" key={lane}>
-                {row.nodes.filter((node) => node.lane === lane).map((node) => (
-                  <button
-                    className={`timeline-flow-node ${timelineFlowClass(node.lane, node.kind)} ${selectedEventId === node.id ? 'selected' : ''}`}
-                    key={node.id}
-                    onClick={() => onSelect(node.id)}
-                    type="button"
-                    title={`${node.kind}: ${node.title}`}
-                    aria-label={`${node.kind}: ${node.title}`}
-                  >
-                    {timelineFlowIcon(node.lane, node.kind)}
-                  </button>
+      <div className="timeline-flow-scroll">
+        <div className="timeline-flow-head">
+          <div />
+          {timelineLanes.map((lane) => <span key={lane}>{lane}</span>)}
+        </div>
+        <div className="timeline-flow-body">
+          {rows.length > 0 && visibleRows.length === 0 && <EmptyState>No matching flow rows.</EmptyState>}
+          {visibleRows.map((row) => (
+            <div className="timeline-flow-row" key={row.id}>
+              <div className="timeline-flow-title" title={row.taskKey ? `${row.topic} ${row.taskKey}` : row.topic}>
+                <strong>{row.topic}</strong>
+                {row.taskKey && <span>{row.taskKey}</span>}
+              </div>
+              <div className="timeline-flow-track">
+                {timelineLanes.map((lane) => (
+                  <div className="timeline-flow-cell" key={lane}>
+                    {row.nodes.filter((node) => node.lane === lane).map((node) => (
+                      <button
+                        className={`timeline-flow-node ${timelineFlowClass(node.lane, node.kind)} ${selectedEventId === node.id ? 'selected' : ''}`}
+                        key={node.id}
+                        onClick={() => onSelect(node.id)}
+                        type="button"
+                        title={`${node.kind}: ${node.title}`}
+                        aria-label={`${node.kind}: ${node.title}`}
+                      >
+                        {timelineFlowIcon(node.lane, node.kind)}
+                      </button>
+                    ))}
+                  </div>
                 ))}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
+          {rows.length === 0 && <EmptyState>No flow events for this filter.</EmptyState>}
         </div>
-      ))}
+      </div>
     </section>
   );
 }

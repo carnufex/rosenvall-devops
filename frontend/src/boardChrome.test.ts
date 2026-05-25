@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, timelineLaneForKind } from './boardChrome.ts';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, filterTimelineFlowRows, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -60,4 +60,15 @@ test('timeline flow row separates topic from task key when title only contains t
 
   assert.equal(rows[0].topic, 'test project');
   assert.equal(rows[0].taskKey, 'TASK-4824');
+});
+
+test('timeline flow search matches topic, task key and node text', () => {
+  const rows = buildTimelineFlow([
+    { id: '1', workItemId: 'task-4824', kind: 'CardCreated', title: 'TASK-4824', message: 'Created test project.', createdAt: '2026-05-25T10:00:00Z' },
+    { id: '2', workItemId: 'task-4826', kind: 'RepositoryCleanupMerged', title: 'TASK-4826', message: 'Adopted cleanup pull request is merged.', createdAt: '2026-05-25T10:01:00Z' }
+  ]);
+
+  assert.equal(filterTimelineFlowRows(rows, 'test project').length, 1);
+  assert.equal(filterTimelineFlowRows(rows, '4826')[0].taskKey, 'TASK-4826');
+  assert.equal(filterTimelineFlowRows(rows, 'cleanup pull')[0].taskKey, 'TASK-4826');
 });
