@@ -269,7 +269,7 @@ api.MapGet("/integrations/github/callback", async (long installation_id, string?
     var integration = store.CreateGitHubIntegration(installation ?? new GitHubIntegrationCallbackRequest(installation_id, account ?? $"installation-{installation_id}", "User", actor.Subject, Status: setup_action ?? "Installed"));
     return Results.Ok(integration);
 });
-api.MapGet("/integrations/github", async (DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+api.MapGet("/integrations/github", async (ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
     var installations = await github.GetAppInstallationsAsync(cancellationToken);
     if (installations.Count > 0)
@@ -277,9 +277,9 @@ api.MapGet("/integrations/github", async (DevOpsStore store, GitHubRepositoryCli
         store.UpsertGitHubIntegrations(installations);
     }
 
-    return Results.Ok(store.GetGitHubIntegrations());
+    return Results.Ok(store.GetGitHubIntegrations(AuthenticatedSubjectOrNull(user)));
 });
-api.MapPost("/integrations/github/sync", async (DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+api.MapPost("/integrations/github/sync", async (ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
     var installations = await github.GetAppInstallationsAsync(cancellationToken);
     if (installations.Count > 0)
@@ -287,18 +287,24 @@ api.MapPost("/integrations/github/sync", async (DevOpsStore store, GitHubReposit
         store.UpsertGitHubIntegrations(installations);
     }
 
-    return Results.Ok(store.GetGitHubIntegrations());
+    return Results.Ok(store.GetGitHubIntegrations(AuthenticatedSubjectOrNull(user)));
 });
-api.MapGet("/integrations/github/repositories", async (long? installationId, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+api.MapGet("/integrations/github/repositories", async (long? installationId, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
-    var resolvedInstallationId = installationId ?? store.GetDefaultGitHubInstallationId();
+    var actorSubject = AuthenticatedSubjectOrNull(user);
+    if (installationId is { } requestedInstallationId && !store.CanUseGitHubInstallation(requestedInstallationId, actorSubject))
+    {
+        return BoardReadForbidden();
+    }
+
+    var resolvedInstallationId = installationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
     if (resolvedInstallationId is null && github.IsAppConfigured())
     {
         var installations = await github.GetAppInstallationsAsync(cancellationToken);
         if (installations.Count > 0)
         {
             store.UpsertGitHubIntegrations(installations);
-            resolvedInstallationId = store.GetDefaultGitHubInstallationId();
+            resolvedInstallationId = store.GetDefaultGitHubInstallationId(actorSubject);
         }
     }
 
@@ -309,7 +315,7 @@ api.MapGet("/integrations/github/repositories", async (long? installationId, Dev
 
     return Results.Ok(await github.GetRepositoriesAsync(cancellationToken, resolvedInstallationId));
 });
-api.MapGet("/integrations/github/repository-picker", async (long? installationId, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+api.MapGet("/integrations/github/repository-picker", async (long? installationId, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
     if (!github.IsAppConfigured() && string.IsNullOrWhiteSpace(github.ConfiguredToken))
     {
@@ -319,14 +325,20 @@ api.MapGet("/integrations/github/repository-picker", async (long? installationId
             []));
     }
 
-    var resolvedInstallationId = installationId ?? store.GetDefaultGitHubInstallationId();
+    var actorSubject = AuthenticatedSubjectOrNull(user);
+    if (installationId is { } requestedInstallationId && !store.CanUseGitHubInstallation(requestedInstallationId, actorSubject))
+    {
+        return BoardReadForbidden();
+    }
+
+    var resolvedInstallationId = installationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
     if (resolvedInstallationId is null && github.IsAppConfigured())
     {
         var installations = await github.GetAppInstallationsAsync(cancellationToken);
         if (installations.Count > 0)
         {
             store.UpsertGitHubIntegrations(installations);
-            resolvedInstallationId = store.GetDefaultGitHubInstallationId();
+            resolvedInstallationId = store.GetDefaultGitHubInstallationId(actorSubject);
         }
     }
 
@@ -351,14 +363,20 @@ api.MapGet("/integrations/github/repository-picker", async (long? installationId
         result.Repositories,
         resolvedInstallationId));
 });
-api.MapGet("/integrations/github/repository-profile", async (string owner, string repo, string? branch, string? mode, long? installationId, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+api.MapGet("/integrations/github/repository-profile", async (string owner, string repo, string? branch, string? mode, long? installationId, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
     {
         return Results.BadRequest("Both owner and repo are required.");
     }
 
-    var result = await github.GetRepositoryProfileAsync(owner, repo, branch, cancellationToken, installationId, mode);
+    var actorSubject = AuthenticatedSubjectOrNull(user);
+    if (installationId is { } requestedInstallationId && !store.CanUseGitHubInstallation(requestedInstallationId, actorSubject))
+    {
+        return BoardReadForbidden();
+    }
+
+    var result = await github.GetRepositoryProfileAsync(owner, repo, branch, cancellationToken, installationId ?? store.GetDefaultGitHubInstallationId(actorSubject), mode);
     return result is null
         ? Results.Ok(RepositoryProfileClassifier.Classify([], null, $"Could not scan {owner}/{repo}; defaulted to code repo."))
         : Results.Ok(result);
@@ -6429,11 +6447,14 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<GitHubIntegrationDto> GetGitHubIntegrations()
+        public IReadOnlyList<GitHubIntegrationDto> GetGitHubIntegrations(string? actorSubject = null)
         {
             lock (_lock)
             {
-                return _githubIntegrations.OrderBy(integration => integration.AccountLogin).ToArray();
+                return _githubIntegrations
+                    .Where(integration => CanUseGitHubIntegrationWithoutLock(integration, actorSubject))
+                    .OrderBy(integration => integration.AccountLogin)
+                    .ToArray();
             }
         }
 
@@ -6456,11 +6477,12 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public long? GetDefaultGitHubInstallationId()
+        public long? GetDefaultGitHubInstallationId(string? actorSubject = null)
         {
             lock (_lock)
             {
                 return _githubIntegrations
+                    .Where(integration => CanUseGitHubIntegrationWithoutLock(integration, actorSubject))
                     .Where(integration => integration.Status.Equals("Installed", StringComparison.OrdinalIgnoreCase) ||
                         integration.Status.Equals("Active", StringComparison.OrdinalIgnoreCase) ||
                         integration.Status.Equals("install", StringComparison.OrdinalIgnoreCase))
@@ -6468,9 +6490,19 @@ namespace Rosenvall.DevOps.Api
                     .Select(integration => (long?)integration.InstallationId)
                     .FirstOrDefault() ??
                     _githubIntegrations
+                        .Where(integration => CanUseGitHubIntegrationWithoutLock(integration, actorSubject))
                         .OrderByDescending(integration => integration.CreatedAt)
                         .Select(integration => (long?)integration.InstallationId)
                         .FirstOrDefault();
+            }
+        }
+
+        public bool CanUseGitHubInstallation(long installationId, string? actorSubject)
+        {
+            lock (_lock)
+            {
+                var integration = _githubIntegrations.SingleOrDefault(entry => entry.InstallationId == installationId);
+                return integration is not null && CanUseGitHubIntegrationWithoutLock(integration, actorSubject);
             }
         }
 
@@ -8871,6 +8903,11 @@ namespace Rosenvall.DevOps.Api
 
             return repositoryIds;
         }
+
+        private static bool CanUseGitHubIntegrationWithoutLock(GitHubIntegrationDto integration, string? actorSubject) =>
+            string.IsNullOrWhiteSpace(actorSubject) ||
+            integration.InstalledBy.Equals(actorSubject, StringComparison.OrdinalIgnoreCase) ||
+            integration.InstalledBy.Equals("github-app", StringComparison.OrdinalIgnoreCase);
 
         private bool IsBoardStatus(Guid boardId, string status) =>
             _boards.SingleOrDefault(board => board.Id == boardId)?.Columns.Contains(status, StringComparer.OrdinalIgnoreCase) == true;

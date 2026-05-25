@@ -1683,6 +1683,25 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitHub_integrations_are_filtered_by_installer_when_requested()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(111, "crille", "User", "authentik|crille", 3));
+        fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(222, "guest", "User", "authentik|guest", 4));
+        fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(333, "shared", "Organization", "github-app", 5));
+
+        var crilleIntegrations = fixture.Store.GetGitHubIntegrations("authentik|crille");
+
+        Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 111);
+        Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 333);
+        Assert.DoesNotContain(crilleIntegrations, entry => entry.InstallationId == 222);
+        Assert.True(fixture.Store.CanUseGitHubInstallation(111, "authentik|crille"));
+        Assert.True(fixture.Store.CanUseGitHubInstallation(333, "authentik|crille"));
+        Assert.False(fixture.Store.CanUseGitHubInstallation(222, "authentik|crille"));
+        Assert.NotEqual(222, fixture.Store.GetDefaultGitHubInstallationId("authentik|crille"));
+    }
+
+    [Fact]
     public void GitHub_app_integration_is_selected_for_matching_repository_owner()
     {
         using var fixture = DevOpsStoreFixture.Create();
