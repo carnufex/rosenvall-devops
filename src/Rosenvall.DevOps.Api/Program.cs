@@ -171,14 +171,21 @@ api.MapPost("/workspaces", async (CreateWorkspaceRequest request, DevOpsStore st
     return Results.Created($"/api/workspaces/{workspace.Id}", workspace);
 });
 
-api.MapGet("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, DevOpsStore store) =>
-    store.GetBoards(workspaceId) is { Count: > 0 } boards ? Results.Ok(boards) : Results.NotFound());
+api.MapGet("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, ClaimsPrincipal user, DevOpsStore store) =>
+    store.GetBoards(workspaceId, AuthenticatedSubjectOrNull(user)) is { Count: > 0 } boards ? Results.Ok(boards) : Results.NotFound());
 
 api.MapPost("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, CreateBoardRequest request, ClaimsPrincipal user, DevOpsStore store) =>
     store.CreateBoard(workspaceId, request, UserIdentityFromClaims(user).Subject) is { } board ? Results.Created($"/api/boards/{board.Id}", board) : Results.NotFound());
 
-api.MapGet("/boards/{boardId:guid}", (Guid boardId, DevOpsStore store) =>
-    store.GetBoard(boardId) is { } board ? Results.Ok(board) : Results.NotFound());
+api.MapGet("/boards/{boardId:guid}", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewBoardRequest(store, boardId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return store.GetBoard(boardId) is { } board ? Results.Ok(board) : Results.NotFound();
+});
 
 api.MapPut("/boards/{boardId:guid}/gitops-settings", (Guid boardId, BoardGitOpsSettingsRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -200,11 +207,23 @@ api.MapPut("/boards/{boardId:guid}/ai-context", (Guid boardId, BoardAiContextReq
     return store.UpsertBoardAiContext(boardId, request) is { } context ? Results.Ok(context) : Results.NotFound();
 });
 
-api.MapGet("/boards/{boardId:guid}/timeline", (Guid boardId, DevOpsStore store) =>
-    store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetTimeline(boardId)));
-
-api.MapGet("/boards/{boardId:guid}/gitops/applications", async (Guid boardId, DevOpsStore store, GitOpsStatusReader reader, IConfiguration configuration, CancellationToken cancellationToken) =>
+api.MapGet("/boards/{boardId:guid}/timeline", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
 {
+    if (!CanViewBoardRequest(store, boardId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetTimeline(boardId));
+});
+
+api.MapGet("/boards/{boardId:guid}/gitops/applications", async (Guid boardId, ClaimsPrincipal user, DevOpsStore store, GitOpsStatusReader reader, IConfiguration configuration, CancellationToken cancellationToken) =>
+{
+    if (!CanViewBoardRequest(store, boardId, user))
+    {
+        return BoardReadForbidden();
+    }
+
     if (store.GetBoard(boardId) is null)
     {
         return Results.NotFound();
@@ -213,7 +232,7 @@ api.MapGet("/boards/{boardId:guid}/gitops/applications", async (Guid boardId, De
     return Results.Ok(await reader.ReadApplicationsAsync(store.GetBoardGitOpsSettings(boardId), configuration, cancellationToken));
 });
 
-api.MapGet("/repositories", (DevOpsStore store) => store.GetRepositories());
+api.MapGet("/repositories", (ClaimsPrincipal user, DevOpsStore store) => store.GetRepositories(AuthenticatedSubjectOrNull(user)));
 
 api.MapPost("/repositories", (CreateRepositoryRequest request, DevOpsStore store) =>
 {
@@ -436,8 +455,15 @@ api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid b
 
     return store.UnlinkRepositoryFromBoard(boardId, repositoryId) ? Results.NoContent() : Results.NotFound();
 });
-api.MapGet("/boards/{boardId:guid}/teams", (Guid boardId, DevOpsStore store) =>
-    store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetBoardTeamAccess(boardId)));
+api.MapGet("/boards/{boardId:guid}/teams", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewBoardRequest(store, boardId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetBoardTeamAccess(boardId));
+});
 api.MapPut("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid teamId, UpsertBoardTeamAccessRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanMutateBoardRequest(store, boardId, user))
@@ -456,7 +482,15 @@ api.MapDelete("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid 
 
     return store.RemoveBoardTeamAccess(boardId, teamId) ? Results.NoContent() : Results.NotFound();
 });
-api.MapGet("/boards/{boardId:guid}/secrets", (Guid boardId, DevOpsStore store) => store.GetBoardSecrets(boardId));
+api.MapGet("/boards/{boardId:guid}/secrets", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return Results.Ok(store.GetBoardSecrets(boardId));
+});
 api.MapPost("/boards/{boardId:guid}/secrets", async (Guid boardId, CreateBoardSecretRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
 {
     if (!CanMutateBoardRequest(store, boardId, user))
@@ -534,7 +568,7 @@ api.MapDelete("/boards/{boardId:guid}/secrets/{secretId:guid}", async (Guid boar
     return store.DeleteBoardSecret(boardId, secretId) ? Results.NoContent() : Results.NotFound();
 });
 
-api.MapGet("/work-items", (DevOpsStore store) => store.GetWorkItems());
+api.MapGet("/work-items", (ClaimsPrincipal user, DevOpsStore store) => store.GetWorkItems(AuthenticatedSubjectOrNull(user)));
 api.MapPost("/work-items", async (CreateWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
     if (!CanMutateBoardRequest(store, request.BoardId, user))
@@ -816,14 +850,35 @@ api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWo
     return Results.Ok(item);
 });
 
-api.MapGet("/work-items/{workItemId:guid}", (Guid workItemId, DevOpsStore store) =>
-    store.GetWorkItemDetail(workItemId) is { } item ? Results.Ok(item) : Results.NotFound());
+api.MapGet("/work-items/{workItemId:guid}", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewWorkItemRequest(store, workItemId, user))
+    {
+        return BoardReadForbidden();
+    }
 
-api.MapGet("/work-items/{workItemId:guid}/ai-runs", (Guid workItemId, DevOpsStore store) =>
-    store.GetAiRuns(workItemId));
+    return store.GetWorkItemDetail(workItemId) is { } item ? Results.Ok(item) : Results.NotFound();
+});
 
-api.MapGet("/work-items/{workItemId:guid}/ai-session", (Guid workItemId, DevOpsStore store) =>
-    store.GetAiSession(workItemId) is { } session ? Results.Ok(session) : Results.NotFound());
+api.MapGet("/work-items/{workItemId:guid}/ai-runs", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewWorkItemRequest(store, workItemId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return Results.Ok(store.GetAiRuns(workItemId));
+});
+
+api.MapGet("/work-items/{workItemId:guid}/ai-session", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewWorkItemRequest(store, workItemId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return store.GetAiSession(workItemId) is { } session ? Results.Ok(session) : Results.NotFound();
+});
 
 api.MapPut("/work-items/{workItemId:guid}/ai-session/provider-session", (Guid workItemId, UpdateAiSessionProviderRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -1080,9 +1135,9 @@ api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId
     return detail is null ? Results.NotFound() : Results.Ok(detail);
 });
 
-api.MapGet("/preview-environments", (DevOpsStore store) => store.GetPreviewEnvironments());
-api.MapGet("/preview-events", (DevOpsStore store) => store.GetPreviewEvents());
-api.MapGet("/pipelines", (DevOpsStore store) => store.GetPipelineStatuses());
+api.MapGet("/preview-environments", (ClaimsPrincipal user, DevOpsStore store) => store.GetPreviewEnvironments(AuthenticatedSubjectOrNull(user)));
+api.MapGet("/preview-events", (ClaimsPrincipal user, DevOpsStore store) => store.GetPreviewEvents(AuthenticatedSubjectOrNull(user)));
+api.MapGet("/pipelines", (ClaimsPrincipal user, DevOpsStore store) => store.GetPipelineStatuses(AuthenticatedSubjectOrNull(user)));
 api.MapGet("/metrics", (Guid? boardId, DevOpsStore store) => store.GetMetrics(boardId));
 api.MapGet("/assignees", (Guid? boardId, DevOpsStore store, IConfiguration configuration) => store.GetAssignees(boardId, configuration));
 
@@ -1108,16 +1163,45 @@ api.MapPost("/pipeline-runs/{pipelineRunId:guid}/execute", async (Guid pipelineR
     return executing is null ? Results.NotFound() : Results.Accepted($"/api/pipeline-runs/{pipelineRunId}", executing);
 });
 
-api.MapGet("/pipeline-runs/{pipelineRunId:guid}/manifest", (Guid pipelineRunId, DevOpsStore store) =>
-    store.RenderPipelineJobManifest(pipelineRunId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
+api.MapGet("/pipeline-runs/{pipelineRunId:guid}/manifest", (Guid pipelineRunId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewPipelineRunRequest(store, pipelineRunId, user))
+    {
+        return BoardReadForbidden();
+    }
 
-api.MapGet("/implementation-runs", (Guid? workItemId, DevOpsStore store) => store.GetImplementationRuns(workItemId));
+    return store.RenderPipelineJobManifest(pipelineRunId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound();
+});
 
-api.MapGet("/implementation-runs/{implementationRunId:guid}", (Guid implementationRunId, DevOpsStore store) =>
-    store.GetImplementationRun(implementationRunId) is { } run ? Results.Ok(run) : Results.NotFound());
+api.MapGet("/implementation-runs", (Guid? workItemId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (workItemId is { } id && !CanViewWorkItemRequest(store, id, user))
+    {
+        return BoardReadForbidden();
+    }
 
-api.MapGet("/implementation-runs/{implementationRunId:guid}/manifest", (Guid implementationRunId, DevOpsStore store, IConfiguration configuration) =>
-    store.RenderImplementationRunManifest(implementationRunId, configuration) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
+    return Results.Ok(store.GetImplementationRuns(workItemId, AuthenticatedSubjectOrNull(user)));
+});
+
+api.MapGet("/implementation-runs/{implementationRunId:guid}", (Guid implementationRunId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewImplementationRunRequest(store, implementationRunId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return store.GetImplementationRun(implementationRunId) is { } run ? Results.Ok(run) : Results.NotFound();
+});
+
+api.MapGet("/implementation-runs/{implementationRunId:guid}/manifest", (Guid implementationRunId, ClaimsPrincipal user, DevOpsStore store, IConfiguration configuration) =>
+{
+    if (!CanViewImplementationRunRequest(store, implementationRunId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return store.RenderImplementationRunManifest(implementationRunId, configuration) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound();
+});
 
 api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid workItemId, StartImplementationRunRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
@@ -1196,8 +1280,15 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
     return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
 });
 
-api.MapGet("/previews/{workItemId:guid}/manifest", (Guid workItemId, DevOpsStore store) =>
-    store.RenderPreviewManifest(workItemId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
+api.MapGet("/previews/{workItemId:guid}/manifest", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewWorkItemRequest(store, workItemId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return store.RenderPreviewManifest(workItemId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound();
+});
 
 api.MapGet("/settings", (DevOpsStore store, IConfiguration configuration) => store.GetSettings(configuration));
 
@@ -1239,8 +1330,26 @@ static bool CanMutateAiRunRequest(DevOpsStore store, Guid aiRunId, ClaimsPrincip
 static bool CanMutateCommentRequest(DevOpsStore store, Guid commentId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutateComment(commentId, UserIdentityFromClaims(user).Subject);
 
+static bool CanViewBoardRequest(DevOpsStore store, Guid boardId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanViewBoard(boardId, UserIdentityFromClaims(user).Subject);
+
+static bool CanViewWorkItemRequest(DevOpsStore store, Guid workItemId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanViewWorkItem(workItemId, UserIdentityFromClaims(user).Subject);
+
+static bool CanViewImplementationRunRequest(DevOpsStore store, Guid implementationRunId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanViewImplementationRun(implementationRunId, UserIdentityFromClaims(user).Subject);
+
+static bool CanViewPipelineRunRequest(DevOpsStore store, Guid pipelineRunId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanViewPipelineRun(pipelineRunId, UserIdentityFromClaims(user).Subject);
+
 static IResult BoardMutationForbidden() =>
     Results.Problem("You do not have permission to modify this board.", statusCode: StatusCodes.Status403Forbidden);
+
+static IResult BoardReadForbidden() =>
+    Results.Problem("You do not have permission to view this board.", statusCode: StatusCodes.Status403Forbidden);
+
+static string? AuthenticatedSubjectOrNull(ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated == true ? UserIdentityFromClaims(user).Subject : null;
 
 static UserIdentityRequest UserIdentityFromClaims(ClaimsPrincipal user)
 {
@@ -6007,6 +6116,52 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public bool CanViewBoard(Guid boardId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                return CanViewBoardWithoutLock(boardId, actorSubject);
+            }
+        }
+
+        public bool CanViewWorkItem(Guid workItemId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                return item is not null && CanViewBoardWithoutLock(item.BoardId, actorSubject);
+            }
+        }
+
+        public bool CanViewImplementationRun(Guid implementationRunId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var run = _implementationRuns.SingleOrDefault(entry => entry.Id == implementationRunId);
+                return run is not null && CanViewWorkItem(run.WorkItemId, actorSubject);
+            }
+        }
+
+        public bool CanViewPipelineRun(Guid pipelineRunId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var run = _pipelineRuns.SingleOrDefault(entry => entry.Id == pipelineRunId);
+                if (run is null)
+                {
+                    return false;
+                }
+
+                if (run.WorkItemId is { } workItemId)
+                {
+                    var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                    return item is not null && CanViewBoardWithoutLock(item.BoardId, actorSubject);
+                }
+
+                return VisibleRepositoryIdsWithoutLock(actorSubject).Contains(run.RepositoryId);
+            }
+        }
+
         public IReadOnlyList<BoardTeamAccessDto> GetBoardTeamAccess(Guid boardId)
         {
             lock (_lock)
@@ -6044,11 +6199,18 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<RepositoryDto> GetRepositories()
+        public IReadOnlyList<RepositoryDto> GetRepositories(string? actorSubject = null)
         {
             lock (_lock)
             {
-                return _repositories
+                var repositories = _repositories.AsEnumerable();
+                if (!string.IsNullOrWhiteSpace(actorSubject))
+                {
+                    var visibleRepositoryIds = VisibleRepositoryIdsWithoutLock(actorSubject);
+                    repositories = repositories.Where(repository => visibleRepositoryIds.Contains(repository.Id));
+                }
+
+                return repositories
                     .OrderBy(repository => repository.Provider)
                     .ThenBy(repository => repository.Name)
                     .ToArray();
@@ -6509,11 +6671,17 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<BoardDto> GetBoards(Guid workspaceId)
+        public IReadOnlyList<BoardDto> GetBoards(Guid workspaceId, string? actorSubject = null)
         {
             lock (_lock)
             {
-                return _boards.Where(b => b.WorkspaceId == workspaceId).Select(ToBoardDto).ToArray();
+                var boards = _boards.Where(b => b.WorkspaceId == workspaceId);
+                if (!string.IsNullOrWhiteSpace(actorSubject))
+                {
+                    boards = boards.Where(board => CanViewBoardWithoutLock(board.Id, actorSubject));
+                }
+
+                return boards.Select(ToBoardDto).ToArray();
             }
         }
 
@@ -6525,11 +6693,18 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<WorkItemSummaryDto> GetWorkItems()
+        public IReadOnlyList<WorkItemSummaryDto> GetWorkItems(string? actorSubject = null)
         {
             lock (_lock)
             {
-                return _items.Select(ToSummary).ToArray();
+                var items = _items.AsEnumerable();
+                if (!string.IsNullOrWhiteSpace(actorSubject))
+                {
+                    var visibleBoardIds = VisibleBoardIdsWithoutLock(actorSubject);
+                    items = items.Where(item => visibleBoardIds.Contains(item.BoardId));
+                }
+
+                return items.Select(ToSummary).ToArray();
             }
         }
 
@@ -6693,11 +6868,13 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<PreviewEnvironmentDto> GetPreviewEnvironments()
+        public IReadOnlyList<PreviewEnvironmentDto> GetPreviewEnvironments(string? actorSubject = null)
         {
             lock (_lock)
             {
+                var visibleBoardIds = string.IsNullOrWhiteSpace(actorSubject) ? null : VisibleBoardIdsWithoutLock(actorSubject);
                 return _previews
+                    .Where(preview => visibleBoardIds is null || _items.Any(item => item.Id == preview.WorkItemId && visibleBoardIds.Contains(item.BoardId)))
                     .Select(preview =>
                     {
                         var item = _items.SingleOrDefault(i => i.Id == preview.WorkItemId);
@@ -6724,11 +6901,18 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<PreviewEventDto> GetPreviewEvents()
+        public IReadOnlyList<PreviewEventDto> GetPreviewEvents(string? actorSubject = null)
         {
             lock (_lock)
             {
-                return _previewEvents.OrderByDescending(e => e.CreatedAt).Take(50).ToArray();
+                var events = _previewEvents.AsEnumerable();
+                if (!string.IsNullOrWhiteSpace(actorSubject))
+                {
+                    var visibleBoardIds = VisibleBoardIdsWithoutLock(actorSubject);
+                    events = events.Where(entry => _items.Any(item => item.Id == entry.WorkItemId && visibleBoardIds.Contains(item.BoardId)));
+                }
+
+                return events.OrderByDescending(e => e.CreatedAt).Take(50).ToArray();
             }
         }
 
@@ -6836,12 +7020,14 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<ImplementationRunDto> GetImplementationRuns(Guid? workItemId = null)
+        public IReadOnlyList<ImplementationRunDto> GetImplementationRuns(Guid? workItemId = null, string? actorSubject = null)
         {
             lock (_lock)
             {
+                var visibleBoardIds = string.IsNullOrWhiteSpace(actorSubject) ? null : VisibleBoardIdsWithoutLock(actorSubject);
                 return _implementationRuns
-                    .Where(run => workItemId is null || run.WorkItemId == workItemId)
+                    .Where(run => (workItemId is null || run.WorkItemId == workItemId) &&
+                        (visibleBoardIds is null || _items.Any(item => item.Id == run.WorkItemId && visibleBoardIds.Contains(item.BoardId))))
                     .OrderByDescending(run => run.CreatedAt)
                     .ToArray();
             }
@@ -7335,12 +7521,14 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<PipelineStatusDto> GetPipelineStatuses()
+        public IReadOnlyList<PipelineStatusDto> GetPipelineStatuses(string? actorSubject = null)
         {
             lock (_lock)
             {
+                var visibleBoardIds = string.IsNullOrWhiteSpace(actorSubject) ? null : VisibleBoardIdsWithoutLock(actorSubject);
+                var visibleRepositoryIds = string.IsNullOrWhiteSpace(actorSubject) ? null : VisibleRepositoryIdsWithoutLock(actorSubject);
                 var pipelines = new List<PipelineStatusDto>();
-                foreach (var item in _items.OrderBy(i => i.Key))
+                foreach (var item in _items.Where(item => visibleBoardIds is null || visibleBoardIds.Contains(item.BoardId)).OrderBy(i => i.Key))
                 {
                     if (!string.IsNullOrWhiteSpace(item.AiStatus))
                     {
@@ -7360,7 +7548,10 @@ namespace Rosenvall.DevOps.Api
                     }
                 }
 
-                foreach (var run in _pipelineRuns.OrderByDescending(run => run.StartedAt))
+                foreach (var run in _pipelineRuns.Where(run =>
+                    visibleBoardIds is null ||
+                    (run.WorkItemId is { } workItemId && _items.Any(item => item.Id == workItemId && visibleBoardIds.Contains(item.BoardId))) ||
+                    (run.WorkItemId is null && visibleRepositoryIds is not null && visibleRepositoryIds.Contains(run.RepositoryId))).OrderByDescending(run => run.StartedAt))
                 {
                     var item = run.WorkItemId is null ? null : _items.SingleOrDefault(i => i.Id == run.WorkItemId.Value);
                     pipelines.Add(new PipelineStatusDto(
@@ -8628,6 +8819,58 @@ namespace Rosenvall.DevOps.Api
             RoleFromRank(Math.Min(RoleRank(left), RoleRank(right)));
 
         private bool HasAnyTeamOrAccess() => _teams.Count > 0 || _boardAccess.Count > 0 || _boardTeamAccess.Count > 0;
+
+        private bool CanViewBoardWithoutLock(Guid boardId, string actorSubject)
+        {
+            if (_boards.All(board => board.Id != boardId))
+            {
+                return false;
+            }
+
+            if (!HasAnyTeamOrAccess())
+            {
+                return true;
+            }
+
+            var user = _users.SingleOrDefault(entry => entry.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+            if (user is null)
+            {
+                return false;
+            }
+
+            if (_boardAccess.Any(access => access.BoardId == boardId && access.UserId == user.Id && RoleRank(access.Role) > 0))
+            {
+                return true;
+            }
+
+            return _boardTeamAccess.Any(access =>
+            {
+                var team = _teams.SingleOrDefault(entry => entry.Id == access.TeamId);
+                var member = team?.Members.SingleOrDefault(entry => entry.UserId == user.Id);
+                return access.BoardId == boardId &&
+                    member is not null &&
+                    RoleRank(MostRestrictiveRole(access.Role, member.Role)) > 0;
+            });
+        }
+
+        private HashSet<Guid> VisibleBoardIdsWithoutLock(string actorSubject) =>
+            _boards.Where(board => CanViewBoardWithoutLock(board.Id, actorSubject)).Select(board => board.Id).ToHashSet();
+
+        private HashSet<Guid> VisibleRepositoryIdsWithoutLock(string actorSubject)
+        {
+            var visibleBoardIds = VisibleBoardIdsWithoutLock(actorSubject);
+            var repositoryIds = _boards
+                .Where(board => board.RepositoryId is not null && visibleBoardIds.Contains(board.Id))
+                .Select(board => board.RepositoryId!.Value)
+                .ToHashSet();
+
+            foreach (var link in _boardRepositoryLinks.Where(link => visibleBoardIds.Contains(link.BoardId)))
+            {
+                repositoryIds.Add(link.RepositoryId);
+            }
+
+            return repositoryIds;
+        }
 
         private bool IsBoardStatus(Guid boardId, string status) =>
             _boards.SingleOrDefault(board => board.Id == boardId)?.Columns.Contains(status, StringComparer.OrdinalIgnoreCase) == true;

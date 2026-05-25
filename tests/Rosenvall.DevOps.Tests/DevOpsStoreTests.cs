@@ -987,6 +987,14 @@ public sealed class DevOpsStoreTests
         Assert.False(store.CanMutateWorkItem(item.Id, guest.Subject));
         Assert.False(store.CanMutateAiRun(aiRun.Id, guest.Subject));
         Assert.False(store.CanMutateComment(comment.Id, guest.Subject));
+        Assert.True(store.CanViewBoard(board.Id, owner.Subject));
+        Assert.True(store.CanViewWorkItem(item.Id, owner.Subject));
+        Assert.False(store.CanViewBoard(board.Id, guest.Subject));
+        Assert.False(store.CanViewWorkItem(item.Id, guest.Subject));
+        Assert.Contains(store.GetBoards(workspace.Id, owner.Subject), entry => entry.Id == board.Id);
+        Assert.DoesNotContain(store.GetBoards(workspace.Id, guest.Subject), entry => entry.Id == board.Id);
+        Assert.Contains(store.GetWorkItems(owner.Subject), entry => entry.Id == item.Id);
+        Assert.DoesNotContain(store.GetWorkItems(guest.Subject), entry => entry.Id == item.Id);
     }
 
     [Fact]
