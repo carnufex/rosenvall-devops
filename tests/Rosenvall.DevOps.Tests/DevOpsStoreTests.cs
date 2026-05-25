@@ -2342,6 +2342,27 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_source_policy_rejects_files_outside_react_preview_workspace()
+    {
+        var files = LocalReactPreviewProject.ForWorkItem("TASK-4825", "rita app", "skapa en app dar jag kan rita").ToList();
+        files.Add(new PreviewSourceFile("env", ".env", "GITHUB_TOKEN=secret"));
+
+        var error = Assert.Throws<ArgumentException>(() => PreviewSourcePolicy.Validate(files));
+
+        Assert.Contains("outside the allowed React preview paths", error.Message);
+    }
+
+    [Fact]
+    public void Preview_source_policy_allows_src_and_public_assets_with_size_limits()
+    {
+        var files = LocalReactPreviewProject.ForWorkItem("TASK-4825", "rita app", "skapa en app dar jag kan rita").ToList();
+        files.Add(new PreviewSourceFile("logo", "public/logo.svg", "<svg role=\"img\" />"));
+        files.Add(new PreviewSourceFile("component", "src/components/Demo.tsx", "export function Demo() { return null; }"));
+
+        PreviewSourcePolicy.Validate(files);
+    }
+
+    [Fact]
     public void Local_react_implementation_uses_human_comments_for_richer_preview()
     {
         using var fixture = DevOpsStoreFixture.Create();

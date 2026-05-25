@@ -3838,6 +3838,86 @@ namespace Rosenvall.DevOps.Api
             needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
     }
 
+    public static class PreviewSourcePolicy
+    {
+        private const int MaxFiles = 64;
+        private const int MaxFileBytes = 128 * 1024;
+        private const int MaxTotalBytes = 512 * 1024;
+        private static readonly HashSet<string> AllowedRootFiles = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "package.json",
+            "index.html",
+            "vite.config.ts",
+            "vite.config.js",
+            "tsconfig.json",
+            "tsconfig.app.json",
+            "tsconfig.node.json",
+            "postcss.config.js",
+            "tailwind.config.ts",
+            "tailwind.config.js",
+            "components.json"
+        };
+
+        public static void Validate(IReadOnlyList<PreviewSourceFile> files)
+        {
+            if (files.Count == 0)
+            {
+                throw new ArgumentException("Preview source files are required.", nameof(files));
+            }
+
+            if (files.Count > MaxFiles)
+            {
+                throw new ArgumentException($"Preview source produced {files.Count} files; maximum is {MaxFiles}.", nameof(files));
+            }
+
+            var totalBytes = 0;
+            foreach (var file in files)
+            {
+                var normalizedPath = NormalizePath(file.Path);
+                if (!IsAllowedPath(normalizedPath))
+                {
+                    throw new ArgumentException($"Preview source file '{file.Path}' is outside the allowed React preview paths.", nameof(files));
+                }
+
+                var bytes = Encoding.UTF8.GetByteCount(file.Content);
+                if (bytes > MaxFileBytes)
+                {
+                    throw new ArgumentException($"Preview source file '{file.Path}' exceeds the {MaxFileBytes} byte limit.", nameof(files));
+                }
+
+                totalBytes += bytes;
+                if (totalBytes > MaxTotalBytes)
+                {
+                    throw new ArgumentException($"Preview source exceeds the {MaxTotalBytes} byte total limit.", nameof(files));
+                }
+            }
+        }
+
+        private static string NormalizePath(string path) =>
+            path.Replace("\\", "/", StringComparison.Ordinal).Trim();
+
+        private static bool IsAllowedPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) ||
+                path.StartsWith("/", StringComparison.Ordinal) ||
+                path.Contains("//", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var parts = path.Split("/", StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0 ||
+                parts.Any(part => part is "." or ".." || part.StartsWith(".", StringComparison.Ordinal)))
+            {
+                return false;
+            }
+
+            return AllowedRootFiles.Contains(path) ||
+                path.StartsWith("src/", StringComparison.OrdinalIgnoreCase) ||
+                path.StartsWith("public/", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     public static class PromptContextRenderer
     {
         public static string RenderPlanningContext(WorkItemDetailDto context)
@@ -5665,6 +5745,15 @@ namespace Rosenvall.DevOps.Api
                 if (sourceFiles.All(file => !string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)))
                 {
                     throw new AiPlanProviderUnavailableException("Codex preview source generation did not produce src/App.tsx; no preview was deployed.");
+                }
+
+                try
+                {
+                    PreviewSourcePolicy.Validate(sourceFiles);
+                }
+                catch (ArgumentException ex)
+                {
+                    throw new AiPlanProviderUnavailableException($"{ex.Message} No preview was deployed.");
                 }
 
                 var appSource = sourceFiles.First(file => string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)).Content;
@@ -7845,6 +7934,8 @@ namespace Rosenvall.DevOps.Api
                     throw new ArgumentException("Preview source files are required.", nameof(sourceFiles));
                 }
 
+                PreviewSourcePolicy.Validate(sourceFiles);
+
                 var resources = PreviewResourceSet.Create(item.Key, item.Title, LocalReactPreviewProject.Image, sourceFiles: sourceFiles);
                 item.PullRequestUrl = null;
                 item.AiStatus = "Completed";
@@ -8332,6 +8423,18 @@ namespace Rosenvall.DevOps.Api
                                 .OrderBy(comment => comment.CreatedAt)
                                 .Select(comment => comment.Body))
                         : Array.Empty<PreviewSourceFile>();
+                if (sourceFiles.Count > 0)
+                {
+                    try
+                    {
+                        PreviewSourcePolicy.Validate(sourceFiles);
+                    }
+                    catch (ArgumentException)
+                    {
+                        return null;
+                    }
+                }
+
                 var resources = PreviewResourceSet.Create(
                     item.Key,
                     item.Title,
