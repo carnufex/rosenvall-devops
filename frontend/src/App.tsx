@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -302,6 +302,9 @@ type GitHubIntegrationDto = {
   repositoriesCount: number;
   installedBy: string;
   createdAt: string;
+  canCreateRepositories?: boolean;
+  repositoryCreatorTeamIds?: string[] | null;
+  canManageRepositoryCreationPolicy?: boolean;
 };
 
 type BoardSecretDto = {
@@ -950,6 +953,12 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
+    saveGitHubRepositoryCreationPolicy: async (installationId, allowedTeamIds) => {
+      return runAction('Saving GitHub repository creation policy', async () => {
+        await api.put<GitHubIntegrationDto>(`/api/integrations/github/${installationId}/repository-creation-policy`, { allowedTeamIds });
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
     syncBoardRepository: async (boardId, request) => {
       return runAction('Syncing board to GitHub', async () => {
         const board = await api.post<Board>(`/api/boards/${boardId}/repositories/github`, request);
@@ -1126,9 +1135,9 @@ function App() {
             {activeView === 'board' && <BoardView board={board} actions={actions} onSyncBoard={() => setSyncBoardOpen(true)} />}
             {activeView === 'timeline' && <TimelineView board={shell.board} timeline={shell.timeline} />}
             {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} onBack={() => setView('board')} />}
-            {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
             {activeView === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
-            {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -1162,6 +1171,7 @@ function App() {
           teams={shell.teams}
           githubIntegrations={shell.githubIntegrations}
           actions={actions}
+          onNotify={addToast}
           onCreate={actions.createBoard}
           onClose={() => setCreateBoardOpen(false)}
         />
@@ -1339,6 +1349,7 @@ type BoardActions = {
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<void>;
   addGitHubIntegration(): Promise<boolean>;
   syncGitHubIntegration(): Promise<boolean>;
+  saveGitHubRepositoryCreationPolicy(installationId: number, allowedTeamIds: string[]): Promise<boolean>;
   syncBoardRepository(boardId: string, request: SyncBoardRepositoryRequest): Promise<boolean>;
   adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<boolean>;
   createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<boolean>;
@@ -2649,10 +2660,11 @@ function ToastStack({ busyAction, toasts, onDismiss }: {
   );
 }
 
-function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClose }: {
+function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCreate, onClose }: {
   teams: TeamDto[];
   githubIntegrations: GitHubIntegrationDto[];
   actions: BoardActions;
+  onNotify: (kind: ToastMessage['kind'], message: string) => void;
   onCreate: (form: CreateBoardForm) => Promise<boolean>;
   onClose: () => void;
 }) {
@@ -2674,6 +2686,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
   const [onboardingDraft, setOnboardingDraft] = React.useState<GitHubRepositoryOnboardingDraftDto | null>(null);
   const [onboardingStatus, setOnboardingStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [onboardingError, setOnboardingError] = React.useState<string | null>(null);
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const profileRequestRef = React.useRef(0);
   const normalizedName = form.name.trim();
@@ -2682,10 +2695,12 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
   const usesCustomUrl = form.providerMode === 'CustomUrl';
   const usesNoRepository = form.providerMode === 'NoRepository';
   const selectedInstallationId = newRepoInstallationId ?? githubInstallationId ?? githubIntegrations[0]?.installationId ?? null;
+  const selectedNewRepoIntegration = githubIntegrations.find((integration) => integration.installationId === selectedInstallationId) ?? null;
+  const createPermissionMessage = usesGitHubNew ? repositoryCreatePermissionMessage(selectedNewRepoIntegration) : null;
   const canCreate = normalizedName.length > 0 && profileStatus !== 'loading' && (
     usesNoRepository ||
     (usesGitHub ? form.repositoryRemoteUrl.trim().length > 0 : false) ||
-    (usesGitHubNew ? normalizeRepositoryNameInput(newRepoName).length > 0 && !!onboardingDraft && !!selectedInstallationId : false) ||
+    (usesGitHubNew ? normalizeRepositoryNameInput(newRepoName).length > 0 && !!onboardingDraft && !!selectedInstallationId && canCreateRepositoryInInstallation(selectedNewRepoIntegration) : false) ||
     (usesCustomUrl ? isPublicGitUrl(form.repositoryRemoteUrl) : false)
   );
 
@@ -2748,6 +2763,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
   async function generateOnboardingDraft() {
     setOnboardingStatus('loading');
     setOnboardingError(null);
+    setSubmitError(null);
     try {
       const draft = await api.post<GitHubRepositoryOnboardingDraftDto>('/api/repositories/github/onboarding-draft', {
         name: normalizeRepositoryNameInput(newRepoName || form.name),
@@ -2766,6 +2782,9 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
   async function createNewGitHubRepositoryFromDraft() {
     if (!onboardingDraft || !selectedInstallationId) {
       throw new Error('Generate an onboarding draft and select a GitHub installation before creating the board.');
+    }
+    if (!canCreateRepositoryInInstallation(selectedNewRepoIntegration)) {
+      throw new Error(createPermissionMessage ?? 'You do not have permission to create repositories for this GitHub installation.');
     }
 
     const response = await api.post<GitHubRepositoryCreateResponse>('/api/repositories/github', {
@@ -2865,6 +2884,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
         event.preventDefault();
         if (!canCreate || submitting) return;
         setSubmitting(true);
+        setSubmitError(null);
         const submitForm = usesGitHubNew
           ? createNewGitHubRepositoryFromDraft().then((repoForm) => ({ ...repoForm, name: normalizedName }))
           : Promise.resolve({ ...form, name: normalizedName });
@@ -2874,8 +2894,11 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
             if (saved) onClose();
           })
           .catch((error) => {
+            const message = error instanceof Error ? error.message : 'Could not create GitHub repository';
             setOnboardingStatus('error');
-            setOnboardingError(error instanceof Error ? error.message : 'Could not create GitHub repository');
+            setOnboardingError(message);
+            setSubmitError(message);
+            onNotify('error', message);
           })
           .finally(() => setSubmitting(false));
       }}>
@@ -2941,6 +2964,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
             onPrivateChange={setNewRepoPrivate}
             onPromptChange={setNewRepoPrompt}
             onDraftChange={setOnboardingDraft}
+            createPermissionMessage={createPermissionMessage}
           />
         )}
         {usesGitHub && form.repositoryRemoteUrl && (
@@ -2975,6 +2999,8 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
           </div>
         )}
         {usesCustomUrl && form.repositoryRemoteUrl && !isPublicGitUrl(form.repositoryRemoteUrl) && <p className="provider-status">Custom URL supports public HTTP(S) clone URLs only in v1.</p>}
+        {submitError && <p className="failure-reason submit-error">{submitError}</p>}
+        {createPermissionMessage && <p className="failure-reason submit-error">{createPermissionMessage}</p>}
         <div className="modal-actions">
           {usesGitHubNew && (
             <button type="button" className="secondary" disabled={onboardingStatus === 'loading' || normalizeRepositoryNameInput(newRepoName || form.name).length === 0} onClick={() => void generateOnboardingDraft()}>
@@ -2989,7 +3015,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
   );
 }
 
-function NewRepositoryOnboardingPanel({ form, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, error, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange }: {
+function NewRepositoryOnboardingPanel({ form, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, error, createPermissionMessage, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange }: {
   form: CreateBoardForm;
   installationId: number | null;
   integrations: GitHubIntegrationDto[];
@@ -3000,6 +3026,7 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
   prompt: string;
   draft: GitHubRepositoryOnboardingDraftDto | null;
   error: string | null;
+  createPermissionMessage: string | null;
   onInstallationChange: (value: number | null) => void;
   onRepoNameChange: (value: string) => void;
   onDescriptionChange: (value: string) => void;
@@ -3034,6 +3061,7 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
       </div>
       {!installationId && <p className="failure-reason">No GitHub App installation is available for creating a repository.</p>}
       {installationId && <p className="provider-status">GitHub installation: {integrations.find((integration) => integration.installationId === installationId)?.accountLogin ?? installationId}. New repositories are private by default.</p>}
+      {createPermissionMessage && <p className="failure-reason">{createPermissionMessage}</p>}
       <p className="provider-status">Repository names are normalized to kebab-case, for example <code>date-site</code>.</p>
       {error && <p className="failure-reason">{error}</p>}
       {draft && (
@@ -3416,11 +3444,12 @@ function TeamsView({ teams, boards, me, actions }: {
   );
 }
 
-function SettingsView({ scope, settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
+function SettingsView({ scope, settings, board, me, teams, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
   scope: 'global' | 'board';
   settings: SettingsDto;
   board: Board;
   me: UserDto;
+  teams: TeamDto[];
   repositories: RepositoryDto[];
   boardSecrets: BoardSecretDto[];
   githubIntegrations: GitHubIntegrationDto[];
@@ -3502,13 +3531,12 @@ function SettingsView({ scope, settings, board, me, repositories, boardSecrets, 
             : (
               <div className="settings-list">
                 {githubIntegrations.map((integration) => (
-                  <div className="settings-row" key={integration.id}>
-                    <div>
-                      <strong>{integration.accountLogin}</strong>
-                      <p>{integration.accountType} - {integration.repositoriesCount} repositories - installed by {integration.installedBy}</p>
-                    </div>
-                    <span className={integration.status === 'Active' ? 'state-good' : 'state-muted'}>{integration.status}</span>
-                  </div>
+                  <GitHubRepositoryCreationPolicyEditor
+                    integration={integration}
+                    teams={teams}
+                    actions={actions}
+                    key={integration.id}
+                  />
                 ))}
               </div>
             )}
@@ -3604,6 +3632,69 @@ function SettingsView({ scope, settings, board, me, repositories, boardSecrets, 
         </>}
       </div>
     </section>
+  );
+}
+
+function GitHubRepositoryCreationPolicyEditor({ integration, teams, actions }: {
+  integration: GitHubIntegrationDto;
+  teams: TeamDto[];
+  actions: BoardActions;
+}) {
+  const [allowedTeamIds, setAllowedTeamIds] = React.useState<string[]>(integration.repositoryCreatorTeamIds ?? []);
+  const [saving, setSaving] = React.useState(false);
+  const canManage = integration.canManageRepositoryCreationPolicy === true;
+  const canCreate = integration.canCreateRepositories === true;
+
+  React.useEffect(() => {
+    setAllowedTeamIds(integration.repositoryCreatorTeamIds ?? []);
+  }, [integration.installationId, integration.repositoryCreatorTeamIds]);
+
+  async function savePolicy() {
+    if (!canManage || saving) return;
+    setSaving(true);
+    try {
+      await actions.saveGitHubRepositoryCreationPolicy(integration.installationId, allowedTeamIds);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="settings-row vertical">
+      <div className="settings-inline">
+        <div>
+          <strong>{integration.accountLogin}</strong>
+          <p>{integration.accountType} - {integration.repositoriesCount} repositories - installed by {integration.installedBy}</p>
+        </div>
+        <div className="status-badges">
+          <span className={integration.status === 'Active' ? 'state-good' : 'state-muted'}>{integration.status}</span>
+          <span className={canCreate ? 'state-good' : 'state-muted'}>{canCreate ? 'Can create repos' : 'Link only'}</span>
+        </div>
+      </div>
+      <fieldset className="team-picker compact-team-picker" disabled={!canManage || teams.length === 0}>
+        <legend>Teams allowed to create repositories</legend>
+        {teams.length === 0
+          ? <p className="provider-status">Create a team before delegating repository creation.</p>
+          : teams.map((team) => (
+            <label className="checkbox-row" key={`${integration.installationId}-${team.id}`}>
+              <input
+                type="checkbox"
+                checked={allowedTeamIds.includes(team.id)}
+                onChange={(event) => setAllowedTeamIds((current) => event.target.checked ? [...new Set([...current, team.id])] : current.filter((id) => id !== team.id))}
+              />
+              <span>{team.name}</span>
+            </label>
+          ))}
+      </fieldset>
+      <div className="settings-inline">
+        <p className="provider-status">
+          {canManage
+            ? 'Owners and selected team members can create private repositories during Add board.'
+            : 'Only the installation owner or bootstrap team admins can change this policy.'}
+        </p>
+        {canManage && <button className="secondary compact" type="button" disabled={saving} onClick={() => void savePolicy()}><Save size={14} />Save repository policy</button>}
+      </div>
+    </div>
   );
 }
 

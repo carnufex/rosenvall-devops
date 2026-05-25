@@ -1080,6 +1080,75 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitHub_repository_creation_policy_allows_owner_and_granted_team_members()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var member = store.GetOrCreateUser(new UserIdentityRequest("authentik|member", "Member", "member@example.com"));
+        var guest = store.GetOrCreateUser(new UserIdentityRequest("authentik|guest", "Guest", "guest@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("Repo creators"), owner.Subject);
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(1234, "carnufex", "User", owner.Subject));
+
+        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, guest.Subject));
+
+        var saved = store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), owner.Subject);
+
+        Assert.NotNull(saved);
+        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
+        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, guest.Subject));
+        Assert.Contains(store.GetGitHubIntegrations(member.Subject), entry => entry.InstallationId == integration.InstallationId && entry.CanCreateRepositories);
+        Assert.Contains(store.GetGitHubIntegrations(owner.Subject), entry => entry.InstallationId == integration.InstallationId && entry.CanManageRepositoryCreationPolicy);
+    }
+
+    [Fact]
+    public void GitHub_repository_creation_policy_is_persisted()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var member = store.GetOrCreateUser(new UserIdentityRequest("authentik|member", "Member", "member@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("Repo creators"), owner.Subject);
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(5678, "carnufex", "User", owner.Subject));
+        store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), owner.Subject);
+
+        var reopened = fixture.Reopen();
+
+        Assert.True(reopened.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
+        Assert.Contains(reopened.GetGitHubIntegrations(owner.Subject), entry =>
+            entry.InstallationId == integration.InstallationId &&
+            entry.RepositoryCreatorTeamIds.Contains(team.Id));
+    }
+
+    [Fact]
+    public void Legacy_github_app_installation_policy_can_be_bootstrapped_by_team_admin()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var admin = store.GetOrCreateUser(new UserIdentityRequest("authentik|admin", "Admin", "admin@example.com"));
+        var member = store.GetOrCreateUser(new UserIdentityRequest("authentik|member", "Member", "member@example.com"));
+        var guest = store.GetOrCreateUser(new UserIdentityRequest("authentik|guest", "Guest", "guest@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("Platform"), admin.Subject);
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(admin.Id, "Admin"));
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(9012, "carnufex", "User", "github-app"));
+
+        Assert.True(store.CanManageGitHubRepositoryCreationPolicy(integration.InstallationId, admin.Subject));
+        Assert.False(store.CanManageGitHubRepositoryCreationPolicy(integration.InstallationId, member.Subject));
+
+        var saved = store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), admin.Subject);
+
+        Assert.NotNull(saved);
+        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, guest.Subject));
+    }
+
+    [Fact]
     public void Work_item_creation_rejects_unknown_board_and_unknown_status()
     {
         using var fixture = DevOpsStoreFixture.Create();

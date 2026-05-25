@@ -247,37 +247,32 @@ api.MapPost("/repositories", (CreateRepositoryRequest request, ClaimsPrincipal u
 {
     if (!CanCreateRepositoryRequest(store, user))
     {
-        return BoardMutationForbidden();
+        return RepositoryMutationForbidden();
     }
 
     var repository = store.CreateRepository(request);
     return Results.Created($"/api/repositories/{repository.Id}", repository);
 });
 
-api.MapPost("/repositories/github/onboarding-draft", async (GitHubRepositoryOnboardingDraftRequest request, ClaimsPrincipal user, DevOpsStore store, RepositoryOnboardingDraftProvider onboarding, CancellationToken cancellationToken) =>
+api.MapPost("/repositories/github/onboarding-draft", async (GitHubRepositoryOnboardingDraftRequest request, RepositoryOnboardingDraftProvider onboarding, CancellationToken cancellationToken) =>
 {
-    if (!CanCreateRepositoryRequest(store, user))
-    {
-        return BoardMutationForbidden();
-    }
-
     return Results.Ok(await onboarding.CreateDraftAsync(request, cancellationToken));
 });
 
 api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
-    if (!CanCreateRepositoryRequest(store, user))
-    {
-        return BoardMutationForbidden();
-    }
-
     var actorSubject = AuthenticatedSubjectOrNull(user);
+    var resolvedInstallationId = request.InstallationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
     if (request.InstallationId is { } requestedInstallationId && !store.CanUseGitHubInstallation(requestedInstallationId, actorSubject))
     {
-        return BoardMutationForbidden();
+        return RepositoryMutationForbidden();
     }
 
-    var resolvedInstallationId = request.InstallationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
+    if (resolvedInstallationId is null || !store.CanCreateGitHubRepository(resolvedInstallationId.Value, actorSubject))
+    {
+        return RepositoryMutationForbidden();
+    }
+
     var integration = store.GetGitHubIntegration(resolvedInstallationId);
     if (integration is null)
     {
@@ -379,6 +374,22 @@ api.MapGet("/integrations/github", async (ClaimsPrincipal user, DevOpsStore stor
     }
 
     return Results.Ok(store.GetGitHubIntegrations(AuthenticatedSubjectOrNull(user)));
+});
+api.MapGet("/integrations/github/{installationId:long}/repository-creation-policy", (long installationId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    var policy = store.GetGitHubRepositoryCreationPolicy(installationId, AuthenticatedSubjectOrNull(user));
+    return policy is null ? Results.NotFound() : Results.Ok(policy);
+});
+api.MapPut("/integrations/github/{installationId:long}/repository-creation-policy", (long installationId, UpdateGitHubRepositoryCreationPolicyRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    var actorSubject = AuthenticatedSubjectOrNull(user);
+    if (!store.CanManageGitHubRepositoryCreationPolicy(installationId, actorSubject))
+    {
+        return RepositoryPolicyMutationForbidden();
+    }
+
+    var integration = store.UpsertGitHubRepositoryCreationPolicy(installationId, request, actorSubject);
+    return integration is null ? Results.NotFound() : Results.Ok(integration);
 });
 api.MapPost("/integrations/github/sync", async (ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
 {
@@ -1528,6 +1539,12 @@ static bool CanMutateTeamRequest(DevOpsStore store, Guid teamId, ClaimsPrincipal
 static IResult BoardMutationForbidden() =>
     Results.Problem("You do not have permission to modify this board.", statusCode: StatusCodes.Status403Forbidden);
 
+static IResult RepositoryMutationForbidden() =>
+    Results.Problem("You do not have permission to create repositories for this GitHub installation.", statusCode: StatusCodes.Status403Forbidden);
+
+static IResult RepositoryPolicyMutationForbidden() =>
+    Results.Problem("You do not have permission to manage repository creation for this GitHub installation.", statusCode: StatusCodes.Status403Forbidden);
+
 static IResult BoardReadForbidden() =>
     Results.Problem("You do not have permission to view this board.", statusCode: StatusCodes.Status403Forbidden);
 
@@ -1588,7 +1605,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null, string? HeadRef = null);
     public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt, IReadOnlyList<string>? ApplicationUrls = null);
     public sealed record GitOpsApplicationsResponseDto(IReadOnlyList<GitOpsApplicationStatusDto> Applications, string? Message = null);
-    public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt);
+    public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt, bool CanCreateRepositories = false, IReadOnlyList<Guid>? RepositoryCreatorTeamIds = null, bool CanManageRepositoryCreationPolicy = false);
     public sealed record GitHubManifestAppDto(long Id, string Slug, string Name, string Pem);
     public sealed record BoardSecretDto(Guid Id, Guid BoardId, Guid? RepositoryId, string Key, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastUsedAt = null);
     public sealed record AiSessionDto(Guid Id, Guid WorkItemId, string Provider, string Model, string? ProviderSessionId, string Status, DateTimeOffset LastPromptAt, Guid? RepositoryId = null, Guid? LastRunId = null, string? ContextSummary = null, string? ReasoningEffort = null);
@@ -1630,6 +1647,8 @@ namespace Rosenvall.DevOps.Api
     public sealed record GitHubRepositoryOnboardingDraftDto(string Name, string Description, string Prompt, RepositoryProfileDto RepositoryProfile, BoardAiContextRequest AiContext, IReadOnlyList<GitHubRepositoryOnboardingFileDto> Files, string Source = "fallback", string? Model = null);
     public sealed record CreateGitHubRepositoryRequest(long? InstallationId, string Name, bool Private = true, string? Description = null, string? Owner = null, string? ImplementationProfile = null, string? OnboardingPrompt = null, IReadOnlyList<GitHubRepositoryOnboardingFileDto>? Files = null, RepositoryProfileDto? RepositoryProfile = null, BoardAiContextRequest? AiContext = null);
     public sealed record GitHubRepositoryCreateResponse(RepositoryDto Repository, RepositoryProfileDto? RepositoryProfile = null, BoardAiContextRequest? AiContext = null);
+    public sealed record GitHubRepositoryCreationPolicyDto(long InstallationId, IReadOnlyList<Guid> AllowedTeamIds);
+    public sealed record UpdateGitHubRepositoryCreationPolicyRequest(IReadOnlyList<Guid>? AllowedTeamIds);
     public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null, RepositoryProfileDto? RepositoryProfile = null);
     public sealed record BoardGitOpsSettingsRequest(IReadOnlyList<string>? AllowedPaths, string? ArgoNamespace, string? ArgoApplicationSelector);
     public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain);
@@ -6808,6 +6827,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<BoardRepositoryLinkRecord> _boardRepositoryLinks = [];
         private readonly List<BoardRepositoryProfileRecord> _boardRepositoryProfiles = [];
         private readonly List<GitHubIntegrationDto> _githubIntegrations = [];
+        private readonly List<GitHubRepositoryCreationPolicyDto> _githubRepositoryCreationPolicies = [];
         private readonly List<BoardSecretDto> _boardSecrets = [];
         private readonly List<AiSessionDto> _aiSessions = [];
         private readonly List<BoardGitOpsSettingsDto> _boardGitOpsSettings = [];
@@ -7428,8 +7448,62 @@ namespace Rosenvall.DevOps.Api
             {
                 return _githubIntegrations
                     .Where(integration => CanUseGitHubIntegrationWithoutLock(integration, actorSubject))
+                    .Select(integration => EnrichGitHubIntegrationWithoutLock(integration, actorSubject))
                     .OrderBy(integration => integration.AccountLogin)
                     .ToArray();
+            }
+        }
+
+        public GitHubRepositoryCreationPolicyDto? GetGitHubRepositoryCreationPolicy(long installationId, string? actorSubject = null)
+        {
+            lock (_lock)
+            {
+                var integration = _githubIntegrations.SingleOrDefault(entry => entry.InstallationId == installationId);
+                if (integration is null || !CanUseGitHubIntegrationWithoutLock(integration, actorSubject))
+                {
+                    return null;
+                }
+
+                return RepositoryCreationPolicyForWithoutLock(installationId);
+            }
+        }
+
+        public GitHubIntegrationDto? UpsertGitHubRepositoryCreationPolicy(long installationId, UpdateGitHubRepositoryCreationPolicyRequest request, string? actorSubject)
+        {
+            lock (_lock)
+            {
+                var integration = _githubIntegrations.SingleOrDefault(entry => entry.InstallationId == installationId);
+                if (integration is null || !CanManageGitHubRepositoryCreationPolicyWithoutLock(integration, actorSubject))
+                {
+                    return null;
+                }
+
+                var allowedTeamIds = (request.AllowedTeamIds ?? [])
+                    .Where(teamId => _teams.Any(team => team.Id == teamId))
+                    .Distinct()
+                    .ToArray();
+                _githubRepositoryCreationPolicies.RemoveAll(policy => policy.InstallationId == installationId);
+                _githubRepositoryCreationPolicies.Add(new GitHubRepositoryCreationPolicyDto(installationId, allowedTeamIds));
+                Persist();
+                return EnrichGitHubIntegrationWithoutLock(integration, actorSubject);
+            }
+        }
+
+        public bool CanCreateGitHubRepository(long installationId, string? actorSubject)
+        {
+            lock (_lock)
+            {
+                var integration = _githubIntegrations.SingleOrDefault(entry => entry.InstallationId == installationId);
+                return integration is not null && CanCreateGitHubRepositoryWithoutLock(integration, actorSubject);
+            }
+        }
+
+        public bool CanManageGitHubRepositoryCreationPolicy(long installationId, string? actorSubject)
+        {
+            lock (_lock)
+            {
+                var integration = _githubIntegrations.SingleOrDefault(entry => entry.InstallationId == installationId);
+                return integration is not null && CanManageGitHubRepositoryCreationPolicyWithoutLock(integration, actorSubject);
             }
         }
 
@@ -7448,7 +7522,10 @@ namespace Rosenvall.DevOps.Api
                     Persist();
                 }
 
-                return _githubIntegrations.OrderBy(integration => integration.AccountLogin).ToArray();
+                return _githubIntegrations
+                    .OrderBy(integration => integration.AccountLogin)
+                    .Select(integration => EnrichGitHubIntegrationWithoutLock(integration, null))
+                    .ToArray();
             }
         }
 
@@ -7520,7 +7597,7 @@ namespace Rosenvall.DevOps.Api
                 var integration = CreateGitHubIntegrationDto(request);
                 _githubIntegrations.Add(integration);
                 Persist();
-                return integration;
+                return EnrichGitHubIntegrationWithoutLock(integration, null);
             }
         }
 
@@ -10029,10 +10106,81 @@ namespace Rosenvall.DevOps.Api
         private bool CanMutateRepositoryOnlyPipelineWithoutLock(Guid repositoryId, string actorSubject) =>
             !HasAnyTeamOrAccess() || VisibleRepositoryIdsWithoutLock(actorSubject).Contains(repositoryId);
 
-        private static bool CanUseGitHubIntegrationWithoutLock(GitHubIntegrationDto integration, string? actorSubject) =>
+        private bool CanUseGitHubIntegrationWithoutLock(GitHubIntegrationDto integration, string? actorSubject) =>
             string.IsNullOrWhiteSpace(actorSubject) ||
             integration.InstalledBy.Equals(actorSubject, StringComparison.OrdinalIgnoreCase) ||
-            integration.InstalledBy.Equals("github-app", StringComparison.OrdinalIgnoreCase);
+            integration.InstalledBy.Equals("github-app", StringComparison.OrdinalIgnoreCase) ||
+            CanCreateGitHubRepositoryWithoutLock(integration, actorSubject) ||
+            CanManageGitHubRepositoryCreationPolicyWithoutLock(integration, actorSubject);
+
+        private GitHubIntegrationDto EnrichGitHubIntegrationWithoutLock(GitHubIntegrationDto integration, string? actorSubject)
+        {
+            var policy = RepositoryCreationPolicyForWithoutLock(integration.InstallationId);
+            return integration with
+            {
+                CanCreateRepositories = CanCreateGitHubRepositoryWithoutLock(integration, actorSubject),
+                RepositoryCreatorTeamIds = policy.AllowedTeamIds,
+                CanManageRepositoryCreationPolicy = CanManageGitHubRepositoryCreationPolicyWithoutLock(integration, actorSubject)
+            };
+        }
+
+        private GitHubRepositoryCreationPolicyDto RepositoryCreationPolicyForWithoutLock(long installationId) =>
+            _githubRepositoryCreationPolicies.SingleOrDefault(policy => policy.InstallationId == installationId) ??
+            new GitHubRepositoryCreationPolicyDto(installationId, []);
+
+        private bool CanCreateGitHubRepositoryWithoutLock(GitHubIntegrationDto integration, string? actorSubject)
+        {
+            if (string.IsNullOrWhiteSpace(actorSubject))
+            {
+                return true;
+            }
+
+            if (integration.InstalledBy.Equals(actorSubject, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var policy = RepositoryCreationPolicyForWithoutLock(integration.InstallationId);
+            if (policy.AllowedTeamIds.Count == 0)
+            {
+                return false;
+            }
+
+            return ActorHasTeamRoleWithoutLock(actorSubject, policy.AllowedTeamIds, minimumRoleRank: 1);
+        }
+
+        private bool CanManageGitHubRepositoryCreationPolicyWithoutLock(GitHubIntegrationDto integration, string? actorSubject)
+        {
+            if (string.IsNullOrWhiteSpace(actorSubject))
+            {
+                return true;
+            }
+
+            if (integration.InstalledBy.Equals(actorSubject, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return integration.InstalledBy.Equals("github-app", StringComparison.OrdinalIgnoreCase) &&
+                ActorHasAnyTeamAdminRoleWithoutLock(actorSubject);
+        }
+
+        private bool ActorHasAnyTeamAdminRoleWithoutLock(string actorSubject) =>
+            ActorHasTeamRoleWithoutLock(actorSubject, _teams.Select(team => team.Id), minimumRoleRank: 2);
+
+        private bool ActorHasTeamRoleWithoutLock(string actorSubject, IEnumerable<Guid> teamIds, int minimumRoleRank)
+        {
+            var user = _users.SingleOrDefault(entry => entry.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+            if (user is null)
+            {
+                return false;
+            }
+
+            var allowed = teamIds.ToHashSet();
+            return _teams.Any(team =>
+                allowed.Contains(team.Id) &&
+                team.Members.Any(member => member.UserId == user.Id && RoleRank(member.Role) >= minimumRoleRank));
+        }
 
         private bool CanViewTeamWithoutLock(Guid teamId, string actorSubject)
         {
@@ -10485,6 +10633,7 @@ namespace Rosenvall.DevOps.Api
                 }
             }
             _githubIntegrations.AddRange(snapshot.GitHubIntegrations ?? []);
+            _githubRepositoryCreationPolicies.AddRange(snapshot.GitHubRepositoryCreationPolicies ?? []);
             _boardSecrets.AddRange(snapshot.BoardSecrets ?? []);
             _aiSessions.AddRange(snapshot.AiSessions ?? []);
             _boardGitOpsSettings.AddRange(snapshot.BoardGitOpsSettings ?? []);
@@ -10564,6 +10713,7 @@ namespace Rosenvall.DevOps.Api
                 _boardTeamAccess.ToArray(),
                 _boardRepositoryLinks.ToArray(),
                 _githubIntegrations.ToArray(),
+                _githubRepositoryCreationPolicies.ToArray(),
                 _boardSecrets.ToArray(),
                 _aiSessions.ToArray(),
                 _boardGitOpsSettings.ToArray(),
@@ -10625,7 +10775,7 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardTeamAccessRecord(Guid BoardId, Guid TeamId, string Role);
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile);
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);

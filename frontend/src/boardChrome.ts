@@ -12,6 +12,12 @@ export type BoardChromeBoard = {
   providerCapabilities?: string[] | null;
 };
 
+export type GitHubRepositoryCreationIntegration = {
+  installationId: number;
+  accountLogin?: string | null;
+  canCreateRepositories?: boolean | null;
+};
+
 export type TimelineChromeEvent = {
   id: string;
   workItemId?: string | null;
@@ -48,6 +54,16 @@ export function boardRepositoryUrl(board: BoardChromeBoard): string | null {
 
 export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {
   return !board.repository && Boolean(board.providerCapabilities?.includes('sync-github'));
+}
+
+export function canCreateRepositoryInInstallation(integration: GitHubRepositoryCreationIntegration | null | undefined): boolean {
+  return integration?.canCreateRepositories !== false;
+}
+
+export function repositoryCreatePermissionMessage(integration: GitHubRepositoryCreationIntegration | null | undefined): string | null {
+  if (!integration || canCreateRepositoryInInstallation(integration)) return null;
+  const account = integration.accountLogin?.trim() || `installation ${integration.installationId}`;
+  return `You do not have permission to create repositories for ${account}. Ask the installation owner to allow your team in Settings.`;
 }
 
 export function timelineLaneForKind(kind: string): TimelineLane {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -29,6 +29,14 @@ test('github board exposes a direct repository link', () => {
 test('repo-less board can sync only when provider capability allows it', () => {
   assert.equal(canSyncBoardToProvider({ id: 'preview', name: 'Preview', providerCapabilities: ['preview', 'sync-github'] }), true);
   assert.equal(canSyncBoardToProvider({ id: 'demo', name: 'Demo', repository: { provider: 'Sample' }, providerCapabilities: ['preview'] }), false);
+});
+
+test('github repository creation permission defaults open for old API and blocks explicit denial', () => {
+  assert.equal(canCreateRepositoryInInstallation(undefined), true);
+  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex' }), true);
+  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true }), true);
+  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), false);
+  assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), 'You do not have permission to create repositories for carnufex. Ask the installation owner to allow your team in Settings.');
 });
 
 test('timeline lanes classify implementation, cleanup, preview, pipeline and card events', () => {
