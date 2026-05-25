@@ -1636,6 +1636,26 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task GitHub_client_rejects_non_github_pull_request_urls()
+    {
+        var requests = new List<HttpRequestMessage>();
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            requests.Add(request);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        }))
+        {
+            BaseAddress = new Uri("https://api.github.com")
+        };
+        var github = new GitHubRepositoryClient(httpClient, new ConfigurationBuilder().Build());
+
+        var pullRequest = await github.GetPullRequestAsync("https://example.com/carnufex/Rosenvalls-Homelab/pull/33", "token", CancellationToken.None);
+
+        Assert.Null(pullRequest);
+        Assert.Empty(requests);
+    }
+
+    [Fact]
     public async Task GitHub_client_creates_private_repository_with_readme_initialization()
     {
         var requests = new List<(HttpMethod Method, string Path, string Body)>();

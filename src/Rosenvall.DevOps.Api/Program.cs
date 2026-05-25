@@ -5131,6 +5131,12 @@ namespace Rosenvall.DevOps.Api
                 return false;
             }
 
+            if (!uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
             var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
             if (segments.Length < 4 || !segments[2].Equals("pull", StringComparison.OrdinalIgnoreCase) || !int.TryParse(segments[3], out number))
             {
