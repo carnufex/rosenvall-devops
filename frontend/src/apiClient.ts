@@ -58,8 +58,8 @@ export function createApiClient(options: ApiClientOptions) {
     get<T>(path: string, options?: RequestOptions): Promise<T> {
       return request<T>(path, undefined, options);
     },
-    post<T>(path: string, body: unknown): Promise<T> {
-      return request<T>(path, jsonRequest('POST', body));
+    post<T>(path: string, body: unknown, options?: RequestOptions): Promise<T> {
+      return request<T>(path, jsonRequest('POST', body), options);
     },
     patch<T>(path: string, body: unknown): Promise<T> {
       return request<T>(path, jsonRequest('PATCH', body));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -87,4 +87,18 @@ test('markdown links only allow safe schemes', () => {
   assert.equal(safeMarkdownHref('javascript:alert(1)'), null);
   assert.equal(safeMarkdownHref('data:text/html,<script>alert(1)</script>'), null);
   assert.equal(safeMarkdownHref('//evil.example/path'), null);
+});
+
+test('gitops app urls keep only unique http links and produce compact labels', () => {
+  const urls = publicApplicationUrls([
+    'https://matplan.rosenvall.se/',
+    'https://matplan.rosenvall.se/',
+    'ftp://matplan.rosenvall.se',
+    '',
+    'https://headlamp.rosenvall.se/dashboard'
+  ]);
+
+  assert.deepEqual(urls, ['https://matplan.rosenvall.se/', 'https://headlamp.rosenvall.se/dashboard']);
+  assert.equal(applicationUrlLabel(urls[0]), 'matplan.rosenvall.se');
+  assert.equal(applicationUrlLabel(urls[1]), 'headlamp.rosenvall.se/dashboard');
 });

@@ -102,6 +102,32 @@ export function containedWheelScrollTop(currentScrollTop: number, deltaY: number
   return Math.min(Math.max(currentScrollTop + deltaY, 0), maxScrollTop);
 }
 
+export function publicApplicationUrls(values: string[] | null | undefined): string[] {
+  const seen = new Set<string>();
+  return (values ?? []).filter((value) => {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized.toLowerCase())) return false;
+    try {
+      const parsed = new URL(normalized);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    } catch {
+      return false;
+    }
+
+    seen.add(normalized.toLowerCase());
+    return true;
+  });
+}
+
+export function applicationUrlLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname === '/' ? parsed.host : `${parsed.host}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
 export function safeMarkdownHref(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return null;

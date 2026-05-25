@@ -25,6 +25,7 @@ builder.Services.AddTransient<IAiPlanProvider>(services => services.GetRequiredS
 builder.Services.AddSingleton<IAiPlanProvider, CodexCliPlanProvider>();
 builder.Services.AddSingleton<AiPlanProviderRouter>();
 builder.Services.AddSingleton<CodexCliPreviewSourceProvider>();
+builder.Services.AddSingleton<RepositoryOnboardingDraftProvider>();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
@@ -251,6 +252,72 @@ api.MapPost("/repositories", (CreateRepositoryRequest request, ClaimsPrincipal u
 
     var repository = store.CreateRepository(request);
     return Results.Created($"/api/repositories/{repository.Id}", repository);
+});
+
+api.MapPost("/repositories/github/onboarding-draft", async (GitHubRepositoryOnboardingDraftRequest request, ClaimsPrincipal user, DevOpsStore store, RepositoryOnboardingDraftProvider onboarding, CancellationToken cancellationToken) =>
+{
+    if (!CanCreateRepositoryRequest(store, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return Results.Ok(await onboarding.CreateDraftAsync(request, cancellationToken));
+});
+
+api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+{
+    if (!CanCreateRepositoryRequest(store, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var actorSubject = AuthenticatedSubjectOrNull(user);
+    if (request.InstallationId is { } requestedInstallationId && !store.CanUseGitHubInstallation(requestedInstallationId, actorSubject))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var resolvedInstallationId = request.InstallationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
+    var integration = store.GetGitHubIntegration(resolvedInstallationId);
+    if (integration is null)
+    {
+        return Results.Problem("No GitHub App installation is available for repository creation.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var files = RepositoryOnboardingDrafts.ValidateGuidanceFiles(request.Files);
+    if (files.Count == 0)
+    {
+        return Results.Problem("New GitHub repositories require at least one editable onboarding guidance file.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var token = await github.CreateInstallationTokenAsync(integration.InstallationId, cancellationToken);
+    if (string.IsNullOrWhiteSpace(token))
+    {
+        return Results.Problem($"Could not mint GitHub App installation token for {integration.AccountLogin}.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var createdRepository = await github.CreateRepositoryAsync(integration, request, token, cancellationToken);
+    if (createdRepository is null)
+    {
+        return Results.Problem("GitHub repository creation failed. Check GitHub App permissions for repository administration.", statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var committed = await github.CommitRepositoryFilesAsync(createdRepository, files, token, "Initialize repository guidance", cancellationToken);
+    if (!committed)
+    {
+        return Results.Problem("GitHub repository was created, but the onboarding guidance commit failed.", statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var repository = store.CreateRepository(new CreateRepositoryRequest(
+        createdRepository.Provider,
+        createdRepository.Name,
+        createdRepository.RemoteUrl,
+        createdRepository.DefaultBranch,
+        createdRepository.WebUrl,
+        createdRepository.Owner,
+        request.ImplementationProfile ?? createdRepository.ImplementationProfile));
+
+    return Results.Created($"/api/repositories/{repository.Id}", new GitHubRepositoryCreateResponse(repository, request.RepositoryProfile, request.AiContext));
 });
 
 api.MapGet("/me", (ClaimsPrincipal user, DevOpsStore store) =>
@@ -1519,7 +1586,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, bool Adopted = false, DateTimeOffset? MergedAt = null, DateTimeOffset? VerifiedAt = null, string? VerificationFailure = null);
     public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null, string? HeadRef = null);
-    public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt);
+    public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt, IReadOnlyList<string>? ApplicationUrls = null);
     public sealed record GitOpsApplicationsResponseDto(IReadOnlyList<GitOpsApplicationStatusDto> Applications, string? Message = null);
     public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt);
     public sealed record GitHubManifestAppDto(long Id, string Slug, string Name, string Pem);
@@ -1558,6 +1625,11 @@ namespace Rosenvall.DevOps.Api
     public sealed record InviteTeamMemberRequest(string Email, string Role);
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
     public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null, string? Owner = null, string? ImplementationProfile = null);
+    public sealed record GitHubRepositoryOnboardingFileDto(string Path, string Content);
+    public sealed record GitHubRepositoryOnboardingDraftRequest(string Name, string? Description = null, string? Prompt = null, string? ImplementationProfile = null);
+    public sealed record GitHubRepositoryOnboardingDraftDto(string Name, string Description, string Prompt, RepositoryProfileDto RepositoryProfile, BoardAiContextRequest AiContext, IReadOnlyList<GitHubRepositoryOnboardingFileDto> Files, string Source = "fallback", string? Model = null);
+    public sealed record CreateGitHubRepositoryRequest(long? InstallationId, string Name, bool Private = true, string? Description = null, string? Owner = null, string? ImplementationProfile = null, string? OnboardingPrompt = null, IReadOnlyList<GitHubRepositoryOnboardingFileDto>? Files = null, RepositoryProfileDto? RepositoryProfile = null, BoardAiContextRequest? AiContext = null);
+    public sealed record GitHubRepositoryCreateResponse(RepositoryDto Repository, RepositoryProfileDto? RepositoryProfile = null, BoardAiContextRequest? AiContext = null);
     public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null, RepositoryProfileDto? RepositoryProfile = null);
     public sealed record BoardGitOpsSettingsRequest(IReadOnlyList<string>? AllowedPaths, string? ArgoNamespace, string? ArgoApplicationSelector);
     public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain);
@@ -2990,6 +3062,7 @@ namespace Rosenvall.DevOps.Api
                     var status = item.TryGetProperty("status", out var stat) ? stat : default;
                     var sync = status.ValueKind == JsonValueKind.Object && status.TryGetProperty("sync", out var syncElement) ? syncElement : default;
                     var health = status.ValueKind == JsonValueKind.Object && status.TryGetProperty("health", out var healthElement) ? healthElement : default;
+                    var summary = status.ValueKind == JsonValueKind.Object && status.TryGetProperty("summary", out var summaryElement) ? summaryElement : default;
                     var name = JsonString(metadata, "name", "application");
                     return new GitOpsApplicationStatusDto(
                         name,
@@ -2999,7 +3072,8 @@ namespace Rosenvall.DevOps.Api
                         JsonNullableString(sync, "revision"),
                         FirstNonEmpty(JsonNullableString(health, "message"), JsonNullableString(status, "message"), "Application status read from ArgoCD."),
                         BuildArgoUrl(argoBaseUrl, name),
-                        JsonDate(metadata, "creationTimestamp") ?? JsonDate(status, "reconciledAt"));
+                        JsonDate(metadata, "creationTimestamp") ?? JsonDate(status, "reconciledAt"),
+                        ExternalUrls(summary));
                 })
                 .OrderBy(application => application.Name, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -3047,6 +3121,25 @@ namespace Rosenvall.DevOps.Api
             JsonNullableString(element, property) is { } value && DateTimeOffset.TryParse(value, out var parsed)
                 ? parsed
                 : null;
+
+        private static IReadOnlyList<string> ExternalUrls(JsonElement summary)
+        {
+            if (summary.ValueKind != JsonValueKind.Object ||
+                !summary.TryGetProperty("externalURLs", out var urls) ||
+                urls.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return urls.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.String)
+                .Select(item => item.GetString()?.Trim() ?? "")
+                .Where(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+                    (uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+                     uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
 
         private static string? BuildArgoUrl(string? baseUrl, string name) =>
             string.IsNullOrWhiteSpace(baseUrl)
@@ -4620,6 +4713,343 @@ namespace Rosenvall.DevOps.Api
         };
     }
 
+    public static class RepositoryOnboardingDrafts
+    {
+        private static readonly Regex SkillPathPattern = new(@"^\.codex/skills/[a-z0-9][a-z0-9-]{0,62}/SKILL\.md$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        public static GitHubRepositoryOnboardingDraftDto Fallback(GitHubRepositoryOnboardingDraftRequest request)
+        {
+            var name = SafeName(request.Name);
+            var prompt = string.IsNullOrWhiteSpace(request.Prompt) ? $"Repository for {name}." : request.Prompt.Trim();
+            var description = string.IsNullOrWhiteSpace(request.Description) ? $"Private repository for {name}." : request.Description.Trim();
+            var profile = NormalizeImplementationProfile(request.ImplementationProfile, prompt);
+            var skillName = profile == "gitops-homelab" ? "gitops-repository" : "repository-workflow";
+            var skills = profile == "gitops-homelab"
+                ? new[] { "kubernetes", "argocd", "gitops-homelab" }
+                : new[] { "repository-workflow" };
+            var instructions = profile == "gitops-homelab"
+                ? "Use GitOps-first changes. Prefer pull requests, keep changes within declared GitOps roots, and validate rendered manifests before implementation."
+                : "Keep repository changes focused, explain assumptions in pull requests, and prefer small reviewable commits.";
+            var repositoryProfile = new RepositoryProfileDto(
+                profile,
+                ProfileDisplayName(profile),
+                0.62,
+                skills,
+                instructions,
+                ["Created from new repository onboarding prompt."],
+                "fallback",
+                skills,
+                [new RepositorySkillDraftDto(skillName, $"Repo-local guidance for {name}.", SkillContent(skillName, prompt, profile), true)],
+                null,
+                DateTimeOffset.UtcNow);
+            var aiContext = new BoardAiContextRequest(instructions, skills, true);
+            var files = ValidateGuidanceFiles([
+                new GitHubRepositoryOnboardingFileDto("README.md", $"# {name}\n\n{description}\n\n## Purpose\n\n{prompt}\n\n## Workflow\n\nUse Rosenvall DevOps board instructions and repo-local skills for planning and implementation.\n"),
+                new GitHubRepositoryOnboardingFileDto(".gitignore", GitIgnoreFor(profile)),
+                new GitHubRepositoryOnboardingFileDto("AGENTS.md", $"# Agent Instructions\n\n{instructions}\n\nDo not commit secrets. Keep generated changes reviewable and scoped to the task.\n"),
+                new GitHubRepositoryOnboardingFileDto($".codex/skills/{skillName}/SKILL.md", SkillContent(skillName, prompt, profile))
+            ]);
+
+            return new GitHubRepositoryOnboardingDraftDto(name, description, prompt, repositoryProfile, aiContext, files, "fallback");
+        }
+
+        public static IReadOnlyList<GitHubRepositoryOnboardingFileDto> ValidateGuidanceFiles(IReadOnlyList<GitHubRepositoryOnboardingFileDto>? files)
+        {
+            if (files is null)
+            {
+                return [];
+            }
+
+            return files
+                .Select(file => new GitHubRepositoryOnboardingFileDto(NormalizePath(file.Path), file.Content ?? ""))
+                .Where(file => IsAllowedGuidancePath(file.Path) && file.Content.Length <= 65536)
+                .GroupBy(file => file.Path, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.Last())
+                .Take(24)
+                .ToArray();
+        }
+
+        public static GitHubRepositoryOnboardingDraftDto NormalizeDraft(GitHubRepositoryOnboardingDraftRequest request, GitHubRepositoryOnboardingDraftDto draft, string source, string? model)
+        {
+            var fallback = Fallback(request);
+            var files = ValidateGuidanceFiles(draft.Files);
+            if (files.Count == 0)
+            {
+                files = fallback.Files;
+            }
+
+            var profile = draft.RepositoryProfile ?? fallback.RepositoryProfile;
+            var aiContext = draft.AiContext ?? fallback.AiContext;
+            return new GitHubRepositoryOnboardingDraftDto(
+                string.IsNullOrWhiteSpace(draft.Name) ? fallback.Name : SafeName(draft.Name),
+                string.IsNullOrWhiteSpace(draft.Description) ? fallback.Description : draft.Description.Trim(),
+                string.IsNullOrWhiteSpace(draft.Prompt) ? fallback.Prompt : draft.Prompt.Trim(),
+                profile with
+                {
+                    ImplementationProfile = NormalizeImplementationProfile(profile.ImplementationProfile, draft.Prompt),
+                    Source = source,
+                    AnalyzerModel = model,
+                    AnalyzedAt = DateTimeOffset.UtcNow
+                },
+                aiContext,
+                files,
+                source,
+                model);
+        }
+
+        private static string NormalizePath(string path) =>
+            (path ?? "").Trim().Replace('\\', '/').TrimStart('/');
+
+        private static bool IsAllowedGuidancePath(string path) =>
+            path is "README.md" or ".gitignore" or "AGENTS.md" ||
+            SkillPathPattern.IsMatch(path);
+
+        private static string SafeName(string? value)
+        {
+            var normalized = new string((value ?? "new-repository").Trim().Select(character =>
+                char.IsLetterOrDigit(character) || character is '-' or '_' or '.' ? character : '-').ToArray()).Trim('-', '.', '_');
+            while (normalized.Contains("--", StringComparison.Ordinal))
+            {
+                normalized = normalized.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return string.IsNullOrWhiteSpace(normalized) ? "new-repository" : normalized;
+        }
+
+        private static string NormalizeImplementationProfile(string? value, string? prompt)
+        {
+            var text = $"{value} {prompt}".ToLowerInvariant();
+            if (text.Contains("gitops", StringComparison.Ordinal) || text.Contains("kubernetes", StringComparison.Ordinal) || text.Contains("argocd", StringComparison.Ordinal))
+            {
+                return "gitops-homelab";
+            }
+
+            if (text.Contains("unity", StringComparison.Ordinal))
+            {
+                return "unity";
+            }
+
+            if (text.Contains("react", StringComparison.Ordinal) || text.Contains("vite", StringComparison.Ordinal) || text.Contains("preview", StringComparison.Ordinal))
+            {
+                return "react-preview";
+            }
+
+            return "code-repo";
+        }
+
+        private static string ProfileDisplayName(string profile) => profile switch
+        {
+            "gitops-homelab" => "GitOps homelab",
+            "unity" => "Unity",
+            "react-preview" => "React preview",
+            _ => "Code repo"
+        };
+
+        private static string GitIgnoreFor(string profile) => profile switch
+        {
+            "unity" => "Library/\nTemp/\nObj/\nBuild/\nBuilds/\nLogs/\nUserSettings/\n.vs/\n*.csproj\n*.sln\n",
+            "react-preview" => "node_modules/\ndist/\n.env\n.env.*\n!.env.example\n.DS_Store\n",
+            "gitops-homelab" => ".terraform/\n*.tfstate\n*.tfstate.*\n.env\n.env.*\n!.env.example\n",
+            _ => "bin/\nobj/\nnode_modules/\ndist/\n.env\n.env.*\n!.env.example\n.DS_Store\n"
+        };
+
+        private static string SkillContent(string name, string prompt, string profile) =>
+            $"# {name}\n\nUse this skill for tasks in this repository.\n\nRepository intent: {prompt}\n\nPrimary profile: {profile}\n\n- Read repository conventions before changing files.\n- Prefer pull requests and focused diffs.\n- Never write secrets to the repository.\n";
+    }
+
+    public sealed class RepositoryOnboardingDraftProvider(IConfiguration configuration, ILogger<RepositoryOnboardingDraftProvider> logger)
+    {
+        public async Task<GitHubRepositoryOnboardingDraftDto> CreateDraftAsync(GitHubRepositoryOnboardingDraftRequest request, CancellationToken cancellationToken)
+        {
+            var fallback = RepositoryOnboardingDrafts.Fallback(request);
+            var model = configuration["Ai:Codex:Model"] ?? "gpt-5.5";
+            var codexPath = CodexExecutableResolver.Resolve(configuration["Ai:Codex:Path"] ?? "codex");
+            var timeout = TimeSpan.FromSeconds(Math.Clamp(configuration.GetValue("Ai:Codex:OnboardingTimeoutSeconds", 45), 5, 120));
+            var outputPath = Path.Combine(Path.GetTempPath(), $"rosenvall-onboarding-{Guid.NewGuid():N}.json");
+            try
+            {
+                using var process = new Process
+                {
+                    StartInfo = BuildStartInfo(codexPath, model, outputPath),
+                    EnableRaisingEvents = true
+                };
+
+                if (!process.Start())
+                {
+                    return fallback;
+                }
+
+                var stdOut = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var stdErr = process.StandardError.ReadToEndAsync(cancellationToken);
+                await process.StandardInput.WriteAsync(BuildPrompt(request).AsMemory(), cancellationToken);
+                process.StandardInput.Close();
+
+                using var timeoutCancellation = new CancellationTokenSource(timeout);
+                using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
+                try
+                {
+                    await process.WaitForExitAsync(linkedCancellation.Token);
+                }
+                catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    TryKill(process);
+                    return fallback;
+                }
+
+                var output = await stdOut;
+                var error = await stdErr;
+                if (process.ExitCode != 0)
+                {
+                    logger.LogInformation("Codex onboarding draft fell back after exit {ExitCode}: {Message}", process.ExitCode, FirstUsefulLine(error, output));
+                    return fallback;
+                }
+
+                var raw = File.Exists(outputPath) ? await File.ReadAllTextAsync(outputPath, cancellationToken) : output;
+                if (TryParseDraft(request, raw, model, out var draft))
+                {
+                    return draft;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or JsonException)
+            {
+                logger.LogInformation(ex, "Codex onboarding draft unavailable; using deterministic fallback.");
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(outputPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup.
+                }
+            }
+
+            return fallback;
+        }
+
+        private ProcessStartInfo BuildStartInfo(string codexPath, string model, string outputPath)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = codexPath,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardInputEncoding = Encoding.UTF8,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("exec");
+            startInfo.ArgumentList.Add("--ephemeral");
+            startInfo.ArgumentList.Add("--ignore-user-config");
+            startInfo.ArgumentList.Add("--ignore-rules");
+            startInfo.ArgumentList.Add("--skip-git-repo-check");
+            startInfo.ArgumentList.Add("--sandbox");
+            startInfo.ArgumentList.Add("read-only");
+            startInfo.ArgumentList.Add("--output-last-message");
+            startInfo.ArgumentList.Add(outputPath);
+            startInfo.ArgumentList.Add("-m");
+            startInfo.ArgumentList.Add(model);
+            startInfo.ArgumentList.Add("-");
+
+            var codexHome = configuration["Ai:Codex:Home"];
+            if (!string.IsNullOrWhiteSpace(codexHome))
+            {
+                startInfo.Environment["CODEX_HOME"] = codexHome.Trim();
+            }
+
+            return startInfo;
+        }
+
+        private static string BuildPrompt(GitHubRepositoryOnboardingDraftRequest request) =>
+            $$"""
+              Create an editable new-repository onboarding draft for Rosenvall DevOps.
+              Return only strict JSON. Do not use markdown fences.
+
+              Repository name: {{request.Name}}
+              Description: {{request.Description}}
+              User prompt: {{request.Prompt}}
+              Initial profile hint: {{request.ImplementationProfile}}
+
+              Allowed files only:
+              - README.md
+              - .gitignore
+              - AGENTS.md
+              - .codex/skills/<skill-name>/SKILL.md
+
+              Do not propose starter app code, secrets, Git commands, commits, pushes, pull requests, CI credentials, or deployment manifests unless they are documentation inside the allowed files.
+
+              JSON shape:
+              {
+                "name": "safe-repo-name",
+                "description": "short description",
+                "prompt": "normalized user intent",
+                "repositoryProfile": {
+                  "implementationProfile": "code-repo|react-preview|unity|gitops-homelab",
+                  "displayName": "human name",
+                  "confidence": 0.0,
+                  "enabledSkills": ["skill"],
+                  "instructions": "board instructions",
+                  "signals": ["signal"],
+                  "source": "codex",
+                  "capabilityTags": ["tag"],
+                  "skillDrafts": [{"name":"skill","description":"short","content":"# skill\n\n...","enabled":true}]
+                },
+                "aiContext": {"instructions":"board instructions","enabledSkills":["skill"],"askWhenUncertain":true},
+                "files": [{"path":"README.md","content":"# ..."}]
+              }
+              """;
+
+        private static bool TryParseDraft(GitHubRepositoryOnboardingDraftRequest request, string raw, string model, out GitHubRepositoryOnboardingDraftDto draft)
+        {
+            draft = RepositoryOnboardingDrafts.Fallback(request);
+            var trimmed = raw.Trim();
+            var start = trimmed.IndexOf('{');
+            var end = trimmed.LastIndexOf('}');
+            if (start < 0 || end <= start)
+            {
+                return false;
+            }
+
+            var json = trimmed[start..(end + 1)];
+            var parsed = JsonSerializer.Deserialize<GitHubRepositoryOnboardingDraftDto>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (parsed is null)
+            {
+                return false;
+            }
+
+            draft = RepositoryOnboardingDrafts.NormalizeDraft(request, parsed, "codex", model);
+            return true;
+        }
+
+        private static void TryKill(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // Best-effort timeout cleanup.
+            }
+        }
+
+        private static string FirstUsefulLine(string error, string output)
+        {
+            var line = (error + "\n" + output)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault();
+            return string.IsNullOrWhiteSpace(line) ? "unknown Codex CLI error." : line;
+        }
+    }
+
     public sealed class GitHubRepositoryClient(HttpClient httpClient, IConfiguration configuration)
     {
         public string? ConfiguredToken => configuration["GitHub:Token"];
@@ -5148,6 +5578,93 @@ namespace Rosenvall.DevOps.Api
                 : repository with { ImplementationProfile = NormalizeTextValue(createRequest.ImplementationProfile, "code-repo") };
         }
 
+        public async Task<RepositoryDto?> CreateRepositoryAsync(GitHubIntegrationDto integration, CreateGitHubRepositoryRequest createRequest, string token, CancellationToken cancellationToken)
+        {
+            var name = NormalizeRepositoryName(createRequest.Name);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return null;
+            }
+
+            var owner = string.IsNullOrWhiteSpace(createRequest.Owner) ? integration.AccountLogin : createRequest.Owner.Trim();
+            var organization = integration.AccountType.Equals("Organization", StringComparison.OrdinalIgnoreCase) ||
+                integration.AccountType.Equals("Org", StringComparison.OrdinalIgnoreCase);
+            var url = organization
+                ? $"https://api.github.com/orgs/{Uri.EscapeDataString(owner)}/repos"
+                : "https://api.github.com/user/repos";
+            using var request = CreateGitHubRequest(HttpMethod.Post, url, token);
+            request.Content = JsonContent.Create(new
+            {
+                name,
+                description = string.IsNullOrWhiteSpace(createRequest.Description) ? $"Rosenvall DevOps board repository for {name}." : createRequest.Description.Trim(),
+                @private = createRequest.Private,
+                auto_init = true
+            });
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var repository = NormalizeRepositories(JsonSerializer.SerializeToElement(new[] { document.RootElement })).FirstOrDefault();
+            return repository is null
+                ? null
+                : repository with { ImplementationProfile = NormalizeTextValue(createRequest.ImplementationProfile, "code-repo") };
+        }
+
+        public async Task<bool> CommitRepositoryFilesAsync(RepositoryDto repository, IReadOnlyList<GitHubRepositoryOnboardingFileDto> files, string token, string message, CancellationToken cancellationToken)
+        {
+            if (files.Count == 0)
+            {
+                return true;
+            }
+
+            var owner = repository.Owner;
+            var repo = repository.Name;
+            var branch = string.IsNullOrWhiteSpace(repository.DefaultBranch) ? "main" : repository.DefaultBranch;
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
+            {
+                return false;
+            }
+
+            var headSha = await GetGitReferenceShaAsync(owner, repo, branch, token, cancellationToken);
+            if (string.IsNullOrWhiteSpace(headSha))
+            {
+                return false;
+            }
+
+            var baseTreeSha = await GetCommitTreeShaAsync(owner, repo, headSha, token, cancellationToken);
+            if (string.IsNullOrWhiteSpace(baseTreeSha))
+            {
+                return false;
+            }
+
+            var treeEntries = new List<object>();
+            foreach (var file in files)
+            {
+                var blobSha = await CreateBlobAsync(owner, repo, file.Content, token, cancellationToken);
+                if (string.IsNullOrWhiteSpace(blobSha))
+                {
+                    return false;
+                }
+
+                treeEntries.Add(new { path = file.Path, mode = "100644", type = "blob", sha = blobSha });
+            }
+
+            var treeSha = await CreateTreeAsync(owner, repo, baseTreeSha, treeEntries, token, cancellationToken);
+            if (string.IsNullOrWhiteSpace(treeSha))
+            {
+                return false;
+            }
+
+            var commitSha = await CreateCommitAsync(owner, repo, message, treeSha, headSha, token, cancellationToken);
+            return !string.IsNullOrWhiteSpace(commitSha) &&
+                await UpdateReferenceAsync(owner, repo, branch, commitSha, token, cancellationToken);
+        }
+
         public async Task<GitHubPullRequestDto?> GetPullRequestAsync(string pullRequestUrl, string token, CancellationToken cancellationToken)
         {
             if (!TryParsePullRequestUrl(pullRequestUrl, out var owner, out var repo, out var number))
@@ -5316,6 +5833,99 @@ namespace Rosenvall.DevOps.Api
             {
                 return null;
             }
+        }
+
+        private async Task<string?> GetGitReferenceShaAsync(string owner, string repo, string branch, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/git/ref/heads/{Uri.EscapeDataString(branch.Trim())}";
+            using var request = CreateGitHubRequest(HttpMethod.Get, url, token);
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return document.RootElement.TryGetProperty("object", out var obj) ? GetString(obj, "sha") : null;
+        }
+
+        private async Task<string?> GetCommitTreeShaAsync(string owner, string repo, string commitSha, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/git/commits/{Uri.EscapeDataString(commitSha)}";
+            using var request = CreateGitHubRequest(HttpMethod.Get, url, token);
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return document.RootElement.TryGetProperty("tree", out var tree) ? GetString(tree, "sha") : null;
+        }
+
+        private async Task<string?> CreateBlobAsync(string owner, string repo, string content, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/git/blobs";
+            using var request = CreateGitHubRequest(HttpMethod.Post, url, token);
+            request.Content = JsonContent.Create(new { content, encoding = "utf-8" });
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return GetString(document.RootElement, "sha");
+        }
+
+        private async Task<string?> CreateTreeAsync(string owner, string repo, string baseTreeSha, IReadOnlyList<object> treeEntries, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/git/trees";
+            using var request = CreateGitHubRequest(HttpMethod.Post, url, token);
+            request.Content = JsonContent.Create(new { base_tree = baseTreeSha, tree = treeEntries });
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return GetString(document.RootElement, "sha");
+        }
+
+        private async Task<string?> CreateCommitAsync(string owner, string repo, string message, string treeSha, string parentSha, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/git/commits";
+            using var request = CreateGitHubRequest(HttpMethod.Post, url, token);
+            request.Content = JsonContent.Create(new { message, tree = treeSha, parents = new[] { parentSha } });
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return GetString(document.RootElement, "sha");
+        }
+
+        private async Task<bool> UpdateReferenceAsync(string owner, string repo, string branch, string commitSha, string token, CancellationToken cancellationToken)
+        {
+            var url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner.Trim())}/{Uri.EscapeDataString(repo.Trim())}/git/refs/heads/{Uri.EscapeDataString(branch.Trim())}";
+            using var request = CreateGitHubRequest(HttpMethod.Patch, url, token);
+            request.Content = JsonContent.Create(new { sha = commitSha, force = false });
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            return response.IsSuccessStatusCode;
         }
 
         private static HttpRequestMessage CreateGitHubRequest(HttpMethod method, string url, string token)

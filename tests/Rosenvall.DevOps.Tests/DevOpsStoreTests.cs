@@ -1760,6 +1760,83 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task GitHub_client_commits_onboarding_guidance_files_in_one_commit()
+    {
+        var requests = new List<(HttpMethod Method, string Path, string Body)>();
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            var body = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? "";
+            requests.Add((request.Method, request.RequestUri!.PathAndQuery, body));
+            var path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/repos/carnufex/new-board/git/ref/heads/main")
+            {
+                return JsonResponse("""{"object":{"sha":"head-sha"}}""");
+            }
+
+            if (request.Method == HttpMethod.Patch && path == "/repos/carnufex/new-board/git/refs/heads/main")
+            {
+                return JsonResponse("""{"ref":"refs/heads/main"}""");
+            }
+
+            return path switch
+            {
+                "/repos/carnufex/new-board/git/commits/head-sha" => JsonResponse("""{"tree":{"sha":"base-tree-sha"}}"""),
+                "/repos/carnufex/new-board/git/blobs" => JsonResponse($$"""{"sha":"blob-{{requests.Count}}"}"""),
+                "/repos/carnufex/new-board/git/trees" => JsonResponse("""{"sha":"tree-sha"}"""),
+                "/repos/carnufex/new-board/git/commits" => JsonResponse("""{"sha":"commit-sha"}"""),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{}") }
+            };
+        }))
+        {
+            BaseAddress = new Uri("https://api.github.com")
+        };
+        var github = new GitHubRepositoryClient(httpClient, new ConfigurationBuilder().Build());
+        var repository = new RepositoryDto(Guid.NewGuid(), "GitHub", "new-board", "https://github.com/carnufex/new-board.git", "https://github.com/carnufex/new-board", "main", DateTimeOffset.UtcNow, "carnufex", "code-repo");
+
+        var committed = await github.CommitRepositoryFilesAsync(repository, [
+            new GitHubRepositoryOnboardingFileDto("README.md", "# New board"),
+            new GitHubRepositoryOnboardingFileDto("AGENTS.md", "# Agent Instructions")
+        ], "token", "Initialize repository guidance", CancellationToken.None);
+
+        Assert.True(committed);
+        Assert.Contains(requests, request => request.Method == HttpMethod.Post && request.Path == "/repos/carnufex/new-board/git/trees" && request.Body.Contains("\"README.md\"", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.Method == HttpMethod.Post && request.Path == "/repos/carnufex/new-board/git/commits" && request.Body.Contains("Initialize repository guidance", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.Method == HttpMethod.Patch && request.Path == "/repos/carnufex/new-board/git/refs/heads/main" && request.Body.Contains("commit-sha", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Onboarding_guidance_files_are_limited_to_safe_paths()
+    {
+        var files = RepositoryOnboardingDrafts.ValidateGuidanceFiles([
+            new GitHubRepositoryOnboardingFileDto("README.md", "# ok"),
+            new GitHubRepositoryOnboardingFileDto(".codex/skills/repo-workflow/SKILL.md", "# ok"),
+            new GitHubRepositoryOnboardingFileDto("src/app.ts", "console.log('no')"),
+            new GitHubRepositoryOnboardingFileDto("../secret.txt", "no")
+        ]);
+
+        Assert.Contains(files, file => file.Path == "README.md");
+        Assert.Contains(files, file => file.Path == ".codex/skills/repo-workflow/SKILL.md");
+        Assert.DoesNotContain(files, file => file.Path.Contains("src/", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(files, file => file.Path.Contains("secret", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Onboarding_fallback_detects_gitops_prompt_and_creates_editable_guidance()
+    {
+        var draft = RepositoryOnboardingDrafts.Fallback(new GitHubRepositoryOnboardingDraftRequest(
+            "homelab-platform",
+            "Homelab GitOps repo",
+            "A Kubernetes GitOps repository managed by ArgoCD.",
+            null));
+
+        Assert.Equal("gitops-homelab", draft.RepositoryProfile.ImplementationProfile);
+        Assert.Contains("argocd", draft.RepositoryProfile.EnabledSkills);
+        Assert.Contains(draft.Files, file => file.Path == "README.md");
+        Assert.Contains(draft.Files, file => file.Path == "AGENTS.md");
+        Assert.Contains(draft.Files, file => file.Path.StartsWith(".codex/skills/", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Ai_session_is_stable_per_card_and_codex_resume_is_used_when_session_id_exists()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -1871,7 +1948,8 @@ public sealed class DevOpsStoreTests
               },
               "status": {
                 "sync": { "status": "Synced", "revision": "abc123" },
-                "health": { "status": "Healthy", "message": "all resources healthy" }
+                "health": { "status": "Healthy", "message": "all resources healthy" },
+                "summary": { "externalURLs": ["https://grafana.rosenvall.se", "", "ftp://grafana.invalid", "https://grafana.rosenvall.se"] }
               }
             },
             {
@@ -1898,6 +1976,7 @@ public sealed class DevOpsStoreTests
                 Assert.Equal("Healthy", grafana.HealthStatus);
                 Assert.Equal("abc123", grafana.Revision);
                 Assert.Equal("https://argocd.rosenvall.se/applications/grafana", grafana.Url);
+                Assert.Equal(["https://grafana.rosenvall.se"], grafana.ApplicationUrls);
             },
             prometheus =>
             {
