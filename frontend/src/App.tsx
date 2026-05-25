@@ -2245,17 +2245,22 @@ function RepositoryCleanupRunPanel({ run, workItemId, busy = false, onAdopt, pro
 
 function CleanupAdoptionPanel({ workItemId, busy, onAdopt, compact = false }: { workItemId: string; busy: boolean; onAdopt: (workItemId: string, pullRequestUrl: string) => Promise<boolean>; compact?: boolean }) {
   const [pullRequestUrl, setPullRequestUrl] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const disabled = busy || submitting || !pullRequestUrl.trim();
   return (
     <form className={compact ? 'cleanup-adopt-form compact' : 'panel compact-panel cleanup-adopt-form'} onSubmit={(event) => {
       event.preventDefault();
-      if (!pullRequestUrl.trim()) return;
-      void onAdopt(workItemId, pullRequestUrl.trim()).then((saved) => {
-        if (saved) setPullRequestUrl('');
-      });
+      if (disabled) return;
+      setSubmitting(true);
+      void onAdopt(workItemId, pullRequestUrl.trim())
+        .then((saved) => {
+          if (saved) setPullRequestUrl('');
+        })
+        .finally(() => setSubmitting(false));
     }}>
       {!compact && <PanelHeader icon={<GitPullRequest size={20} />} title="Adopt cleanup PR" />}
       <label>Cleanup PR URL<input value={pullRequestUrl} onChange={(event) => setPullRequestUrl(event.target.value)} placeholder="https://github.com/owner/repo/pull/35" /></label>
-      <button className="secondary compact inline" disabled={busy || !pullRequestUrl.trim()}><GitPullRequest size={14} />Adopt cleanup PR</button>
+      <button className="secondary compact inline" disabled={disabled}><GitPullRequest size={14} />Adopt cleanup PR</button>
     </form>
   );
 }
@@ -2540,14 +2545,18 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
   onClose: () => void;
 }) {
   const [form, setForm] = React.useState<WorkItemForm>({ ...emptyForm, status: initialStatus, assignee: preferredAssignee(assigneeOptions) });
+  const [submitting, setSubmitting] = React.useState(false);
   return (
     <ModalFrame title="New card" onClose={onClose}>
       <form className="create-form" onSubmit={(event) => {
         event.preventDefault();
-        if (!form.title.trim()) return;
-        void onCreate(form).then((saved) => {
-          if (saved) onClose();
-        });
+        if (!form.title.trim() || submitting) return;
+        setSubmitting(true);
+        void onCreate(form)
+          .then((saved) => {
+            if (saved) onClose();
+          })
+          .finally(() => setSubmitting(false));
       }}>
         <label>Title<input autoFocus value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
         <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
@@ -2558,7 +2567,7 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
           <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
         </div>
         <div className="modal-actions">
-          <button className="primary-action" disabled={!form.title.trim()}><Plus size={16} />Create card</button>
+          <button className="primary-action" disabled={!form.title.trim() || submitting}><Plus size={16} />Create card</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -2623,6 +2632,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
   const [profileStatus, setProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [aiProfileStatus, setAiProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [profileError, setProfileError] = React.useState<string | null>(null);
+  const [submitting, setSubmitting] = React.useState(false);
   const profileRequestRef = React.useRef(0);
   const normalizedName = form.name.trim();
   const usesGitHub = form.providerMode === 'GitHub';
@@ -2734,10 +2744,13 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
     <ModalFrame title="Add board" onClose={onClose}>
       <form className="create-form" onSubmit={(event) => {
         event.preventDefault();
-        if (!canCreate) return;
-        void onCreate({ ...form, name: normalizedName }).then((saved) => {
-          if (saved) onClose();
-        });
+        if (!canCreate || submitting) return;
+        setSubmitting(true);
+        void onCreate({ ...form, name: normalizedName })
+          .then((saved) => {
+            if (saved) onClose();
+          })
+          .finally(() => setSubmitting(false));
       }}>
         <label>Board name<input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Gatewaybound" /></label>
         <div className="form-grid two">
@@ -2806,7 +2819,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
         )}
         {!usesGitHub && form.repositoryRemoteUrl && !isPublicGitUrl(form.repositoryRemoteUrl) && <p className="provider-status">Custom URL supports public HTTP(S) clone URLs only in v1.</p>}
         <div className="modal-actions">
-          <button className="primary-action" disabled={!canCreate}><Plus size={16} />Create board</button>
+          <button className="primary-action" disabled={!canCreate || submitting}><Plus size={16} />Create board</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -2831,6 +2844,7 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
   const [description, setDescription] = React.useState(`Repository for ${board.name}.`);
   const [isPrivate, setIsPrivate] = React.useState(true);
   const [implementationProfile, setImplementationProfile] = React.useState('code-repo');
+  const [submitting, setSubmitting] = React.useState(false);
   const installationId = githubIntegrations[0]?.installationId ?? null;
 
   React.useEffect(() => {
@@ -2869,31 +2883,36 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!canSync) return;
-    if (mode === 'create') {
+    if (!canSync || submitting) return;
+    setSubmitting(true);
+    try {
+      if (mode === 'create') {
+        const saved = await onSync({
+          createNew: true,
+          name: newRepoName.trim(),
+          description,
+          private: isPrivate,
+          installationId,
+          implementationProfile
+        });
+        if (saved) onClose();
+        return;
+      }
+
       const saved = await onSync({
-        createNew: true,
-        name: newRepoName.trim(),
-        description,
-        private: isPrivate,
-        installationId,
+        createNew: false,
+        repositoryId: selectedRepo?.id && selectedRepo.id !== '00000000-0000-0000-0000-000000000000' ? selectedRepo.id : null,
+        owner: selectedRepo?.owner ?? null,
+        name: selectedRepo?.name ?? null,
+        remoteUrl: selectedRepo?.remoteUrl ?? null,
+        webUrl: selectedRepo?.webUrl ?? null,
+        defaultBranch: selectedRepo?.defaultBranch ?? 'main',
         implementationProfile
       });
       if (saved) onClose();
-      return;
+    } finally {
+      setSubmitting(false);
     }
-
-    const saved = await onSync({
-      createNew: false,
-      repositoryId: selectedRepo?.id && selectedRepo.id !== '00000000-0000-0000-0000-000000000000' ? selectedRepo.id : null,
-      owner: selectedRepo?.owner ?? null,
-      name: selectedRepo?.name ?? null,
-      remoteUrl: selectedRepo?.remoteUrl ?? null,
-      webUrl: selectedRepo?.webUrl ?? null,
-      defaultBranch: selectedRepo?.defaultBranch ?? 'main',
-      implementationProfile
-    });
-    if (saved) onClose();
   }
 
   return (
@@ -2935,7 +2954,7 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
         {pickerMessage && <p className={pickerStatus === 'error' ? 'failure-reason' : 'provider-status'}>{pickerMessage}</p>}
         {mode === 'create' && !settings.repositories.canCreateRepositories && <p className="failure-reason">GitHub repository creation is not enabled for the current installation.</p>}
         <div className="modal-actions">
-          <button className="primary-action" disabled={!canSync}><Github size={16} />Sync to GitHub</button>
+          <button className="primary-action" disabled={!canSync || submitting}><Github size={16} />Sync to GitHub</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>

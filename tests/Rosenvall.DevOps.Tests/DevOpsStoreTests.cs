@@ -790,6 +790,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("codex exec --ephemeral", manifest);
         Assert.Contains("--sandbox workspace-write", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
+        Assert.Contains("RDO_FAILURE=npm test failed", manifest);
+        Assert.Contains("RDO_FAILURE=npm build failed", manifest);
+        Assert.Contains("RDO_FAILURE=dotnet test failed", manifest);
+        Assert.DoesNotContain("|| true", manifest);
         Assert.Contains("secretKeyRef:", manifest);
         Assert.Contains("rosenvall-devops-github", manifest);
         Assert.Contains("name: HOME", manifest);
@@ -963,7 +967,7 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Work_item_and_ai_run_mutation_follow_board_authorization()
+    public void Work_item_ai_run_and_comment_mutation_follow_board_authorization()
     {
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
@@ -975,11 +979,14 @@ public sealed class DevOpsStoreTests
         store.UpsertBoardTeamAccess(board.Id, team.Id, "Member");
         var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Secure card", "Protect this.", "Todo", "Medium", null))!;
         var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var comment = store.AddComment(item.Id, "Owner", "Comment", "Human note.")!;
 
         Assert.True(store.CanMutateWorkItem(item.Id, owner.Subject));
         Assert.True(store.CanMutateAiRun(aiRun.Id, owner.Subject));
+        Assert.True(store.CanMutateComment(comment.Id, owner.Subject));
         Assert.False(store.CanMutateWorkItem(item.Id, guest.Subject));
         Assert.False(store.CanMutateAiRun(aiRun.Id, guest.Subject));
+        Assert.False(store.CanMutateComment(comment.Id, guest.Subject));
     }
 
     [Fact]

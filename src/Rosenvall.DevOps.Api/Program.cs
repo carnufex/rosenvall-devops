@@ -852,8 +852,13 @@ api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, Ad
     return Results.Created($"/api/work-items/{workItemId}", comment);
 });
 
-api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateCommentRequest(store, commentId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     try
     {
         var comment = store.UpdateComment(commentId, request.Actor, request.Body);
@@ -875,8 +880,13 @@ api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentR
     }
 });
 
-api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, string actor, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, string actor, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateCommentRequest(store, commentId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     try
     {
         var deleted = store.DeleteComment(commentId, actor);
@@ -1226,6 +1236,9 @@ static bool CanMutateWorkItemRequest(DevOpsStore store, Guid workItemId, ClaimsP
 static bool CanMutateAiRunRequest(DevOpsStore store, Guid aiRunId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutateAiRun(aiRunId, UserIdentityFromClaims(user).Subject);
 
+static bool CanMutateCommentRequest(DevOpsStore store, Guid commentId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanMutateComment(commentId, UserIdentityFromClaims(user).Subject);
+
 static IResult BoardMutationForbidden() =>
     Results.Problem("You do not have permission to modify this board.", statusCode: StatusCodes.Status403Forbidden);
 
@@ -1574,8 +1587,20 @@ namespace Rosenvall.DevOps.Api
                                   printf '%s' "$ROSENVALL_ALLOWED_PATHS_B64" | base64 -d > "$workspace/allowed-paths.txt"
                                   echo "RDO_STEP=Implementing"
                                   {{codexCommand}}
-                                  if [ -f package.json ]; then echo "RDO_STEP=Testing"; npm test -- --runInBand || npm run build || true; fi
-                                  if ls *.sln *.slnx >/dev/null 2>&1; then echo "RDO_STEP=Testing"; dotnet test --no-restore || true; fi
+                                  if [ -f package.json ]; then
+                                    echo "RDO_STEP=Testing"
+                                    if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
+                                      npm test || { echo "RDO_FAILURE=npm test failed"; exit 23; }
+                                    elif node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
+                                      npm run build || { echo "RDO_FAILURE=npm build failed"; exit 24; }
+                                    else
+                                      echo "No npm test or build script found; skipping npm checks."
+                                    fi
+                                  fi
+                                  if ls *.sln *.slnx >/dev/null 2>&1; then
+                                    echo "RDO_STEP=Testing"
+                                    dotnet test --no-restore || { echo "RDO_FAILURE=dotnet test failed"; exit 25; }
+                                  fi
                                   echo "RDO_STEP=Validating"
                                   git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/uncommitted-files.txt"
                                   git diff --name-only "$ROSENVALL_DEFAULT_BRANCH"...HEAD > "$workspace/committed-files.txt"
@@ -5970,6 +5995,15 @@ namespace Rosenvall.DevOps.Api
             {
                 var run = _aiRuns.SingleOrDefault(entry => entry.Id == aiRunId);
                 return run is not null && CanMutateWorkItem(run.WorkItemId, actorSubject);
+            }
+        }
+
+        public bool CanMutateComment(Guid commentId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var comment = _comments.SingleOrDefault(entry => entry.Id == commentId);
+                return comment is not null && CanMutateWorkItem(comment.WorkItemId, actorSubject);
             }
         }
 
