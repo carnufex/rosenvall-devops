@@ -246,7 +246,7 @@ api.MapGet("/me", (ClaimsPrincipal user, DevOpsStore store) =>
     return Results.Ok(store.GetOrCreateUser(identity));
 });
 
-api.MapGet("/teams", (DevOpsStore store) => store.GetTeams());
+api.MapGet("/teams", (ClaimsPrincipal user, DevOpsStore store) => store.GetTeams(AuthenticatedSubjectOrNull(user)));
 api.MapPost("/teams", (CreateTeamRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
     var actor = UserIdentityFromClaims(user);
@@ -254,12 +254,33 @@ api.MapPost("/teams", (CreateTeamRequest request, ClaimsPrincipal user, DevOpsSt
     var team = store.CreateTeam(request, actor.Subject);
     return Results.Created($"/api/teams/{team.Id}", team);
 });
-api.MapGet("/teams/{teamId:guid}/members", (Guid teamId, DevOpsStore store) =>
-    store.GetTeams().SingleOrDefault(team => team.Id == teamId)?.Members is { } members ? Results.Ok(members) : Results.NotFound());
-api.MapPut("/teams/{teamId:guid}/members/{userId:guid}", (Guid teamId, Guid userId, UpsertTeamMemberRequest request, DevOpsStore store) =>
-    store.UpsertTeamMember(teamId, request with { UserId = userId }) is { } team ? Results.Ok(team) : Results.NotFound());
-api.MapPost("/teams/{teamId:guid}/members", (Guid teamId, InviteTeamMemberRequest request, DevOpsStore store) =>
-    store.InviteTeamMember(teamId, request) is { } team ? Results.Ok(team) : Results.NotFound());
+api.MapGet("/teams/{teamId:guid}/members", (Guid teamId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewTeamRequest(store, teamId, user))
+    {
+        return TeamReadForbidden();
+    }
+
+    return store.GetTeams().SingleOrDefault(team => team.Id == teamId)?.Members is { } members ? Results.Ok(members) : Results.NotFound();
+});
+api.MapPut("/teams/{teamId:guid}/members/{userId:guid}", (Guid teamId, Guid userId, UpsertTeamMemberRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateTeamRequest(store, teamId, user))
+    {
+        return TeamMutationForbidden();
+    }
+
+    return store.UpsertTeamMember(teamId, request with { UserId = userId }) is { } team ? Results.Ok(team) : Results.NotFound();
+});
+api.MapPost("/teams/{teamId:guid}/members", (Guid teamId, InviteTeamMemberRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateTeamRequest(store, teamId, user))
+    {
+        return TeamMutationForbidden();
+    }
+
+    return store.InviteTeamMember(teamId, request) is { } team ? Results.Ok(team) : Results.NotFound();
+});
 
 api.MapGet("/integrations/github/install-url", (GitHubRepositoryClient github) => Results.Ok(new GitHubInstallUrlDto(github.GetInstallUrl())));
 api.MapGet("/integrations/github/callback", async (long installation_id, string? setup_action, string? account, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
@@ -1360,11 +1381,23 @@ static bool CanViewImplementationRunRequest(DevOpsStore store, Guid implementati
 static bool CanViewPipelineRunRequest(DevOpsStore store, Guid pipelineRunId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanViewPipelineRun(pipelineRunId, UserIdentityFromClaims(user).Subject);
 
+static bool CanViewTeamRequest(DevOpsStore store, Guid teamId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanViewTeam(teamId, UserIdentityFromClaims(user).Subject);
+
+static bool CanMutateTeamRequest(DevOpsStore store, Guid teamId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanMutateTeam(teamId, UserIdentityFromClaims(user).Subject);
+
 static IResult BoardMutationForbidden() =>
     Results.Problem("You do not have permission to modify this board.", statusCode: StatusCodes.Status403Forbidden);
 
 static IResult BoardReadForbidden() =>
     Results.Problem("You do not have permission to view this board.", statusCode: StatusCodes.Status403Forbidden);
+
+static IResult TeamReadForbidden() =>
+    Results.Problem("You do not have permission to view this team.", statusCode: StatusCodes.Status403Forbidden);
+
+static IResult TeamMutationForbidden() =>
+    Results.Problem("You do not have permission to modify this team.", statusCode: StatusCodes.Status403Forbidden);
 
 static string? AuthenticatedSubjectOrNull(ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated == true ? UserIdentityFromClaims(user).Subject : null;
@@ -6109,11 +6142,17 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<TeamDto> GetTeams()
+        public IReadOnlyList<TeamDto> GetTeams(string? actorSubject = null)
         {
             lock (_lock)
             {
-                return _teams.Select(EnrichTeam).OrderBy(team => team.Name).ToArray();
+                var teams = _teams.AsEnumerable();
+                if (!string.IsNullOrWhiteSpace(actorSubject))
+                {
+                    teams = teams.Where(team => CanViewTeamWithoutLock(team.Id, actorSubject));
+                }
+
+                return teams.Select(EnrichTeam).OrderBy(team => team.Name).ToArray();
             }
         }
 
@@ -6167,6 +6206,30 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 return UpsertTeamMember(teamId, new UpsertTeamMemberRequest(user.Id, request.Role));
+            }
+        }
+
+        public bool CanViewTeam(Guid teamId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                return CanViewTeamWithoutLock(teamId, actorSubject);
+            }
+        }
+
+        public bool CanMutateTeam(Guid teamId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var user = _users.SingleOrDefault(entry => entry.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+                if (user is null)
+                {
+                    return !HasAnyTeamOrAccess();
+                }
+
+                var team = _teams.SingleOrDefault(entry => entry.Id == teamId);
+                var member = team?.Members.SingleOrDefault(entry => entry.UserId == user.Id);
+                return member is not null && NormalizeRole(member.Role) is "Owner" or "Admin";
             }
         }
 
@@ -9011,6 +9074,22 @@ namespace Rosenvall.DevOps.Api
             string.IsNullOrWhiteSpace(actorSubject) ||
             integration.InstalledBy.Equals(actorSubject, StringComparison.OrdinalIgnoreCase) ||
             integration.InstalledBy.Equals("github-app", StringComparison.OrdinalIgnoreCase);
+
+        private bool CanViewTeamWithoutLock(Guid teamId, string actorSubject)
+        {
+            if (!HasAnyTeamOrAccess())
+            {
+                return true;
+            }
+
+            var user = _users.SingleOrDefault(entry => entry.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+            if (user is null)
+            {
+                return false;
+            }
+
+            return _teams.SingleOrDefault(team => team.Id == teamId)?.Members.Any(member => member.UserId == user.Id) == true;
+        }
 
         private bool IsBoardStatus(Guid boardId, string status) =>
             _boards.SingleOrDefault(board => board.Id == boardId)?.Columns.Contains(status, StringComparer.OrdinalIgnoreCase) == true;

@@ -936,6 +936,7 @@ public sealed class DevOpsStoreTests
         var store = fixture.Store;
         var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
         var user = store.GetOrCreateUser(new UserIdentityRequest("authentik|crille", "Christopher Rosenvall", "christopher.rosenvall@gmail.com"));
+        var guest = store.GetOrCreateUser(new UserIdentityRequest("authentik|guest", "Guest", "guest@example.com"));
         var team = store.CreateTeam(new CreateTeamRequest("Gatebound"), user.Subject);
 
         var updated = store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(user.Id, "Admin"));
@@ -945,6 +946,12 @@ public sealed class DevOpsStoreTests
         Assert.NotNull(updated);
         Assert.Contains(reopened.GetUsers(), entry => entry.Subject == "authentik|crille");
         Assert.Contains(reopened.GetTeams(), entry => entry.Name == "Gatebound" && entry.Members.Any(member => member.UserId == user.Id && member.Role == "Admin"));
+        Assert.Contains(reopened.GetTeams(user.Subject), entry => entry.Id == team.Id);
+        Assert.DoesNotContain(reopened.GetTeams(guest.Subject), entry => entry.Id == team.Id);
+        Assert.True(reopened.CanViewTeam(team.Id, user.Subject));
+        Assert.True(reopened.CanMutateTeam(team.Id, user.Subject));
+        Assert.False(reopened.CanViewTeam(team.Id, guest.Subject));
+        Assert.False(reopened.CanMutateTeam(team.Id, guest.Subject));
         Assert.True(reopened.CanMutateBoard(board.Id, user.Subject));
     }
 
