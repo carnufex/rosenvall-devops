@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, timelineLaneForKind } from './boardChrome.ts';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -78,4 +78,13 @@ test('contained wheel scroll clamps inside flow list bounds', () => {
   assert.equal(containedWheelScrollTop(230, 40, 240), 240);
   assert.equal(containedWheelScrollTop(10, -40, 240), 0);
   assert.equal(containedWheelScrollTop(10, 40, 0), 10);
+});
+
+test('markdown links only allow safe schemes', () => {
+  assert.equal(safeMarkdownHref('https://github.com/carnufex/rosenvall-devops'), 'https://github.com/carnufex/rosenvall-devops');
+  assert.equal(safeMarkdownHref('http://localhost:5173/#board'), 'http://localhost:5173/#board');
+  assert.equal(safeMarkdownHref('/api/workspaces'), '/api/workspaces');
+  assert.equal(safeMarkdownHref('javascript:alert(1)'), null);
+  assert.equal(safeMarkdownHref('data:text/html,<script>alert(1)</script>'), null);
+  assert.equal(safeMarkdownHref('//evil.example/path'), null);
 });

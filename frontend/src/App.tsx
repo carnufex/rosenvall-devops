@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, type TimelineLane } from './boardChrome';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, safeMarkdownHref, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -765,13 +765,15 @@ function App() {
     };
   }, [activeGitOpsBoardId]);
 
-  const runAction = React.useCallback(async (label: string, action: () => Promise<void>) => {
+  const runAction = React.useCallback(async (label: string, action: () => Promise<void>): Promise<boolean> => {
     setBusyAction(label);
     try {
       await action();
       addToast('success', `${label} completed.`);
+      return true;
     } catch (actionError) {
       addToast('error', actionError instanceof Error ? actionError.message : `${label} failed`);
+      return false;
     } finally {
       setBusyAction(null);
     }
@@ -786,7 +788,7 @@ function App() {
       void loadShell(id);
     },
     createBoard: async (form) => {
-      await runAction('Creating board', async () => {
+      return runAction('Creating board', async () => {
         if (shell.status !== 'ready') return;
         const created = await api.post<Board>(`/api/workspaces/${shell.workspace.id}/boards`, {
           name: form.name,
@@ -820,13 +822,13 @@ function App() {
       });
     },
     executePipeline: async (pipelineRunId) => {
-      await runAction('Starting pipeline', async () => {
+      return runAction('Starting pipeline', async () => {
         await api.post<PipelineStatusDto>(`/api/pipeline-runs/${pipelineRunId}/execute`, { actor });
         await refreshAfterChange();
       });
     },
     createCard: async (form) => {
-      await runAction('Creating card', async () => {
+      return runAction('Creating card', async () => {
         if (shell.status !== 'ready') return;
         const created = await api.post<WorkItemSummary>('/api/work-items', {
           boardId: shell.board.id,
@@ -842,7 +844,7 @@ function App() {
       });
     },
     updateCard: async (id, form) => {
-      await runAction('Saving card', async () => {
+      return runAction('Saving card', async () => {
         await api.patch<WorkItemSummary>(`/api/work-items/${id}`, {
           title: form.title,
           description: form.description,
@@ -855,7 +857,7 @@ function App() {
       });
     },
     deleteCard: async (id) => {
-      await runAction('Deleting card and cleaning repository state', async () => {
+      return runAction('Deleting card and cleaning repository state', async () => {
         const response = await api.post<unknown>(`/api/work-items/${id}/delete-and-clean-up`, { actor });
         if (response === undefined || response === null) {
           setSelected({ status: 'closed' });
@@ -867,7 +869,7 @@ function App() {
       });
     },
     startAiPlan: async (id) => {
-      await runAction('Generating AI plan', async () => {
+      return runAction('Generating AI plan', async () => {
         if (shell.status !== 'ready') return;
         const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
@@ -905,19 +907,19 @@ function App() {
       }
     },
     addGitHubIntegration: async () => {
-      await runAction('Opening GitHub integration', async () => {
+      return runAction('Opening GitHub integration', async () => {
         const install = await api.get<{ url: string }>('/api/integrations/github/install-url');
         window.location.href = install.url;
       });
     },
     syncGitHubIntegration: async () => {
-      await runAction('Syncing GitHub installations', async () => {
+      return runAction('Syncing GitHub installations', async () => {
         await api.post<GitHubIntegrationDto[]>('/api/integrations/github/sync', {});
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
     syncBoardRepository: async (boardId, request) => {
-      await runAction('Syncing board to GitHub', async () => {
+      return runAction('Syncing board to GitHub', async () => {
         const board = await api.post<Board>(`/api/boards/${boardId}/repositories/github`, request);
         setSyncBoardOpen(false);
         setSelectedBoardId(board.id);
@@ -925,55 +927,55 @@ function App() {
       });
     },
     adoptCleanupPullRequest: async (workItemId, pullRequestUrl) => {
-      await runAction('Adopting cleanup pull request', async () => {
+      return runAction('Adopting cleanup pull request', async () => {
         await api.post<RepositoryCleanupRunDto>(`/api/work-items/${workItemId}/cleanup-runs/adopt`, { actor, pullRequestUrl });
         await refreshAfterChange(workItemId);
       });
     },
     createBoardSecret: async (boardId, key, value, repositoryId) => {
-      await runAction('Saving board secret', async () => {
+      return runAction('Saving board secret', async () => {
         await api.post<BoardSecretDto>(`/api/boards/${boardId}/secrets`, { key, value, repositoryId: repositoryId || null });
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
     deleteBoardSecret: async (boardId, secretId) => {
-      await runAction('Deleting board secret', async () => {
+      return runAction('Deleting board secret', async () => {
         await api.delete(`/api/boards/${boardId}/secrets/${secretId}`);
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
     updateBoardGitOpsSettings: async (boardId, settings) => {
-      await runAction('Saving GitOps settings', async () => {
+      return runAction('Saving GitOps settings', async () => {
         await api.put<BoardGitOpsSettingsDto>(`/api/boards/${boardId}/gitops-settings`, settings);
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
     updateBoardAiContext: async (boardId, context) => {
-      await runAction('Saving board AI context', async () => {
+      return runAction('Saving board AI context', async () => {
         await api.put<BoardAiContextDto>(`/api/boards/${boardId}/ai-context`, context);
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
     updateBoardRepositoryProfile: async (boardId, repositoryId, profile) => {
-      await runAction('Saving repository profile', async () => {
+      return runAction('Saving repository profile', async () => {
         await api.put<Board>(`/api/boards/${boardId}/repositories/${repositoryId}/profile`, profile);
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
     discardPlan: async (runId, workItemId) => {
-      await runAction('Discarding plan', async () => {
+      return runAction('Discarding plan', async () => {
         await api.post<AiRun>(`/api/ai-runs/${runId}/discard`, { discardedBy: actor });
         await refreshAfterChange(workItemId);
       });
     },
     approvePullRequest: async (workItemId) => {
-      await runAction('Approving PR and stopping preview', async () => {
+      return runAction('Approving PR and stopping preview', async () => {
         await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
       });
     },
     startPreview: async (workItemId) => {
-      await runAction('Starting preview', async () => {
+      return runAction('Starting preview', async () => {
         try {
           await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/start`, { actor });
         } catch (previewError) {
@@ -984,19 +986,19 @@ function App() {
       });
     },
     stopPreview: async (workItemId) => {
-      await runAction('Stopping preview', async () => {
+      return runAction('Stopping preview', async () => {
         await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/stop`, { actor });
         await refreshAfterChange(workItemId);
       });
     },
     addComment: async (id, body) => {
-      await runAction('Posting comment', async () => {
+      return runAction('Posting comment', async () => {
         await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
         await refreshAfterChange(id);
       });
     },
     addCommentAndAskAi: async (id, body) => {
-      await runAction('Posting comment and asking AI', async () => {
+      return runAction('Posting comment and asking AI', async () => {
         if (shell.status !== 'ready') return;
         const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
         await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
@@ -1009,37 +1011,37 @@ function App() {
       });
     },
     updateComment: async (commentId, workItemId, body) => {
-      await runAction('Updating comment', async () => {
+      return runAction('Updating comment', async () => {
         await api.patch<CommentDto>(`/api/comments/${commentId}`, { actor, body });
         await refreshAfterChange(workItemId);
       });
     },
     deleteComment: async (commentId, workItemId) => {
-      await runAction('Deleting comment', async () => {
+      return runAction('Deleting comment', async () => {
         await api.delete(`/api/comments/${commentId}?actor=${encodeURIComponent(actor)}`);
         await refreshAfterChange(workItemId);
       });
     },
     createTeam: async (name) => {
-      await runAction('Creating team', async () => {
+      return runAction('Creating team', async () => {
         await api.post<TeamDto>('/api/teams', { name });
         await refreshAfterChange();
       });
     },
     inviteTeamMember: async (teamId, email, role) => {
-      await runAction('Adding team member', async () => {
+      return runAction('Adding team member', async () => {
         await api.post<TeamDto>(`/api/teams/${teamId}/members`, { email, role });
         await refreshAfterChange();
       });
     },
     assignTeamToBoard: async (boardId, teamId, role) => {
-      await runAction('Assigning team to board', async () => {
+      return runAction('Assigning team to board', async () => {
         await api.put<BoardTeamAccessDto>(`/api/boards/${boardId}/teams/${teamId}`, { role });
         await refreshAfterChange();
       });
     },
     removeTeamFromBoard: async (boardId, teamId) => {
-      await runAction('Removing team from board', async () => {
+      return runAction('Removing team from board', async () => {
         await api.delete(`/api/boards/${boardId}/teams/${teamId}`);
         await refreshAfterChange();
       });
@@ -1294,35 +1296,35 @@ type BoardActions = {
   openCreateCard(status: string): void;
   openCreateBoard(): void;
   selectBoard(id: string): void;
-  createBoard(form: CreateBoardForm): Promise<void>;
-  executePipeline(pipelineRunId: string): Promise<void>;
-  createCard(form: WorkItemForm): Promise<void>;
-  updateCard(id: string, form: WorkItemForm): Promise<void>;
-  deleteCard(id: string): Promise<void>;
-  startAiPlan(id: string): Promise<void>;
+  createBoard(form: CreateBoardForm): Promise<boolean>;
+  executePipeline(pipelineRunId: string): Promise<boolean>;
+  createCard(form: WorkItemForm): Promise<boolean>;
+  updateCard(id: string, form: WorkItemForm): Promise<boolean>;
+  deleteCard(id: string): Promise<boolean>;
+  startAiPlan(id: string): Promise<boolean>;
   approvePlan(runId: string, workItemId: string): Promise<void>;
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<void>;
-  addGitHubIntegration(): Promise<void>;
-  syncGitHubIntegration(): Promise<void>;
-  syncBoardRepository(boardId: string, request: SyncBoardRepositoryRequest): Promise<void>;
-  adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<void>;
-  createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<void>;
-  deleteBoardSecret(boardId: string, secretId: string): Promise<void>;
-  updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<void>;
-  updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<void>;
-  updateBoardRepositoryProfile(boardId: string, repositoryId: string, profile: RepositoryProfileDto): Promise<void>;
-  discardPlan(runId: string, workItemId: string): Promise<void>;
-  approvePullRequest(workItemId: string): Promise<void>;
-  startPreview(workItemId: string): Promise<void>;
-  stopPreview(workItemId: string): Promise<void>;
-  addComment(id: string, body: string): Promise<void>;
-  addCommentAndAskAi(id: string, body: string): Promise<void>;
-  updateComment(commentId: string, workItemId: string, body: string): Promise<void>;
-  deleteComment(commentId: string, workItemId: string): Promise<void>;
-  createTeam(name: string): Promise<void>;
-  inviteTeamMember(teamId: string, email: string, role: string): Promise<void>;
-  assignTeamToBoard(boardId: string, teamId: string, role: string): Promise<void>;
-  removeTeamFromBoard(boardId: string, teamId: string): Promise<void>;
+  addGitHubIntegration(): Promise<boolean>;
+  syncGitHubIntegration(): Promise<boolean>;
+  syncBoardRepository(boardId: string, request: SyncBoardRepositoryRequest): Promise<boolean>;
+  adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<boolean>;
+  createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<boolean>;
+  deleteBoardSecret(boardId: string, secretId: string): Promise<boolean>;
+  updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<boolean>;
+  updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<boolean>;
+  updateBoardRepositoryProfile(boardId: string, repositoryId: string, profile: RepositoryProfileDto): Promise<boolean>;
+  discardPlan(runId: string, workItemId: string): Promise<boolean>;
+  approvePullRequest(workItemId: string): Promise<boolean>;
+  startPreview(workItemId: string): Promise<boolean>;
+  stopPreview(workItemId: string): Promise<boolean>;
+  addComment(id: string, body: string): Promise<boolean>;
+  addCommentAndAskAi(id: string, body: string): Promise<boolean>;
+  updateComment(commentId: string, workItemId: string, body: string): Promise<boolean>;
+  deleteComment(commentId: string, workItemId: string): Promise<boolean>;
+  createTeam(name: string): Promise<boolean>;
+  inviteTeamMember(teamId: string, email: string, role: string): Promise<boolean>;
+  assignTeamToBoard(boardId: string, teamId: string, role: string): Promise<boolean>;
+  removeTeamFromBoard(boardId: string, teamId: string): Promise<boolean>;
   moveCard(id: string, status: string, sortOrder: number): Promise<void>;
 };
 
@@ -1941,21 +1943,27 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
                 aiRuns={sortedPlans}
                 comment={entry}
                 key={entry.id}
-                onDelete={(commentId) => actions.deleteComment(commentId, detail.item.id)}
+                onDelete={async (commentId) => {
+                  await actions.deleteComment(commentId, detail.item.id);
+                }}
                 onSelectPlan={setSelectedPlanId}
-                onUpdate={(commentId, body) => actions.updateComment(commentId, detail.item.id, body)}
+                onUpdate={async (commentId, body) => {
+                  await actions.updateComment(commentId, detail.item.id, body);
+                }}
                 busy={busy}
               />
             ))}
             <form className="comment-form" onSubmit={(event) => {
               event.preventDefault();
               if (!comment.trim()) return;
-              void actions.addComment(detail.item.id, comment.trim()).then(() => setComment(''));
+              void actions.addComment(detail.item.id, comment.trim()).then((saved) => {
+                if (saved) setComment('');
+              });
             }}>
               <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Write a comment or question..." />
               <div className="comment-actions">
                 <button className="secondary" disabled={!comment.trim() || busy}>Comment</button>
-                <button className="primary-action" type="button" disabled={!comment.trim() || busy} onClick={() => void actions.addCommentAndAskAi(detail.item.id, comment.trim()).then(() => setComment(''))}><Sparkles size={16} />Comment + ask AI</button>
+                <button className="primary-action" type="button" disabled={!comment.trim() || busy} onClick={() => void actions.addCommentAndAskAi(detail.item.id, comment.trim()).then((saved) => { if (saved) setComment(''); })}><Sparkles size={16} />Comment + ask AI</button>
               </div>
             </form>
           </section>
@@ -1981,7 +1989,9 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           )}
           {!activeRepositoryCleanupRun && hasRepositoryPr && <CleanupAdoptionPanel workItemId={detail.item.id} busy={busy} onAdopt={actions.adoptCleanupPullRequest} />}
           {detail.preview && (
-            <PreviewPanel preview={detail.preview} busy={busy} onRetry={() => actions.startPreview(detail.item.id)} />
+            <PreviewPanel preview={detail.preview} busy={busy} onRetry={async () => {
+              await actions.startPreview(detail.item.id);
+            }} />
           )}
           <PreviewHistoryPanel detail={detail} aiRuns={sortedPlans} />
         </aside>
@@ -2068,7 +2078,9 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
                 <PlanQuestionStepper
                   busy={busy}
                   questions={planQuestions}
-                  onSubmit={(answers) => actions.addCommentAndAskAi(detail.item.id, formatPlanQuestionAnswers(planQuestions, answers))}
+                  onSubmit={async (answers) => {
+                    await actions.addCommentAndAskAi(detail.item.id, formatPlanQuestionAnswers(planQuestions, answers));
+                  }}
                 />
               )}
               <div className="plan-markdown"><CommentBody body={selectedPlan.plan} /></div>
@@ -2194,7 +2206,7 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
   );
 }
 
-function RepositoryCleanupRunPanel({ run, workItemId, busy = false, onAdopt, prominent = false }: { run: RepositoryCleanupRunDto; workItemId?: string; busy?: boolean; onAdopt?: (workItemId: string, pullRequestUrl: string) => Promise<void>; prominent?: boolean }) {
+function RepositoryCleanupRunPanel({ run, workItemId, busy = false, onAdopt, prominent = false }: { run: RepositoryCleanupRunDto; workItemId?: string; busy?: boolean; onAdopt?: (workItemId: string, pullRequestUrl: string) => Promise<boolean>; prominent?: boolean }) {
   const pending = isImplementationRunPendingStatus(run.status);
   const failed = run.status === 'Failed';
   const ready = run.status === 'PullRequestReady' || run.status === 'Merged';
@@ -2224,20 +2236,22 @@ function RepositoryCleanupRunPanel({ run, workItemId, busy = false, onAdopt, pro
           {run.lastEventSummary && <p>Last event: {run.lastEventSummary}</p>}
         </div>
       )}
-      {workItemId && onAdopt && <CleanupAdoptionPanel workItemId={workItemId} busy={busy} onAdopt={onAdopt} compact />}
+      {failed && workItemId && onAdopt && <CleanupAdoptionPanel workItemId={workItemId} busy={busy} onAdopt={onAdopt} compact />}
       <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
       <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
     </section>
   );
 }
 
-function CleanupAdoptionPanel({ workItemId, busy, onAdopt, compact = false }: { workItemId: string; busy: boolean; onAdopt: (workItemId: string, pullRequestUrl: string) => Promise<void>; compact?: boolean }) {
+function CleanupAdoptionPanel({ workItemId, busy, onAdopt, compact = false }: { workItemId: string; busy: boolean; onAdopt: (workItemId: string, pullRequestUrl: string) => Promise<boolean>; compact?: boolean }) {
   const [pullRequestUrl, setPullRequestUrl] = React.useState('');
   return (
     <form className={compact ? 'cleanup-adopt-form compact' : 'panel compact-panel cleanup-adopt-form'} onSubmit={(event) => {
       event.preventDefault();
       if (!pullRequestUrl.trim()) return;
-      void onAdopt(workItemId, pullRequestUrl.trim()).then(() => setPullRequestUrl(''));
+      void onAdopt(workItemId, pullRequestUrl.trim()).then((saved) => {
+        if (saved) setPullRequestUrl('');
+      });
     }}>
       {!compact && <PanelHeader icon={<GitPullRequest size={20} />} title="Adopt cleanup PR" />}
       <label>Cleanup PR URL<input value={pullRequestUrl} onChange={(event) => setPullRequestUrl(event.target.value)} placeholder="https://github.com/owner/repo/pull/35" /></label>
@@ -2522,7 +2536,7 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
   board: Board;
   initialStatus: string;
   assigneeOptions: AssigneeOption[];
-  onCreate: (form: WorkItemForm) => Promise<void>;
+  onCreate: (form: WorkItemForm) => Promise<boolean>;
   onClose: () => void;
 }) {
   const [form, setForm] = React.useState<WorkItemForm>({ ...emptyForm, status: initialStatus, assignee: preferredAssignee(assigneeOptions) });
@@ -2531,7 +2545,9 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
       <form className="create-form" onSubmit={(event) => {
         event.preventDefault();
         if (!form.title.trim()) return;
-        void onCreate(form);
+        void onCreate(form).then((saved) => {
+          if (saved) onClose();
+        });
       }}>
         <label>Title<input autoFocus value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
         <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
@@ -2594,7 +2610,7 @@ function ToastStack({ busyAction, toasts, onDismiss }: {
 function CreateBoardModal({ teams, actions, onCreate, onClose }: {
   teams: TeamDto[];
   actions: BoardActions;
-  onCreate: (form: CreateBoardForm) => Promise<void>;
+  onCreate: (form: CreateBoardForm) => Promise<boolean>;
   onClose: () => void;
 }) {
   const defaultTeamIds = React.useMemo(() => teams.filter((team) => team.members.some((member) => ['Owner', 'Admin', 'Member'].includes(member.role))).slice(0, 1).map((team) => team.id), [teams]);
@@ -2607,6 +2623,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
   const [profileStatus, setProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [aiProfileStatus, setAiProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [profileError, setProfileError] = React.useState<string | null>(null);
+  const profileRequestRef = React.useRef(0);
   const normalizedName = form.name.trim();
   const usesGitHub = form.providerMode === 'GitHub';
   const canCreate = normalizedName.length > 0 && profileStatus !== 'loading' && (usesGitHub ? form.repositoryRemoteUrl.trim().length > 0 : isPublicGitUrl(form.repositoryRemoteUrl));
@@ -2654,6 +2671,8 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
 
   const loadRepositoryProfile = React.useCallback(async (repository: RepositoryDto) => {
     if (!repository.owner || !repository.name) return;
+    const requestId = profileRequestRef.current + 1;
+    profileRequestRef.current = requestId;
     setProfileStatus('loading');
     setProfileError(null);
     setRepositoryProfile(null);
@@ -2667,6 +2686,7 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
     try {
       query.set('mode', 'scanner');
       const profile = await api.get<RepositoryProfileDto>(`/api/integrations/github/repository-profile?${query.toString()}`, { timeoutMs: 15000 });
+      if (profileRequestRef.current !== requestId) return;
       applyRepositoryProfile(profile);
       setProfileStatus('loaded');
       setAiProfileStatus('loading');
@@ -2674,14 +2694,17 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
       fullQuery.set('mode', 'full');
       api.get<RepositoryProfileDto>(`/api/integrations/github/repository-profile?${fullQuery.toString()}`, { timeoutMs: 45000 })
         .then((codexProfile) => {
+          if (profileRequestRef.current !== requestId) return;
           applyRepositoryProfile(codexProfile);
           setAiProfileStatus('loaded');
         })
         .catch((error) => {
+          if (profileRequestRef.current !== requestId) return;
           setAiProfileStatus('error');
           setProfileError(error instanceof Error ? error.message : 'Codex analysis did not return a profile');
         });
     } catch (error) {
+      if (profileRequestRef.current !== requestId) return;
       setProfileStatus('error');
       setProfileError(error instanceof Error ? error.message : 'Could not detect repository profile');
       setForm((current) => ({ ...current, implementationProfile: 'code-repo' }));
@@ -2712,7 +2735,9 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
       <form className="create-form" onSubmit={(event) => {
         event.preventDefault();
         if (!canCreate) return;
-        void onCreate({ ...form, name: normalizedName });
+        void onCreate({ ...form, name: normalizedName }).then((saved) => {
+          if (saved) onClose();
+        });
       }}>
         <label>Board name<input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Gatewaybound" /></label>
         <div className="form-grid two">
@@ -2794,7 +2819,7 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
   repositories: RepositoryDto[];
   settings: SettingsDto;
   githubIntegrations: GitHubIntegrationDto[];
-  onSync: (request: SyncBoardRepositoryRequest) => Promise<void>;
+  onSync: (request: SyncBoardRepositoryRequest) => Promise<boolean>;
   onClose: () => void;
 }) {
   const [mode, setMode] = React.useState<'existing' | 'create'>('existing');
@@ -2846,7 +2871,7 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
     event.preventDefault();
     if (!canSync) return;
     if (mode === 'create') {
-      await onSync({
+      const saved = await onSync({
         createNew: true,
         name: newRepoName.trim(),
         description,
@@ -2854,10 +2879,11 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
         installationId,
         implementationProfile
       });
+      if (saved) onClose();
       return;
     }
 
-    await onSync({
+    const saved = await onSync({
       createNew: false,
       repositoryId: selectedRepo?.id && selectedRepo.id !== '00000000-0000-0000-0000-000000000000' ? selectedRepo.id : null,
       owner: selectedRepo?.owner ?? null,
@@ -2867,6 +2893,7 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
       defaultBranch: selectedRepo?.defaultBranch ?? 'main',
       implementationProfile
     });
+    if (saved) onClose();
   }
 
   return (
@@ -3038,22 +3065,25 @@ function TeamsView({ teams, boards, me, actions }: {
     event.preventDefault();
     const name = teamName.trim();
     if (!name) return;
-    await actions.createTeam(name);
-    setTeamName('');
+    if (await actions.createTeam(name)) {
+      setTeamName('');
+    }
   }
 
   async function inviteMember(event: React.FormEvent) {
     event.preventDefault();
     if (!selectedTeam || !inviteEmail.trim()) return;
-    await actions.inviteTeamMember(selectedTeam.id, inviteEmail.trim(), inviteRole);
-    setInviteEmail('');
+    if (await actions.inviteTeamMember(selectedTeam.id, inviteEmail.trim(), inviteRole)) {
+      setInviteEmail('');
+    }
   }
 
   async function assignBoard(event: React.FormEvent) {
     event.preventDefault();
     if (!selectedTeam || !boardId) return;
-    await actions.assignTeamToBoard(boardId, selectedTeam.id, boardRole);
-    setBoardId('');
+    if (await actions.assignTeamToBoard(boardId, selectedTeam.id, boardRole)) {
+      setBoardId('');
+    }
   }
 
   return (
@@ -3174,10 +3204,11 @@ function SettingsView({ scope, settings, board, me, repositories, boardSecrets, 
   async function saveSecret(event: React.FormEvent) {
     event.preventDefault();
     if (!canSaveSecret) return;
-    await actions.createBoardSecret(board.id, secretKey.trim(), secretValue, secretRepositoryId || null);
-    setSecretKey('');
-    setSecretValue('');
-    setSecretRepositoryId('');
+    if (await actions.createBoardSecret(board.id, secretKey.trim(), secretValue, secretRepositoryId || null)) {
+      setSecretKey('');
+      setSecretValue('');
+      setSecretRepositoryId('');
+    }
   }
 
   return (
@@ -3664,7 +3695,8 @@ function renderInlineMarkdown(text: string): React.ReactNode[] {
       nodes.push(<code key={nodes.length}>{token.slice(1, -1)}</code>);
     } else {
       const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      nodes.push(link ? <a key={nodes.length} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a> : token);
+      const href = link ? safeMarkdownHref(link[2]) : null;
+      nodes.push(link && href ? <a key={nodes.length} href={href} target="_blank" rel="noreferrer">{link[1]}</a> : token);
     }
 
     last = match.index + token.length;

@@ -81,3 +81,31 @@ test('aborts a request when a per-request timeout expires', async () => {
 
   await assert.rejects(() => client.get('/api/integrations/github/repository-picker', { timeoutMs: 10 }), /timed out/i);
 });
+
+test('aborts a request when the default timeout expires', async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  try {
+    globalThis.setTimeout = ((handler: TimerHandler) => {
+      if (typeof handler === 'function') handler();
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = (() => undefined) as typeof clearTimeout;
+
+    const client = createApiClient({
+      fetch: async (_path, init) => new Promise<Response>((_resolve, reject) => {
+        if (init?.signal?.aborted) {
+          reject(new DOMException('Aborted', 'AbortError'));
+          return;
+        }
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      }),
+      getAccessToken: () => null
+    });
+
+    await assert.rejects(() => client.get('/api/workspaces'), /timed out after 30000 ms/i);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});

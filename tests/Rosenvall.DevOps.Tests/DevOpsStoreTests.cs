@@ -257,6 +257,25 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitOps_settings_reject_unsafe_paths_namespace_and_selector_values()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/rosenvall/rosenvalls-homelab.git", "main", "https://github.com/rosenvall/rosenvalls-homelab", "rosenvall", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+
+        var settings = store.UpsertBoardGitOpsSettings(board.Id, new BoardGitOpsSettingsRequest(
+            ["kubernetes/applications", "../escape", "/absolute", "clusters\\prod", "bad:path"],
+            "argocd;rm-rf",
+            "app=$(whoami)"))!;
+
+        Assert.Equal(["kubernetes/applications/", "clusters/prod/"], settings.AllowedPaths);
+        Assert.Equal("argocd", settings.ArgoNamespace);
+        Assert.Equal("", settings.ArgoApplicationSelector);
+    }
+
+    [Fact]
     public void Create_board_persists_detected_profile_and_ai_skill_suggestions()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -327,6 +346,7 @@ public sealed class DevOpsStoreTests
         Assert.NotNull(manifest);
         Assert.Contains("kind: Job", manifest);
         Assert.Contains("namespace: rosenvall-devops-pipelines", manifest);
+        Assert.Contains("activeDeadlineSeconds: 3600", manifest);
         Assert.Contains("ssh://git.rosenvall.se/platform/api.git", manifest);
         Assert.Contains("ROSENVALL_PIPELINE_RUN_ID", manifest);
     }
@@ -768,6 +788,8 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("name: codex-home\n                             persistentVolumeClaim:", manifest);
         Assert.Contains("codex exec", manifest);
         Assert.Contains("codex exec --ephemeral", manifest);
+        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("secretKeyRef:", manifest);
         Assert.Contains("rosenvall-devops-github", manifest);
         Assert.Contains("name: HOME", manifest);
@@ -941,6 +963,57 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Work_item_and_ai_run_mutation_follow_board_authorization()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Restricted", null, "Sample", null, null, null, null))!;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var guest = store.GetOrCreateUser(new UserIdentityRequest("authentik|guest", "Guest", "guest@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("Restricted Team"), owner.Subject);
+        store.UpsertBoardTeamAccess(board.Id, team.Id, "Member");
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Secure card", "Protect this.", "Todo", "Medium", null))!;
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+
+        Assert.True(store.CanMutateWorkItem(item.Id, owner.Subject));
+        Assert.True(store.CanMutateAiRun(aiRun.Id, owner.Subject));
+        Assert.False(store.CanMutateWorkItem(item.Id, guest.Subject));
+        Assert.False(store.CanMutateAiRun(aiRun.Id, guest.Subject));
+    }
+
+    [Fact]
+    public void Work_item_creation_rejects_unknown_board_and_unknown_status()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+
+        var unknownBoard = store.CreateWorkItem(new CreateWorkItemRequest(Guid.NewGuid(), "Feature", "Invalid board", "Should not persist.", "Todo", "Medium", null));
+        var unknownStatus = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Invalid status", "Should not persist.", "Not A Column", "Medium", null));
+
+        Assert.Null(unknownBoard);
+        Assert.Null(unknownStatus);
+        Assert.DoesNotContain(store.GetWorkItems(), item => item.Title is "Invalid board" or "Invalid status");
+    }
+
+    [Fact]
+    public void Work_item_update_and_move_reject_unknown_status()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Valid", "Existing item.", "Todo", "Medium", null))!;
+
+        var updated = store.UpdateWorkItem(item.Id, new UpdateWorkItemRequest("Valid", "Existing item.", "Feature", "Not A Column", "Medium", null));
+        var moved = store.MoveWorkItem(item.Id, new MoveWorkItemRequest("Also Not A Column", 0));
+
+        Assert.Null(updated);
+        Assert.Null(moved);
+        Assert.Equal("Todo", store.GetWorkItemDetail(item.Id)!.Item.Status);
+    }
+
+    [Fact]
     public void Board_can_link_multiple_repositories_with_one_primary()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -1018,8 +1091,10 @@ public sealed class DevOpsStoreTests
         var secretManifest = BoardSecretManifestRenderer.Render(secret, "super-secret-license", configuration);
         var runnerManifest = store.RenderImplementationRunManifest(implementationRun.Id, configuration);
         var listed = store.GetBoardSecrets(board.Id);
+        var fetched = store.GetBoardSecret(board.Id, secret.Id);
 
         Assert.Single(listed);
+        Assert.NotNull(fetched);
         Assert.Equal("UNITY_LICENSE", listed[0].Key);
         Assert.DoesNotContain("super-secret-license", JsonSerializer.Serialize(listed));
         Assert.Contains("UNITY_LICENSE", secretManifest);
@@ -1217,6 +1292,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("ROSENVALL_ALLOWED_PATHS_B64", manifest);
         Assert.Contains("RDO_STEP=Inspecting", manifest);
         Assert.Contains("RDO_STEP=Validating", manifest);
+        Assert.Contains("activeDeadlineSeconds: 3600", manifest);
         Assert.Contains("RDO_FAILURE=Changed files outside allowed GitOps paths", manifest);
         Assert.Contains("git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > \"$workspace/uncommitted-files.txt\"", manifest);
         Assert.Contains("git diff --name-only \"$ROSENVALL_DEFAULT_BRANCH\"...HEAD > \"$workspace/committed-files.txt\"", manifest);
@@ -1228,6 +1304,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("--data-urlencode \"head=$repo_owner:$ROSENVALL_BRANCH\"", manifest);
         Assert.Contains("if [ -n \"$existing_pr_url\" ]; then", manifest);
         Assert.Contains("RDO_PULL_REQUEST_URL=$pr_url", manifest);
+        Assert.True(manifest.IndexOf("RDO_STEP=PullRequestReady", StringComparison.Ordinal) < manifest.IndexOf("RDO_PULL_REQUEST_URL=$pr_url", StringComparison.Ordinal));
 
         Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
         Assert.Contains("Leave all file changes uncommitted in the current checkout; the runner owns commit, push, and pull request creation.", prompt);
@@ -1321,11 +1398,15 @@ public sealed class DevOpsStoreTests
         Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
         Assert.Contains("kubernetes/applications/test/kustomization.yaml", sourceDiff);
         Assert.Contains("codex exec --ephemeral", manifest);
+        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
+        Assert.Contains("activeDeadlineSeconds: 3600", manifest);
         Assert.Contains("ROSENVALL_SOURCE_PR_DIFF_B64", manifest);
         Assert.Contains("curl -fsS -G \"https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
         Assert.Contains("--data-urlencode \"head=$repo_owner:$ROSENVALL_BRANCH\"", manifest);
         Assert.Contains("if [ -n \"$existing_pr_url\" ]; then", manifest);
         Assert.Contains("RDO_CLEANUP_PULL_REQUEST_URL=", manifest);
+        Assert.True(manifest.IndexOf("RDO_STEP=PullRequestReady", StringComparison.Ordinal) < manifest.IndexOf("RDO_CLEANUP_PULL_REQUEST_URL=$pr_url", StringComparison.Ordinal));
         Assert.Contains("github-token-cleanup", manifest);
         Assert.DoesNotContain("rosenvall-devops-codex-home\n                             mountPath: /app/codex-home", manifest);
     }
@@ -1543,6 +1624,8 @@ public sealed class DevOpsStoreTests
         Assert.Equal("11111111-1111-1111-1111-111111111111", secondSession.ProviderSessionId);
         Assert.Contains("codex exec resume", manifest);
         Assert.Contains("codex exec resume --ephemeral", manifest);
+        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("ROSENVALL_CODEX_SESSION_ID", manifest);
         Assert.Contains("CODEX_REASONING_EFFORT", manifest);
         Assert.Contains("model_reasoning_effort=$CODEX_REASONING_EFFORT", manifest);
@@ -1898,6 +1981,34 @@ public sealed class DevOpsStoreTests
         Assert.Equal("Implementing", preview.Status);
         Assert.Contains(applying.Preview!.TerminalLines!, line => line.Message.Contains("OpenAI Codex", StringComparison.Ordinal));
         Assert.Equal("Applying", applying.Preview.Status);
+    }
+
+    [Fact]
+    public void Runner_and_preview_terminal_lines_redact_common_secret_values()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "secure-demo", "https://github.com/rosenvall/secure-demo.git", "main", "https://github.com/rosenvall/secure-demo", "rosenvall", "code-repo"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Secure Demo", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "secret log", "Do not leak tokens.", "Todo", "Medium", null))!;
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.BeginPreviewImplementation(item.Id, "codex");
+
+        var updatedRun = store.UpdateImplementationRun(
+            implementationRun.Id,
+            "Failed",
+            "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\nremote https://x-access-token:github_pat_abcdefghijklmnopqrstuvwxyz123456@github.com/rosenvall/secure-demo.git\nAuthorization: Bearer secret-token-value",
+            "failed")!;
+        var updatedPreview = store.AppendPreviewTerminalLine(item.Id, "stderr", "CLOUDFLARE_API_TOKEN=abc123 PASSWORD=hunter2");
+
+        Assert.DoesNotContain(updatedRun.TerminalLines!, line => line.Message.Contains("ghp_", StringComparison.Ordinal) || line.Message.Contains("github_pat_", StringComparison.Ordinal) || line.Message.Contains("secret-token-value", StringComparison.Ordinal));
+        Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("GITHUB_TOKEN=[redacted]", StringComparison.Ordinal));
+        Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("x-access-token:[redacted]@github.com", StringComparison.Ordinal));
+        Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("Authorization: Bearer [redacted]", StringComparison.Ordinal));
+        Assert.DoesNotContain(updatedPreview!.Preview!.TerminalLines!, line => line.Message.Contains("abc123", StringComparison.Ordinal) || line.Message.Contains("hunter2", StringComparison.Ordinal));
+        Assert.Contains(updatedPreview.Preview.TerminalLines!, line => line.Message.Contains("CLOUDFLARE_API_TOKEN=[redacted]", StringComparison.Ordinal));
     }
 
     [Fact]

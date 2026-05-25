@@ -12,6 +12,8 @@ type RequestOptions = {
   timeoutMs?: number;
 };
 
+const DEFAULT_TIMEOUT_MS = 30000;
+
 export function createApiClient(options: ApiClientOptions) {
   const fetchImpl = options.fetch ?? ((path, init) => fetch(path, init));
   let refreshInFlight: Promise<string | null> | null = null;
@@ -25,8 +27,9 @@ export function createApiClient(options: ApiClientOptions) {
   };
 
   const request = async <T>(path: string, init?: RequestInit, requestOptions?: RequestOptions): Promise<T> => {
-    const controller = requestOptions?.timeoutMs ? new AbortController() : null;
-    const timeout = controller ? globalThis.setTimeout(() => controller.abort(), requestOptions!.timeoutMs) : null;
+    const timeoutMs = requestOptions?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const timeout = controller ? globalThis.setTimeout(() => controller.abort(), timeoutMs) : null;
     const requestInit = controller ? { ...init, signal: controller.signal } : init;
     try {
       let response = await fetchImpl(path, await withAuth(requestInit, options.getAccessToken));
@@ -43,7 +46,7 @@ export function createApiClient(options: ApiClientOptions) {
       return parseResponse<T>(response);
     } catch (error) {
       if (controller?.signal.aborted) {
-        throw new Error(`Request to ${path} timed out after ${requestOptions?.timeoutMs} ms`);
+        throw new Error(`Request to ${path} timed out after ${timeoutMs} ms`);
       }
       throw error;
     } finally {

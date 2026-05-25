@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.SignalR;
 using Rosenvall.DevOps.Api;
 using Rosenvall.DevOps.Core;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Claims;
 using System.Security.Cryptography;
@@ -11,6 +12,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -99,8 +101,14 @@ if (!string.IsNullOrWhiteSpace(authority))
     hub.RequireAuthorization();
 }
 
+var githubManifestStates = new ConcurrentDictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+var githubManifestStateLifetime = TimeSpan.FromMinutes(20);
+
 app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github) =>
-    Results.Content(github.RenderManifestStartPage(), "text/html; charset=utf-8"));
+{
+    var state = NewGitHubManifestState(githubManifestStates);
+    return Results.Content(github.RenderManifestStartPage(state), "text/html; charset=utf-8");
+});
 
 app.MapPost("/integrations/github/webhook", () => Results.Ok());
 
@@ -108,6 +116,11 @@ app.MapGet("/integrations/github/callback", async (string? code, long? installat
 {
     if (!string.IsNullOrWhiteSpace(code))
     {
+        if (!TryConsumeGitHubManifestState(githubManifestStates, state, githubManifestStateLifetime))
+        {
+            return Results.Problem("GitHub App manifest callback state is missing or expired.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
         var app = await github.CreateAppFromManifestAsync(code, cancellationToken);
         if (app is null)
         {
@@ -120,11 +133,17 @@ app.MapGet("/integrations/github/callback", async (string? code, long? installat
             return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
         }
 
-        return Results.Redirect($"https://github.com/apps/{WebUtility.UrlEncode(app.Slug)}/installations/new?state={WebUtility.UrlEncode(state ?? Guid.NewGuid().ToString("N"))}");
+        var installationState = NewGitHubManifestState(githubManifestStates);
+        return Results.Redirect($"https://github.com/apps/{WebUtility.UrlEncode(app.Slug)}/installations/new?state={WebUtility.UrlEncode(installationState)}");
     }
 
     if (installation_id is { } installationId)
     {
+        if (!TryConsumeGitHubManifestState(githubManifestStates, state, githubManifestStateLifetime))
+        {
+            return Results.Problem("GitHub App installation callback state is missing or expired.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
         var installation = await github.GetAppInstallationAsync(installationId, "github-app", setup_action ?? "Installed", cancellationToken);
         var integration = store.CreateGitHubIntegration(installation ?? new GitHubIntegrationCallbackRequest(
             installationId,
@@ -161,11 +180,25 @@ api.MapPost("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, CreateBo
 api.MapGet("/boards/{boardId:guid}", (Guid boardId, DevOpsStore store) =>
     store.GetBoard(boardId) is { } board ? Results.Ok(board) : Results.NotFound());
 
-api.MapPut("/boards/{boardId:guid}/gitops-settings", (Guid boardId, BoardGitOpsSettingsRequest request, DevOpsStore store) =>
-    store.UpsertBoardGitOpsSettings(boardId, request) is { } settings ? Results.Ok(settings) : Results.NotFound());
+api.MapPut("/boards/{boardId:guid}/gitops-settings", (Guid boardId, BoardGitOpsSettingsRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
 
-api.MapPut("/boards/{boardId:guid}/ai-context", (Guid boardId, BoardAiContextRequest request, DevOpsStore store) =>
-    store.UpsertBoardAiContext(boardId, request) is { } context ? Results.Ok(context) : Results.NotFound());
+    return store.UpsertBoardGitOpsSettings(boardId, request) is { } settings ? Results.Ok(settings) : Results.NotFound();
+});
+
+api.MapPut("/boards/{boardId:guid}/ai-context", (Guid boardId, BoardAiContextRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.UpsertBoardAiContext(boardId, request) is { } context ? Results.Ok(context) : Results.NotFound();
+});
 
 api.MapGet("/boards/{boardId:guid}/timeline", (Guid boardId, DevOpsStore store) =>
     store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetTimeline(boardId)));
@@ -312,10 +345,22 @@ api.MapGet("/integrations/github/repository-profile", async (string owner, strin
         : Results.Ok(result);
 });
 
-api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepositoryRequest request, DevOpsStore store) =>
-    store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound());
-api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, SyncGitHubRepositoryRequest request, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound();
+});
+api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, SyncGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     if (request.RepositoryId is { } repositoryId)
     {
         return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(repositoryId, true, request.ImplementationProfile)) is { } linked
@@ -373,19 +418,52 @@ api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, S
         ? Results.Created($"/api/repositories/{repository.Id}", board)
         : Results.NotFound();
 });
-api.MapPut("/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile", (Guid boardId, Guid repositoryId, RepositoryProfileDto request, DevOpsStore store) =>
-    store.UpsertBoardRepositoryProfile(boardId, repositoryId, request) is { } board ? Results.Ok(board) : Results.NotFound());
-api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid boardId, Guid repositoryId, DevOpsStore store) =>
-    store.UnlinkRepositoryFromBoard(boardId, repositoryId) ? Results.NoContent() : Results.NotFound());
+api.MapPut("/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile", (Guid boardId, Guid repositoryId, RepositoryProfileDto request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.UpsertBoardRepositoryProfile(boardId, repositoryId, request) is { } board ? Results.Ok(board) : Results.NotFound();
+});
+api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid boardId, Guid repositoryId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.UnlinkRepositoryFromBoard(boardId, repositoryId) ? Results.NoContent() : Results.NotFound();
+});
 api.MapGet("/boards/{boardId:guid}/teams", (Guid boardId, DevOpsStore store) =>
     store.GetBoard(boardId) is null ? Results.NotFound() : Results.Ok(store.GetBoardTeamAccess(boardId)));
-api.MapPut("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid teamId, UpsertBoardTeamAccessRequest request, DevOpsStore store) =>
-    store.UpsertBoardTeamAccess(boardId, teamId, request.Role) is { } access ? Results.Ok(access) : Results.NotFound());
-api.MapDelete("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid teamId, DevOpsStore store) =>
-    store.RemoveBoardTeamAccess(boardId, teamId) ? Results.NoContent() : Results.NotFound());
-api.MapGet("/boards/{boardId:guid}/secrets", (Guid boardId, DevOpsStore store) => store.GetBoardSecrets(boardId));
-api.MapPost("/boards/{boardId:guid}/secrets", async (Guid boardId, CreateBoardSecretRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
+api.MapPut("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid teamId, UpsertBoardTeamAccessRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.UpsertBoardTeamAccess(boardId, teamId, request.Role) is { } access ? Results.Ok(access) : Results.NotFound();
+});
+api.MapDelete("/boards/{boardId:guid}/teams/{teamId:guid}", (Guid boardId, Guid teamId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.RemoveBoardTeamAccess(boardId, teamId) ? Results.NoContent() : Results.NotFound();
+});
+api.MapGet("/boards/{boardId:guid}/secrets", (Guid boardId, DevOpsStore store) => store.GetBoardSecrets(boardId));
+api.MapPost("/boards/{boardId:guid}/secrets", async (Guid boardId, CreateBoardSecretRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var secret = store.CreateBoardSecret(boardId, request);
     if (secret is null)
     {
@@ -398,14 +476,20 @@ api.MapPost("/boards/{boardId:guid}/secrets", async (Guid boardId, CreateBoardSe
         var apply = await jobs.ApplyAsync(manifest, cancellationToken);
         if (!apply.Succeeded)
         {
+            store.DeleteBoardSecret(boardId, secret.Id);
             return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
         }
     }
 
     return Results.Created($"/api/boards/{boardId}/secrets/{secret.Id}", secret);
 });
-api.MapPut("/boards/{boardId:guid}/secrets/{secretId:guid}", async (Guid boardId, Guid secretId, CreateBoardSecretRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
+api.MapPut("/boards/{boardId:guid}/secrets/{secretId:guid}", async (Guid boardId, Guid secretId, CreateBoardSecretRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var secret = store.UpdateBoardSecret(boardId, secretId);
     if (secret is null)
     {
@@ -424,19 +508,57 @@ api.MapPut("/boards/{boardId:guid}/secrets/{secretId:guid}", async (Guid boardId
 
     return Results.Ok(secret);
 });
-api.MapDelete("/boards/{boardId:guid}/secrets/{secretId:guid}", (Guid boardId, Guid secretId, DevOpsStore store) =>
-    store.DeleteBoardSecret(boardId, secretId) ? Results.NoContent() : Results.NotFound());
+api.MapDelete("/boards/{boardId:guid}/secrets/{secretId:guid}", async (Guid boardId, Guid secretId, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var secret = store.GetBoardSecret(boardId, secretId);
+    if (secret is null)
+    {
+        return Results.NotFound();
+    }
+
+    var manifest = store.RenderBoardSecretManifest(secret, "redacted", configuration);
+    if (manifest is not null)
+    {
+        var cleanup = await jobs.DeleteAsync(manifest, cancellationToken);
+        if (!cleanup.Succeeded)
+        {
+            return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    return store.DeleteBoardSecret(boardId, secretId) ? Results.NoContent() : Results.NotFound();
+});
 
 api.MapGet("/work-items", (DevOpsStore store) => store.GetWorkItems());
-api.MapPost("/work-items", async (CreateWorkItemRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items", async (CreateWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateBoardRequest(store, request.BoardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var item = store.CreateWorkItem(request);
+    if (item is null)
+    {
+        return Results.Problem("Work item board or status is invalid.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
     await hub.Clients.All.SendAsync("workItemChanged", item);
     return Results.Created($"/api/work-items/{item.Id}", item);
 });
 
-api.MapPatch("/work-items/{workItemId:guid}", async (Guid workItemId, UpdateWorkItemRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPatch("/work-items/{workItemId:guid}", async (Guid workItemId, UpdateWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var item = store.UpdateWorkItem(workItemId, request);
     if (item is null)
     {
@@ -447,8 +569,13 @@ api.MapPatch("/work-items/{workItemId:guid}", async (Guid workItemId, UpdateWork
     return Results.Ok(item);
 });
 
-api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var manifest = store.RenderWorkItemCleanupManifest(workItemId);
     if (manifest is not null)
     {
@@ -469,8 +596,13 @@ api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, DevOpsSto
     return Results.NoContent();
 });
 
-api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid workItemId, DeleteAndCleanupRequest request, DevOpsStore store, PreviewEnvironmentOrchestrator previews, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid workItemId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var actor = string.IsNullOrWhiteSpace(request.Actor) ? "crille" : request.Actor.Trim();
     var sourceRun = store.GetImplementationRuns(workItemId)
         .Where(run => !string.IsNullOrWhiteSpace(run.PullRequestUrl))
@@ -606,8 +738,13 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     return Results.Accepted($"/api/repository-cleanup-runs/{cleanupRun.Id}", updated);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid workItemId, AdoptCleanupPullRequestRequest request, DevOpsStore store, GitHubRepositoryClient github, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid workItemId, AdoptCleanupPullRequestRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var actor = string.IsNullOrWhiteSpace(request.Actor) ? "crille" : request.Actor.Trim();
     var sourceRun = request.SourceImplementationRunId is { } sourceImplementationRunId
         ? store.GetImplementationRuns(workItemId).SingleOrDefault(run => run.Id == sourceImplementationRunId)
@@ -627,6 +764,16 @@ api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid work
     if (!string.IsNullOrWhiteSpace(token))
     {
         pullRequest = await github.GetPullRequestAsync(request.PullRequestUrl, token, cancellationToken);
+    }
+
+    if (repository is null || string.IsNullOrWhiteSpace(token) || pullRequest is null)
+    {
+        return Results.Problem("Cleanup pull request could not be verified. Adoption requires a readable GitHub pull request in the source repository.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    if (!PullRequestMatchesRepository(pullRequest, repository))
+    {
+        return Results.Problem("Cleanup pull request belongs to a different repository than the source implementation run.", statusCode: StatusCodes.Status400BadRequest);
     }
 
     var cleanupRun = store.AdoptRepositoryCleanupPullRequest(
@@ -652,8 +799,13 @@ api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid work
     return Results.Created($"/api/repository-cleanup-runs/{cleanupRun.Id}", cleanupRun);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWorkItemRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var item = store.MoveWorkItem(workItemId, request);
     if (item is null)
     {
@@ -673,11 +825,23 @@ api.MapGet("/work-items/{workItemId:guid}/ai-runs", (Guid workItemId, DevOpsStor
 api.MapGet("/work-items/{workItemId:guid}/ai-session", (Guid workItemId, DevOpsStore store) =>
     store.GetAiSession(workItemId) is { } session ? Results.Ok(session) : Results.NotFound());
 
-api.MapPut("/work-items/{workItemId:guid}/ai-session/provider-session", (Guid workItemId, UpdateAiSessionProviderRequest request, DevOpsStore store) =>
-    store.SetAiSessionProviderSession(workItemId, request.ProviderSessionId) is { } session ? Results.Ok(session) : Results.NotFound());
-
-api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, AddCommentRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPut("/work-items/{workItemId:guid}/ai-session/provider-session", (Guid workItemId, UpdateAiSessionProviderRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.SetAiSessionProviderSession(workItemId, request.ProviderSessionId) is { } session ? Results.Ok(session) : Results.NotFound();
+});
+
+api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, AddCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var comment = store.AddComment(workItemId, request.Author, request.Kind, request.Body);
     if (comment is null)
     {
@@ -730,8 +894,13 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, string actor,
     }
 });
 
-api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, DevOpsStore store, AiPlanProviderRouter planner, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var context = store.GetWorkItemDetail(workItemId);
     if (context is null)
     {
@@ -758,8 +927,13 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     return Results.Accepted($"/api/ai-runs/{run.Id}", run);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateAiRunRequest(store, aiRunId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     AiRun? result;
     try
     {
@@ -789,8 +963,13 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     return Results.Accepted($"/api/ai-runs/{aiRunId}", detail ?? (object)result);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRunRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateAiRunRequest(store, aiRunId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var result = store.DiscardAiRun(aiRunId, request.DiscardedBy);
     if (result is null)
     {
@@ -813,8 +992,13 @@ api.MapPost("/integrations/github/callback", async (GitHubCallbackRequest reques
     return Results.Ok(result);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, ApprovePullRequestRequest request, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, ApprovePullRequestRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var manifest = store.RenderPreviewManifest(workItemId);
     if (manifest is not null)
     {
@@ -836,8 +1020,13 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
     return Results.Ok(result);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/preview/start", async (Guid workItemId, PreviewActionRequest request, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/preview/start", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var manifest = store.RenderPreviewManifest(workItemId);
     if (manifest is null)
     {
@@ -856,8 +1045,13 @@ api.MapPost("/work-items/{workItemId:guid}/preview/start", async (Guid workItemI
     return detail is null ? Results.NotFound() : Results.Ok(detail);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId, PreviewActionRequest request, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var manifest = store.RenderPreviewManifest(workItemId);
     if (manifest is null)
     {
@@ -915,8 +1109,13 @@ api.MapGet("/implementation-runs/{implementationRunId:guid}", (Guid implementati
 api.MapGet("/implementation-runs/{implementationRunId:guid}/manifest", (Guid implementationRunId, DevOpsStore store, IConfiguration configuration) =>
     store.RenderImplementationRunManifest(implementationRunId, configuration) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound());
 
-api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid workItemId, StartImplementationRunRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid workItemId, StartImplementationRunRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     ImplementationRunDto? run;
     try
     {
@@ -993,6 +1192,42 @@ api.MapGet("/previews/{workItemId:guid}/manifest", (Guid workItemId, DevOpsStore
 api.MapGet("/settings", (DevOpsStore store, IConfiguration configuration) => store.GetSettings(configuration));
 
 app.Run();
+
+static string NewGitHubManifestState(ConcurrentDictionary<string, DateTimeOffset> states)
+{
+    var state = Guid.NewGuid().ToString("N");
+    states[state] = DateTimeOffset.UtcNow;
+    return state;
+}
+
+static bool TryConsumeGitHubManifestState(ConcurrentDictionary<string, DateTimeOffset> states, string? state, TimeSpan lifetime)
+{
+    var now = DateTimeOffset.UtcNow;
+    foreach (var stale in states.Where(entry => now - entry.Value > lifetime).Select(entry => entry.Key).ToArray())
+    {
+        states.TryRemove(stale, out _);
+    }
+
+    return !string.IsNullOrWhiteSpace(state) &&
+        states.TryRemove(state.Trim(), out var createdAt) &&
+        now - createdAt <= lifetime;
+}
+
+static bool PullRequestMatchesRepository(GitHubPullRequestDto pullRequest, RepositoryDto repository) =>
+    string.Equals(pullRequest.Repository, repository.Name, StringComparison.OrdinalIgnoreCase) &&
+    (string.IsNullOrWhiteSpace(repository.Owner) || string.Equals(pullRequest.Owner, repository.Owner, StringComparison.OrdinalIgnoreCase));
+
+static bool CanMutateBoardRequest(DevOpsStore store, Guid boardId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanMutateBoard(boardId, UserIdentityFromClaims(user).Subject);
+
+static bool CanMutateWorkItemRequest(DevOpsStore store, Guid workItemId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanMutateWorkItem(workItemId, UserIdentityFromClaims(user).Subject);
+
+static bool CanMutateAiRunRequest(DevOpsStore store, Guid aiRunId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanMutateAiRun(aiRunId, UserIdentityFromClaims(user).Subject);
+
+static IResult BoardMutationForbidden() =>
+    Results.Problem("You do not have permission to modify this board.", statusCode: StatusCodes.Status403Forbidden);
 
 static UserIdentityRequest UserIdentityFromClaims(ClaimsPrincipal user)
 {
@@ -1126,6 +1361,7 @@ namespace Rosenvall.DevOps.Api
                        rosenvall.devops/repository: {{SafeName(repository.Name)}}
                    spec:
                      backoffLimit: 0
+                     activeDeadlineSeconds: 3600
                      template:
                        metadata:
                          labels:
@@ -1210,8 +1446,8 @@ namespace Rosenvall.DevOps.Api
             var allowedPaths = Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join('\n', context.BoardContext?.GitOpsSettings?.AllowedPaths ?? [])));
             var secretEnv = RenderSecretEnvironment(boardSecrets ?? []);
             var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
-                ? "codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
-                : "codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
+                ? "codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
+                : "codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -1223,6 +1459,7 @@ namespace Rosenvall.DevOps.Api
                        rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
                    spec:
                      backoffLimit: 0
+                     activeDeadlineSeconds: 3600
                      template:
                        metadata:
                          labels:
@@ -1368,7 +1605,6 @@ namespace Rosenvall.DevOps.Api
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
                                  git push --set-upstream origin "$ROSENVALL_BRANCH"
-                                 echo "RDO_STEP=PullRequestReady"
                                  repo_owner="${ROSENVALL_REPOSITORY%%/*}"
                                  existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
                                  if [ -n "$existing_pr_url" ]; then
@@ -1378,6 +1614,7 @@ namespace Rosenvall.DevOps.Api
                                    pr_url="$(curl -fsS -X POST "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$pr_payload" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
                                  fi
                                  if [ -z "$pr_url" ]; then echo "RDO_FAILURE=Pull request was created or requested, but no PR URL was returned"; exit 21; fi
+                                 echo "RDO_STEP=PullRequestReady"
                                  echo "RDO_PULL_REQUEST_URL=$pr_url"
                    """;
         }
@@ -1538,6 +1775,7 @@ namespace Rosenvall.DevOps.Api
                        rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
                    spec:
                      backoffLimit: 0
+                     activeDeadlineSeconds: 3600
                      template:
                        metadata:
                          labels:
@@ -1649,7 +1887,7 @@ namespace Rosenvall.DevOps.Api
                                  printf '%s' "$ROSENVALL_SOURCE_PR_DIFF_B64" | base64 -d > "$workspace/source-pr.diff"
                                  printf '%s' "$ROSENVALL_ALLOWED_PATHS_B64" | base64 -d > "$workspace/allowed-paths.txt"
                                  echo "RDO_STEP=Implementing"
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md"
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md"
                                  echo "RDO_STEP=Validating"
                                  git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/changed-files.txt"
                                  if [ ! -s "$workspace/changed-files.txt" ]; then echo "RDO_FAILURE=No cleanup changes produced"; exit 20; fi
@@ -1672,7 +1910,6 @@ namespace Rosenvall.DevOps.Api
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
                                  git push --set-upstream origin "$ROSENVALL_BRANCH"
-                                 echo "RDO_STEP=PullRequestReady"
                                  repo_owner="${ROSENVALL_REPOSITORY%%/*}"
                                  existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
                                  if [ -n "$existing_pr_url" ]; then
@@ -1682,6 +1919,7 @@ namespace Rosenvall.DevOps.Api
                                    pr_url="$(curl -fsS -X POST "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$pr_payload" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
                                  fi
                                  if [ -z "$pr_url" ]; then echo "RDO_FAILURE=Cleanup pull request was created or requested, but no PR URL was returned"; exit 21; fi
+                                 echo "RDO_STEP=PullRequestReady"
                                  echo "RDO_CLEANUP_PULL_REQUEST_URL=$pr_url"
                    """;
         }
@@ -3983,7 +4221,7 @@ namespace Rosenvall.DevOps.Api
             return $"https://github.com/apps/{WebUtility.UrlEncode(slug)}/installations/new?state={state}";
         }
 
-        public string RenderManifestStartPage()
+        public string RenderManifestStartPage(string state)
         {
             var baseUrl = PublicBaseUrl().TrimEnd('/');
             var callbackUrl = $"{baseUrl}/integrations/github/callback";
@@ -4013,7 +4251,6 @@ namespace Rosenvall.DevOps.Api
             var action = string.IsNullOrWhiteSpace(owner)
                 ? "https://github.com/settings/apps/new"
                 : $"https://github.com/organizations/{WebUtility.UrlEncode(owner.Trim())}/settings/apps/new";
-            var state = Guid.NewGuid().ToString("N");
             return $$"""
                    <!doctype html>
                    <html lang="en">
@@ -5718,6 +5955,24 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public bool CanMutateWorkItem(Guid workItemId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                return item is not null && CanMutateBoard(item.BoardId, actorSubject);
+            }
+        }
+
+        public bool CanMutateAiRun(Guid aiRunId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var run = _aiRuns.SingleOrDefault(entry => entry.Id == aiRunId);
+                return run is not null && CanMutateWorkItem(run.WorkItemId, actorSubject);
+            }
+        }
+
         public IReadOnlyList<BoardTeamAccessDto> GetBoardTeamAccess(Guid boardId)
         {
             lock (_lock)
@@ -6089,6 +6344,14 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public BoardSecretDto? GetBoardSecret(Guid boardId, Guid secretId)
+        {
+            lock (_lock)
+            {
+                return _boardSecrets.SingleOrDefault(secret => secret.Id == secretId && secret.BoardId == boardId);
+            }
+        }
+
         public BoardSecretDto? CreateBoardSecret(Guid boardId, CreateBoardSecretRequest request)
         {
             lock (_lock)
@@ -6236,10 +6499,16 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public WorkItemSummaryDto CreateWorkItem(CreateWorkItemRequest request)
+        public WorkItemSummaryDto? CreateWorkItem(CreateWorkItemRequest request)
         {
             lock (_lock)
             {
+                var board = _boards.SingleOrDefault(board => board.Id == request.BoardId);
+                if (board is null || !board.Columns.Contains(request.Status, StringComparer.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
                 var index = _nextTaskNumber++;
                 var sortOrder = _items.Where(i => i.BoardId == request.BoardId && i.Status == request.Status)
                     .Select(i => i.SortOrder)
@@ -6270,6 +6539,11 @@ namespace Rosenvall.DevOps.Api
                 item.Assignee = string.IsNullOrWhiteSpace(request.Assignee) ? null : request.Assignee.Trim();
                 if (!string.Equals(item.Status, request.Status, StringComparison.Ordinal))
                 {
+                    if (!IsBoardStatus(item.BoardId, request.Status))
+                    {
+                        return null;
+                    }
+
                     PlaceItem(item, request.Status, int.MaxValue);
                 }
 
@@ -6285,6 +6559,11 @@ namespace Rosenvall.DevOps.Api
             {
                 var item = _items.SingleOrDefault(i => i.Id == workItemId);
                 if (item is null)
+                {
+                    return null;
+                }
+
+                if (!IsBoardStatus(item.BoardId, request.Status))
                 {
                     return null;
                 }
@@ -6566,7 +6845,7 @@ namespace Rosenvall.DevOps.Api
                 var lines = string.IsNullOrWhiteSpace(logs)
                     ? existing.TerminalLines ?? []
                     : logs.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", line.TrimEnd()))
+                        .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", RedactTerminalMessage(line.TrimEnd())))
                         .TakeLast(200)
                         .ToArray();
                 var pullRequestUrl = FirstMarkerValue(logs, "RDO_PULL_REQUEST_URL=") ?? existing.PullRequestUrl;
@@ -6754,7 +7033,7 @@ namespace Rosenvall.DevOps.Api
                 var lines = string.IsNullOrWhiteSpace(logs)
                     ? existing.TerminalLines ?? []
                     : logs.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", line.TrimEnd()))
+                        .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", RedactTerminalMessage(line.TrimEnd())))
                         .TakeLast(200)
                         .ToArray();
                 var pullRequestUrl = FirstMarkerValue(logs, "RDO_CLEANUP_PULL_REQUEST_URL=") ?? existing.CleanupPullRequestUrl;
@@ -7250,7 +7529,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var lines = (preview.TerminalLines ?? [])
-                    .Concat([new PreviewTerminalLineDto(createdAt ?? DateTimeOffset.UtcNow, NormalizeText(stream, "system"), message.Trim())])
+                    .Concat([new PreviewTerminalLineDto(createdAt ?? DateTimeOffset.UtcNow, NormalizeText(stream, "system"), RedactTerminalMessage(message.Trim()))])
                     .TakeLast(200)
                     .ToArray();
                 _previews.Remove(preview);
@@ -8263,6 +8542,21 @@ namespace Rosenvall.DevOps.Api
         private static string NormalizeText(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
 
+        private static string RedactTerminalMessage(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+
+            var redacted = Regex.Replace(value, @"x-access-token:[^@\s]+@github\.com", "x-access-token:[redacted]@github.com", RegexOptions.IgnoreCase);
+            redacted = Regex.Replace(redacted, @"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b", "[redacted-github-token]");
+            redacted = Regex.Replace(redacted, @"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "[redacted-github-token]", RegexOptions.IgnoreCase);
+            redacted = Regex.Replace(redacted, @"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY)[A-Z0-9_]*)=([^\s]+)", "$1=[redacted]");
+            redacted = Regex.Replace(redacted, @"(?i)\bAuthorization:\s*Bearer\s+[A-Za-z0-9._~+/=-]+", "Authorization: Bearer [redacted]");
+            return redacted;
+        }
+
         private static string NormalizeImplementationProfile(string? value)
         {
             var normalized = NormalizeText(value, "react-preview").ToLowerInvariant();
@@ -8300,6 +8594,9 @@ namespace Rosenvall.DevOps.Api
             RoleFromRank(Math.Min(RoleRank(left), RoleRank(right)));
 
         private bool HasAnyTeamOrAccess() => _teams.Count > 0 || _boardAccess.Count > 0 || _boardTeamAccess.Count > 0;
+
+        private bool IsBoardStatus(Guid boardId, string status) =>
+            _boards.SingleOrDefault(board => board.Id == boardId)?.Columns.Contains(status, StringComparer.OrdinalIgnoreCase) == true;
 
         private static string NormalizeEmail(string? value) =>
             NormalizeText(value, "").ToLowerInvariant();
@@ -8414,8 +8711,8 @@ namespace Rosenvall.DevOps.Api
             return new BoardGitOpsSettingsDto(
                 boardId,
                 paths.Count == 0 ? defaults.AllowedPaths : paths,
-                NormalizeText(request?.ArgoNamespace, defaults.ArgoNamespace),
-                string.IsNullOrWhiteSpace(request?.ArgoApplicationSelector) ? "" : request.ArgoApplicationSelector.Trim());
+                NormalizeKubernetesNamespace(request?.ArgoNamespace, defaults.ArgoNamespace),
+                NormalizeLabelSelector(request?.ArgoApplicationSelector));
         }
 
         private static BoardAiContextDto CreateAiContext(Guid boardId, BoardAiContextRequest? request, bool defaultAskWhenUncertain = true) =>
@@ -8428,10 +8725,40 @@ namespace Rosenvall.DevOps.Api
         private static IReadOnlyList<string> NormalizePaths(IEnumerable<string>? paths) =>
             (paths ?? [])
                 .Select(path => path.Replace('\\', '/').Trim())
-                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Where(IsSafeRelativeGitOpsPath)
                 .Select(path => path.EndsWith("/", StringComparison.Ordinal) ? path : $"{path}/")
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+
+        private static bool IsSafeRelativeGitOpsPath(string path) =>
+            !string.IsNullOrWhiteSpace(path) &&
+            !path.StartsWith("/", StringComparison.Ordinal) &&
+            !path.Contains("../", StringComparison.Ordinal) &&
+            !path.Equals("..", StringComparison.Ordinal) &&
+            !path.Contains(':', StringComparison.Ordinal) &&
+            Regex.IsMatch(path, @"^[A-Za-z0-9._\-/]+$", RegexOptions.CultureInvariant);
+
+        private static string NormalizeKubernetesNamespace(string? value, string fallback)
+        {
+            var normalized = NormalizeText(value, fallback).ToLowerInvariant();
+            return Regex.IsMatch(normalized, @"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", RegexOptions.CultureInvariant) && normalized.Length <= 63
+                ? normalized
+                : fallback;
+        }
+
+        private static string NormalizeLabelSelector(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "";
+            }
+
+            var normalized = value.Trim();
+            return normalized.Length <= 200 &&
+                Regex.IsMatch(normalized, @"^[A-Za-z0-9_.\-/=,!()]+$", RegexOptions.CultureInvariant)
+                ? normalized
+                : "";
+        }
 
         private static IReadOnlyList<string> NormalizeSkills(IEnumerable<string>? skills) =>
             (skills ?? [])

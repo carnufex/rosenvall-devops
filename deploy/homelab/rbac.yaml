@@ -18,14 +18,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes"]
@@ -39,6 +33,57 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: rosenvall-devops-api
+subjects:
+  - kind: ServiceAccount
+    name: rosenvall-devops-api
+    namespace: rosenvall-devops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rosenvall-devops-api-runtime
+  namespace: rosenvall-devops
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rosenvall-devops-api-runtime
+  namespace: rosenvall-devops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rosenvall-devops-api-runtime
+subjects:
+  - kind: ServiceAccount
+    name: rosenvall-devops-api
+    namespace: rosenvall-devops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rosenvall-devops-api-pipeline-runtime
+  namespace: rosenvall-devops-pipelines
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rosenvall-devops-api-pipeline-runtime
+  namespace: rosenvall-devops-pipelines
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rosenvall-devops-api-pipeline-runtime
 subjects:
   - kind: ServiceAccount
     name: rosenvall-devops-api

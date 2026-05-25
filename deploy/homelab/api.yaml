@@ -48,7 +48,7 @@ spec:
             - name: CODEX_HOME
               value: /app/codex-home
             - name: Ai__Codex__ImplementationBypassSandbox
-              value: "true"
+              value: "false"
             - name: Ai__Codex__Model
               value: gpt-5.5
             - name: Ai__Codex__ReasoningEffort

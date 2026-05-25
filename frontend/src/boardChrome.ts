@@ -102,6 +102,21 @@ export function containedWheelScrollTop(currentScrollTop: number, deltaY: number
   return Math.min(Math.max(currentScrollTop + deltaY, 0), maxScrollTop);
 }
 
+export function safeMarkdownHref(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return null;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:') return parsed.toString();
+    if (parsed.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname)) return parsed.toString();
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 function taskKeyFromTimelineEvent(event: TimelineChromeEvent): string | null {
   return /\bTASK-\d+\b/i.exec(`${event.title} ${event.message ?? ''}`)?.[0].toUpperCase() ?? null;
 }
