@@ -234,8 +234,13 @@ api.MapGet("/boards/{boardId:guid}/gitops/applications", async (Guid boardId, Cl
 
 api.MapGet("/repositories", (ClaimsPrincipal user, DevOpsStore store) => store.GetRepositories(AuthenticatedSubjectOrNull(user)));
 
-api.MapPost("/repositories", (CreateRepositoryRequest request, DevOpsStore store) =>
+api.MapPost("/repositories", (CreateRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
+    if (!CanCreateRepositoryRequest(store, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var repository = store.CreateRepository(request);
     return Results.Created($"/api/repositories/{repository.Id}", repository);
 });
@@ -1084,8 +1089,13 @@ api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRun
     return Results.Ok(result);
 });
 
-api.MapPost("/integrations/github/callback", async (GitHubCallbackRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/integrations/github/callback", async (GitHubCallbackRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
+    if (!CanMutateWorkItemRequest(store, request.WorkItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var result = store.ApplyGitHubCallback(request);
     if (result is null)
     {
@@ -1414,6 +1424,9 @@ static bool CanRecordPipelineRunRequest(DevOpsStore store, RecordPipelineRunRequ
 
 static bool CanMutatePipelineRunRequest(DevOpsStore store, Guid pipelineRunId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutatePipelineRun(pipelineRunId, UserIdentityFromClaims(user).Subject);
+
+static bool CanCreateRepositoryRequest(DevOpsStore store, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanCreateRepository(UserIdentityFromClaims(user).Subject);
 
 static bool CanViewTeamRequest(DevOpsStore store, Guid teamId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanViewTeam(teamId, UserIdentityFromClaims(user).Subject);
@@ -6377,6 +6390,14 @@ namespace Rosenvall.DevOps.Api
                 return boardId is { } id
                     ? CanMutateBoardWithoutLock(id, actorSubject)
                     : CanMutateRepositoryOnlyPipelineWithoutLock(run.RepositoryId, actorSubject);
+            }
+        }
+
+        public bool CanCreateRepository(string actorSubject)
+        {
+            lock (_lock)
+            {
+                return !HasAnyTeamOrAccess() || _boards.Any(board => CanMutateBoardWithoutLock(board.Id, actorSubject));
             }
         }
 
