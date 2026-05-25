@@ -452,6 +452,18 @@ public static class PreviewManifestRenderer
         builder.AppendLine("      backendRefs:");
         builder.AppendLine($"        - name: {resources.Name}");
         builder.AppendLine("          port: 8080");
+        builder.AppendLine("---");
+        builder.AppendLine("apiVersion: networking.k8s.io/v1");
+        builder.AppendLine("kind: NetworkPolicy");
+        builder.AppendLine("metadata:");
+        builder.AppendLine($"  name: {resources.Name}-deny-egress");
+        builder.AppendLine($"  namespace: {resources.Namespace}");
+        builder.AppendLine("spec:");
+        builder.AppendLine("  podSelector:");
+        builder.AppendLine("    matchLabels:");
+        builder.AppendLine($"      app.kubernetes.io/name: {resources.Name}");
+        builder.AppendLine("  policyTypes:");
+        builder.AppendLine("    - Egress");
         return builder.ToString();
     }
 

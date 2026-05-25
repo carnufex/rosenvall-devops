@@ -92,8 +92,11 @@ public sealed class DevOpsDomainTests
         Assert.Contains("kind: Deployment", manifest);
         Assert.Contains("kind: Service", manifest);
         Assert.Contains("kind: HTTPRoute", manifest);
+        Assert.Contains("kind: NetworkPolicy", manifest);
         Assert.Contains("kind: Namespace", manifest);
         Assert.Contains("name: devops-preview-task-4821-implement-oauth2-flow-for-partner-api", manifest);
+        Assert.Contains("policyTypes:", manifest);
+        Assert.Contains("- Egress", manifest);
         Assert.Contains("task-4821-implement-oauth2-flow-for-partner-api.rosenvall.se", manifest);
         Assert.Contains("sectionName: https", manifest);
     }
