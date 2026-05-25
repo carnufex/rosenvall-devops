@@ -807,6 +807,7 @@ public sealed class DevOpsStoreTests
         Assert.Equal("Queued", implementationRun.Status);
         Assert.Contains("kind: Job", manifest);
         Assert.Contains("namespace: rosenvall-devops", manifest);
+        Assert.Contains("automountServiceAccountToken: false", manifest);
         Assert.Contains("initContainers:", manifest);
         Assert.Contains("name: prepare-codex-home", manifest);
         Assert.Contains("name: codex-home-source", manifest);
@@ -1032,12 +1033,21 @@ public sealed class DevOpsStoreTests
         Assert.False(store.CanViewWorkItem(item.Id, guest.Subject));
         Assert.True(store.CanCreateRepository(owner.Subject));
         Assert.False(store.CanCreateRepository(guest.Subject));
+        Assert.True(store.CanCreateWorkspace(owner.Subject));
+        Assert.False(store.CanCreateWorkspace(guest.Subject));
         Assert.Contains(store.GetWorkspaces(owner.Subject), entry => entry.Id == workspace.Id);
         Assert.DoesNotContain(store.GetWorkspaces(guest.Subject), entry => entry.Id == workspace.Id);
         Assert.Contains(store.GetBoards(workspace.Id, owner.Subject), entry => entry.Id == board.Id);
         Assert.DoesNotContain(store.GetBoards(workspace.Id, guest.Subject), entry => entry.Id == board.Id);
         Assert.Contains(store.GetWorkItems(owner.Subject), entry => entry.Id == item.Id);
         Assert.DoesNotContain(store.GetWorkItems(guest.Subject), entry => entry.Id == item.Id);
+
+        var createdWorkspace = store.CreateWorkspace("Owner Workspace", "Development", "local", owner.Subject);
+        var createdBoard = store.GetBoards(createdWorkspace.Id, owner.Subject).Single();
+        Assert.Contains(store.GetWorkspaces(owner.Subject), entry => entry.Id == createdWorkspace.Id);
+        Assert.DoesNotContain(store.GetWorkspaces(guest.Subject), entry => entry.Id == createdWorkspace.Id);
+        Assert.True(store.CanMutateBoard(createdBoard.Id, owner.Subject));
+        Assert.False(store.CanViewBoard(createdBoard.Id, guest.Subject));
     }
 
     [Fact]
@@ -2029,6 +2039,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("hello-world", detail.Preview.Namespace);
         Assert.Contains("Local React/Tailwind implementation completed", detail.Comments.Last().Body);
         Assert.Contains("kind: ConfigMap", manifest);
+        Assert.Contains("automountServiceAccountToken: false", manifest);
         Assert.Contains("tailwind.config.ts", manifest);
         Assert.Contains("components.json", manifest);
         Assert.Contains("npm run dev -- --host 0.0.0.0 --port 8080", manifest);
@@ -2693,6 +2704,26 @@ public sealed class DevOpsStoreTests
         Assert.Contains("gpt-5.3-codex-spark", codex.AvailableModels);
         Assert.Equal(["low", "medium", "high", "xhigh"], codex.AvailableReasoningEfforts);
         Assert.Equal("xhigh", codex.DefaultReasoningEffort);
+    }
+
+    [Fact]
+    public void Settings_filters_github_integration_details_by_installer()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(
+            1234,
+            "private-org",
+            "Organization",
+            "authentik|owner",
+            RepositoriesCount: 17));
+
+        var ownerSettings = fixture.Store.GetSettings(new ConfigurationBuilder().Build(), "authentik|owner");
+        var guestSettings = fixture.Store.GetSettings(new ConfigurationBuilder().Build(), "authentik|guest");
+
+        Assert.Equal("private-org (Organization)", ownerSettings.GitHub.Account);
+        Assert.Equal("17 repositories granted", ownerSettings.GitHub.TargetRepository);
+        Assert.Equal("No GitHub App installation", guestSettings.GitHub.Account);
+        Assert.Equal("Install the GitHub App to list repositories", guestSettings.GitHub.TargetRepository);
     }
 
     [Fact]

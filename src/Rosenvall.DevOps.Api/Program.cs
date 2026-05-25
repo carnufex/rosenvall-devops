@@ -164,9 +164,14 @@ if (!string.IsNullOrWhiteSpace(authority))
 }
 
 api.MapGet("/workspaces", (ClaimsPrincipal user, DevOpsStore store) => store.GetWorkspaces(AuthenticatedSubjectOrNull(user)));
-api.MapPost("/workspaces", async (CreateWorkspaceRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/workspaces", async (CreateWorkspaceRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
-    var workspace = store.CreateWorkspace(request.Name, request.EnvironmentName, request.Region);
+    if (!CanCreateWorkspaceRequest(store, user))
+    {
+        return WorkspaceMutationForbidden();
+    }
+
+    var workspace = store.CreateWorkspace(request.Name, request.EnvironmentName, request.Region, UserIdentityFromClaims(user).Subject);
     await hub.Clients.All.SendAsync("workspaceCreated", workspace);
     return Results.Created($"/api/workspaces/{workspace.Id}", workspace);
 });
@@ -1367,7 +1372,8 @@ api.MapGet("/previews/{workItemId:guid}/manifest", (Guid workItemId, ClaimsPrinc
     return store.RenderPreviewManifest(workItemId) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound();
 });
 
-api.MapGet("/settings", (DevOpsStore store, IConfiguration configuration) => store.GetSettings(configuration));
+api.MapGet("/settings", (ClaimsPrincipal user, DevOpsStore store, IConfiguration configuration) =>
+    store.GetSettings(configuration, AuthenticatedSubjectOrNull(user)));
 
 app.Run();
 
@@ -1428,6 +1434,9 @@ static bool CanMutatePipelineRunRequest(DevOpsStore store, Guid pipelineRunId, C
 static bool CanCreateRepositoryRequest(DevOpsStore store, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanCreateRepository(UserIdentityFromClaims(user).Subject);
 
+static bool CanCreateWorkspaceRequest(DevOpsStore store, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanCreateWorkspace(UserIdentityFromClaims(user).Subject);
+
 static bool CanViewTeamRequest(DevOpsStore store, Guid teamId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanViewTeam(teamId, UserIdentityFromClaims(user).Subject);
 
@@ -1439,6 +1448,9 @@ static IResult BoardMutationForbidden() =>
 
 static IResult BoardReadForbidden() =>
     Results.Problem("You do not have permission to view this board.", statusCode: StatusCodes.Status403Forbidden);
+
+static IResult WorkspaceMutationForbidden() =>
+    Results.Problem("You do not have permission to create workspaces.", statusCode: StatusCodes.Status403Forbidden);
 
 static IResult TeamReadForbidden() =>
     Results.Problem("You do not have permission to view this team.", statusCode: StatusCodes.Status403Forbidden);
@@ -1685,6 +1697,7 @@ namespace Rosenvall.DevOps.Api
                          labels:
                            app.kubernetes.io/name: {{jobName}}
                        spec:
+                         automountServiceAccountToken: false
                          restartPolicy: Never
                          securityContext:
                            fsGroup: 1000
@@ -2022,6 +2035,7 @@ namespace Rosenvall.DevOps.Api
                          labels:
                            app.kubernetes.io/name: {{jobName}}
                        spec:
+                         automountServiceAccountToken: false
                          restartPolicy: Never
                          securityContext:
                            fsGroup: 1000
@@ -6160,13 +6174,15 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public WorkspaceDto CreateWorkspace(string name, string environmentName, string region)
+        public WorkspaceDto CreateWorkspace(string name, string environmentName, string region, string? actorSubject = null)
         {
             lock (_lock)
             {
                 var workspace = new WorkspaceDto(Guid.NewGuid(), name, environmentName, region, 0, 0, 0, 0);
+                var board = new BoardRecord(Guid.NewGuid(), workspace.Id, "Delivery Board", ["Todo", "In Progress", "AI Planning", "Review", "Done"]);
                 _workspaces.Add(workspace);
-                _boards.Add(new BoardRecord(Guid.NewGuid(), workspace.Id, "Delivery Board", ["Todo", "In Progress", "AI Planning", "Review", "Done"]));
+                _boards.Add(board);
+                GrantActorBoardOwnerAccessWithoutLock(board.Id, actorSubject);
                 Persist();
                 return workspace;
             }
@@ -6436,7 +6452,15 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
-                return !HasAnyTeamOrAccess() || _boards.Any(board => CanMutateBoardWithoutLock(board.Id, actorSubject));
+                return CanCreateBoardScopedResourceWithoutLock(actorSubject);
+            }
+        }
+
+        public bool CanCreateWorkspace(string actorSubject)
+        {
+            lock (_lock)
+            {
+                return CanCreateBoardScopedResourceWithoutLock(actorSubject);
             }
         }
 
@@ -6565,6 +6589,10 @@ namespace Rosenvall.DevOps.Api
                 foreach (var teamId in teamIds)
                 {
                     UpsertBoardTeamAccessWithoutLock(board.Id, teamId, "Owner");
+                }
+                if (teamIds.Length == 0)
+                {
+                    GrantActorBoardOwnerAccessWithoutLock(board.Id, actorSubject);
                 }
                 AddTimelineEvent(board.Id, repository?.Id, null, "BoardCreated", board.Name, repository is null ? "Board created." : $"Board created for {repository.Name}.", "system", repository?.WebUrl);
                 Persist();
@@ -8478,7 +8506,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public SettingsDto GetSettings(IConfiguration configuration)
+        public SettingsDto GetSettings(IConfiguration configuration, string? actorSubject = null)
         {
             var configuredActiveModel = configuration["Ai:DefaultModel"] ?? configuration["Ai:Ollama:Model"];
             var activeModel = string.IsNullOrWhiteSpace(configuredActiveModel) ? "qwen3.5:latest" : configuredActiveModel.Trim();
@@ -8527,7 +8555,10 @@ namespace Rosenvall.DevOps.Api
                     codexReasoningEffort)
             };
 
-            var githubIntegration = _githubIntegrations.OrderByDescending(integration => integration.CreatedAt).FirstOrDefault();
+            var githubIntegration = _githubIntegrations
+                .Where(integration => CanUseGitHubIntegrationWithoutLock(integration, actorSubject))
+                .OrderByDescending(integration => integration.CreatedAt)
+                .FirstOrDefault();
             var githubAccount = githubIntegration is null
                 ? configuration["GitHub:Account"] ?? "No GitHub App installation"
                 : $"{githubIntegration.AccountLogin} ({githubIntegration.AccountType})";
@@ -8999,6 +9030,24 @@ namespace Rosenvall.DevOps.Api
             _boardTeamAccess.Add(new BoardTeamAccessRecord(boardId, teamId, NormalizeRole(role)));
         }
 
+        private void GrantActorBoardOwnerAccessWithoutLock(Guid boardId, string? actorSubject)
+        {
+            if (string.IsNullOrWhiteSpace(actorSubject) || !HasAnyTeamOrAccess())
+            {
+                return;
+            }
+
+            var actor = _users.FirstOrDefault(user => user.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+            if (actor is null)
+            {
+                actor = new UserDto(Guid.NewGuid(), actorSubject.Trim(), actorSubject.Trim(), actorSubject.Trim());
+                _users.Add(actor);
+            }
+
+            _boardAccess.RemoveAll(access => access.BoardId == boardId && access.UserId == actor.Id);
+            _boardAccess.Add(new BoardAccessDtoRecord(boardId, actor.Id, "Owner"));
+        }
+
         private void BackfillBoardTeamAccessWithoutLock()
         {
             if (_boardTeamAccess.Count > 0 || _teams.Count == 0)
@@ -9142,6 +9191,9 @@ namespace Rosenvall.DevOps.Api
             RoleFromRank(Math.Min(RoleRank(left), RoleRank(right)));
 
         private bool HasAnyTeamOrAccess() => _teams.Count > 0 || _boardAccess.Count > 0 || _boardTeamAccess.Count > 0;
+
+        private bool CanCreateBoardScopedResourceWithoutLock(string actorSubject) =>
+            !HasAnyTeamOrAccess() || _boards.Any(board => CanMutateBoardWithoutLock(board.Id, actorSubject));
 
         private bool CanMutateBoardWithoutLock(Guid boardId, string actorSubject)
         {

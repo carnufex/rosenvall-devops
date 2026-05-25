@@ -332,6 +332,7 @@ public static class PreviewManifestRenderer
             builder.AppendLine($"        rosenvall.dev/source-hash: {ComputeSourceHash(resources.SourceFiles)}");
         }
         builder.AppendLine("    spec:");
+        builder.AppendLine("      automountServiceAccountToken: false");
         builder.AppendLine("      securityContext:");
         builder.AppendLine("        runAsNonRoot: true");
         builder.AppendLine("        runAsUser: 101");
