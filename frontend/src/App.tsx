@@ -2685,7 +2685,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
   const canCreate = normalizedName.length > 0 && profileStatus !== 'loading' && (
     usesNoRepository ||
     (usesGitHub ? form.repositoryRemoteUrl.trim().length > 0 : false) ||
-    (usesGitHubNew ? newRepoName.trim().length > 0 && !!onboardingDraft && !!selectedInstallationId : false) ||
+    (usesGitHubNew ? normalizeRepositoryNameInput(newRepoName).length > 0 && !!onboardingDraft && !!selectedInstallationId : false) ||
     (usesCustomUrl ? isPublicGitUrl(form.repositoryRemoteUrl) : false)
   );
 
@@ -2750,7 +2750,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
     setOnboardingError(null);
     try {
       const draft = await api.post<GitHubRepositoryOnboardingDraftDto>('/api/repositories/github/onboarding-draft', {
-        name: newRepoName.trim() || slugFromText(form.name) || 'new-repository',
+        name: normalizeRepositoryNameInput(newRepoName || form.name),
         description: newRepoDescription,
         prompt: newRepoPrompt,
         implementationProfile: form.implementationProfile
@@ -2770,7 +2770,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
 
     const response = await api.post<GitHubRepositoryCreateResponse>('/api/repositories/github', {
       installationId: selectedInstallationId,
-      name: newRepoName.trim(),
+      name: normalizeRepositoryNameInput(newRepoName),
       private: newRepoPrivate,
       description: newRepoDescription,
       implementationProfile: form.implementationProfile,
@@ -2901,7 +2901,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
             setOnboardingStatus('idle');
             setOnboardingError(null);
             if (providerMode === 'GitHub') setGithubStatus('idle');
-            if (providerMode === 'GitHubNew') setNewRepoName(slugFromText(form.name));
+            if (providerMode === 'GitHubNew') setNewRepoName(normalizeRepositoryNameInput(form.name));
           }}>
             <option value="NoRepository">No repository</option>
             <option value="GitHub">GitHub existing repository</option>
@@ -2928,13 +2928,12 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
             form={form}
             installationId={selectedInstallationId}
             integrations={githubIntegrations}
-            repoName={newRepoName || slugFromText(form.name)}
+            repoName={newRepoName || normalizeRepositoryNameInput(form.name)}
             selectedInstallationId={selectedInstallationId}
             description={newRepoDescription}
             isPrivate={newRepoPrivate}
             prompt={newRepoPrompt}
             draft={onboardingDraft}
-            status={onboardingStatus}
             error={onboardingError}
             onInstallationChange={setNewRepoInstallationId}
             onRepoNameChange={setNewRepoName}
@@ -2942,7 +2941,6 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
             onPrivateChange={setNewRepoPrivate}
             onPromptChange={setNewRepoPrompt}
             onDraftChange={setOnboardingDraft}
-            onGenerate={() => void generateOnboardingDraft()}
           />
         )}
         {usesGitHub && form.repositoryRemoteUrl && (
@@ -2978,6 +2976,11 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
         )}
         {usesCustomUrl && form.repositoryRemoteUrl && !isPublicGitUrl(form.repositoryRemoteUrl) && <p className="provider-status">Custom URL supports public HTTP(S) clone URLs only in v1.</p>}
         <div className="modal-actions">
+          {usesGitHubNew && (
+            <button type="button" className="secondary" disabled={onboardingStatus === 'loading' || normalizeRepositoryNameInput(newRepoName || form.name).length === 0} onClick={() => void generateOnboardingDraft()}>
+              <Sparkles size={16} />{onboardingStatus === 'loading' ? 'Generating draft...' : onboardingDraft ? 'Regenerate draft' : 'Generate draft'}
+            </button>
+          )}
           <button className="primary-action" disabled={!canCreate || submitting}><Plus size={16} />Create board</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
@@ -2986,7 +2989,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onCreate, onClos
   );
 }
 
-function NewRepositoryOnboardingPanel({ form, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, status, error, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange, onGenerate }: {
+function NewRepositoryOnboardingPanel({ form, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, error, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange }: {
   form: CreateBoardForm;
   installationId: number | null;
   integrations: GitHubIntegrationDto[];
@@ -2996,7 +2999,6 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
   isPrivate: boolean;
   prompt: string;
   draft: GitHubRepositoryOnboardingDraftDto | null;
-  status: 'idle' | 'loading' | 'loaded' | 'error';
   error: string | null;
   onInstallationChange: (value: number | null) => void;
   onRepoNameChange: (value: string) => void;
@@ -3004,7 +3006,6 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
   onPrivateChange: (value: boolean) => void;
   onPromptChange: (value: string) => void;
   onDraftChange: React.Dispatch<React.SetStateAction<GitHubRepositoryOnboardingDraftDto | null>>;
-  onGenerate: () => void;
 }) {
   const updateFile = (index: number, patch: Partial<GitHubRepositoryOnboardingFileDto>) => {
     onDraftChange((current) => current ? { ...current, files: current.files.map((file, fileIndex) => fileIndex === index ? { ...file, ...patch } : file) } : current);
@@ -3017,12 +3018,9 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
           <h3>New repository onboarding</h3>
           <p>Codex drafts editable guidance files only. App code and deployment manifests start from later cards.</p>
         </div>
-        <button type="button" className="secondary compact" disabled={status === 'loading' || !repoName.trim()} onClick={onGenerate}>
-          <Sparkles size={14} />{status === 'loading' ? 'Generating...' : 'Generate draft'}
-        </button>
       </div>
       <div className="form-grid two">
-        <label>Repository name<input value={repoName} onChange={(event) => onRepoNameChange(slugFromText(event.target.value))} placeholder={slugFromText(form.name) || 'new-repository'} /></label>
+        <label>Repository name<input value={repoName} onChange={(event) => onRepoNameChange(event.target.value)} onBlur={(event) => onRepoNameChange(normalizeRepositoryNameInput(event.target.value))} placeholder={normalizeRepositoryNameInput(form.name) || 'new-repository'} /></label>
         <label>Visibility<select value={isPrivate ? 'private' : 'public'} onChange={(event) => onPrivateChange(event.target.value === 'private')}>
           <option value="private">Private</option>
           <option value="public">Public</option>
@@ -3036,6 +3034,7 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
       </div>
       {!installationId && <p className="failure-reason">No GitHub App installation is available for creating a repository.</p>}
       {installationId && <p className="provider-status">GitHub installation: {integrations.find((integration) => integration.installationId === installationId)?.accountLogin ?? installationId}. New repositories are private by default.</p>}
+      <p className="provider-status">Repository names are normalized to kebab-case, for example <code>date-site</code>.</p>
       {error && <p className="failure-reason">{error}</p>}
       {draft && (
         <div className="settings-list skill-drafts-list">
@@ -4239,6 +4238,16 @@ function uniqueRepositories(repositories: RepositoryDto[]) {
 function slugFromText(value: string) {
   const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').replace(/--+/g, '-');
   return slug || 'new-board';
+}
+
+function normalizeRepositoryNameInput(value: string) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/--+/g, '-');
+  return normalized || 'new-repository';
 }
 
 function boardRepositorySummary(board: Board) {
