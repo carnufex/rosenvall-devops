@@ -979,6 +979,23 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Seeded_sample_board_is_marked_as_demo_not_synced_provider()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+
+        var board = store.GetBoards(workspace.Id).Single(entry => entry.Name == "Demo Sprint 42");
+
+        Assert.Equal("Demo board", board.RepositorySyncState);
+        Assert.Equal("Sample", board.Repository!.Provider);
+        Assert.Null(board.Repository.WebUrl);
+        Assert.Contains("preview", board.ProviderCapabilities!);
+        Assert.Contains("demo", board.ProviderCapabilities!);
+        Assert.DoesNotContain("repository-implementation", board.ProviderCapabilities!);
+    }
+
+    [Fact]
     public void Board_secrets_store_metadata_only_and_runner_references_kubernetes_secret()
     {
         using var fixture = DevOpsStoreFixture.Create();

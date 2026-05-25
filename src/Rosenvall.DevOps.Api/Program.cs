@@ -7959,6 +7959,11 @@ namespace Rosenvall.DevOps.Api
                 return "Preview only";
             }
 
+            if (repository.Provider.Equals("Sample", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Demo board";
+            }
+
             return string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase)
                 ? "GitOps board"
                 : repository.Provider.Equals("GitHub", StringComparison.OrdinalIgnoreCase)
@@ -7972,6 +7977,13 @@ namespace Rosenvall.DevOps.Api
             if (RepositoryIdForBoard(boardId) is null)
             {
                 capabilities.Add("sync-github");
+                return capabilities;
+            }
+
+            var repository = _repositories.SingleOrDefault(entry => entry.Id == RepositoryIdForBoard(boardId));
+            if (repository?.Provider.Equals("Sample", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                capabilities.Add("demo");
                 return capabilities;
             }
 

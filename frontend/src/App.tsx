@@ -1,6 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, timelineLanes, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -47,7 +48,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-type View = 'dashboard' | 'board' | 'timeline' | 'gitops' | 'teams' | 'settings';
+type View = 'dashboard' | 'board' | 'timeline' | 'gitops' | 'configuration' | 'teams' | 'settings';
 
 type LoadShellOptions = {
   silentBusy?: boolean;
@@ -1076,7 +1077,6 @@ function App() {
         activeBoard={shell.status === 'ready' ? shell.board : null}
         onSelectBoard={actions.selectBoard}
         onAddBoard={() => setCreateBoardOpen(true)}
-        onSyncBoard={() => setSyncBoardOpen(true)}
         onChange={setView}
         onNewCard={() => setCreateStatus('Todo')}
       />
@@ -1089,11 +1089,12 @@ function App() {
         {shell.status === 'ready' && board && (
           <>
             {activeView === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
-            {activeView === 'board' && <BoardView board={board} actions={actions} />}
+            {activeView === 'board' && <BoardView board={board} actions={actions} onSyncBoard={() => setSyncBoardOpen(true)} />}
             {activeView === 'timeline' && <TimelineView board={shell.board} timeline={shell.timeline} />}
             {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} onBack={() => setView('board')} />}
+            {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
             {activeView === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
-            {activeView === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onBack={() => setView('board')} />}
+            {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -1342,7 +1343,7 @@ type SyncBoardRepositoryRequest = {
 function useStateFromHash(): [View, (view: View) => void] {
   const readHash = () => {
     const next = (window.location.hash.replace('#', '') as View) || 'board';
-    return ['dashboard', 'board', 'timeline', 'gitops', 'teams', 'settings'].includes(next) ? next : 'board';
+    return ['dashboard', 'board', 'timeline', 'gitops', 'configuration', 'teams', 'settings'].includes(next) ? next : 'board';
   };
   const [view, setViewState] = React.useState<View>(readHash);
   React.useEffect(() => {
@@ -1357,7 +1358,7 @@ function useStateFromHash(): [View, (view: View) => void] {
   return [view, setView];
 }
 
-function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSelectBoard, onAddBoard, onSyncBoard, onChange, onNewCard }: {
+function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSelectBoard, onAddBoard, onChange, onNewCard }: {
   view: View;
   showGitOps: boolean;
   boards: Board[];
@@ -1365,11 +1366,9 @@ function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSel
   activeBoard: Board | null;
   onSelectBoard: (id: string) => void;
   onAddBoard: () => void;
-  onSyncBoard: () => void;
   onChange: (view: View) => void;
   onNewCard: () => void;
 }) {
-  const canSync = activeBoard && !activeBoard.repository;
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -1382,18 +1381,17 @@ function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSel
       {boards.length > 0 && (
         <div className="sidebar-board-picker">
           <BoardSelector boards={boards} selectedBoardId={selectedBoardId ?? activeBoard?.id ?? ''} onSelect={onSelectBoard} onAdd={onAddBoard} />
-          <span className={activeBoard?.repositorySyncState === 'GitOps board' ? 'state-good' : activeBoard?.repository ? 'state-muted' : 'state-warn'}>
-            {activeBoard?.repositorySyncState ?? (activeBoard?.repository ? 'Synced to provider' : 'Preview only')}
-          </span>
-          {canSync && <button className="secondary compact inline" onClick={onSyncBoard} type="button"><Github size={14} />Sync to provider</button>}
         </div>
       )}
       <button className="primary-action" onClick={onNewCard}><Plus size={16} />New card</button>
-      <nav className="side-nav">
+      <nav className="side-nav board-nav" aria-label="Board navigation">
         <NavButton active={view === 'board'} icon={<PanelLeft size={20} />} label="Board" onClick={() => onChange('board')} />
         <NavButton active={view === 'timeline'} icon={<History size={20} />} label="Timeline" onClick={() => onChange('timeline')} />
-        <NavButton active={view === 'dashboard'} icon={<LayoutDashboard size={20} />} label="Dashboard" onClick={() => onChange('dashboard')} />
         {showGitOps && <NavButton active={view === 'gitops'} icon={<Boxes size={20} />} label="GitOps" onClick={() => onChange('gitops')} />}
+        <NavButton active={view === 'configuration'} icon={<Settings size={20} />} label="Configuration" onClick={() => onChange('configuration')} />
+      </nav>
+      <nav className="side-nav global-nav" aria-label="Global navigation">
+        <NavButton active={view === 'dashboard'} icon={<LayoutDashboard size={20} />} label="Dashboard" onClick={() => onChange('dashboard')} />
         <NavButton active={view === 'teams'} icon={<Users size={20} />} label="Teams" onClick={() => onChange('teams')} />
         <NavButton active={view === 'settings'} icon={<Settings size={20} />} label="Settings" onClick={() => onChange('settings')} />
       </nav>
@@ -1526,7 +1524,37 @@ function Metric({ label, value, note, icon, accent }: { label: string; value: st
   );
 }
 
-function BoardView({ board, actions }: { board: Board; actions: BoardActions }) {
+function BoardHeader({ board, subtitle, onSyncBoard, children }: {
+  board: Board;
+  subtitle: string;
+  onSyncBoard?: () => void;
+  children?: React.ReactNode;
+}) {
+  const repositoryUrl = boardRepositoryUrl(board);
+  const syncable = onSyncBoard && canSyncBoardToProvider(board);
+  const profile = board.repository?.implementationProfile;
+  return (
+    <div className="page-heading board-header compact-heading">
+      <div className="board-heading-copy">
+        <div className="board-title-line">
+          <h1>{board.name}</h1>
+          <span className={board.repositorySyncState === 'GitOps board' ? 'state-good' : board.repositorySyncState === 'Demo board' ? 'state-muted' : board.repository ? 'state-muted' : 'state-warn'}>
+            {boardSyncLabel(board)}
+          </span>
+          {profile && profile !== 'code-repo' && <span className="state-muted">{profileLabel(profile)}</span>}
+        </div>
+        <p>{subtitle}</p>
+      </div>
+      <div className="board-header-actions">
+        {repositoryUrl && <a className="secondary" href={repositoryUrl} target="_blank" rel="noreferrer"><ExternalLink size={16} />Go to repository</a>}
+        {syncable && <button className="secondary" onClick={onSyncBoard} type="button"><Github size={16} />Sync to provider</button>}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function BoardView({ board, actions, onSyncBoard }: { board: Board; actions: BoardActions; onSyncBoard: () => void }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const itemIds = board.columns.flatMap((column) => column.items.map((item) => item.id));
   const [activeCard, setActiveCard] = React.useState<WorkItemSummary | null>(null);
@@ -1547,13 +1575,9 @@ function BoardView({ board, actions }: { board: Board; actions: BoardActions }) 
 
   return (
     <section className="page board-page">
-      <div className="page-heading compact-heading">
-        <div>
-          <h1>{board.name}</h1>
-          <p>{boardRepositorySummary(board)} - {board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
-        </div>
+      <BoardHeader board={board} onSyncBoard={onSyncBoard} subtitle={`${boardRepositorySummary(board)} - ${board.columns.reduce((total, column) => total + column.items.length, 0)} active items`}>
         <button className="primary-action" onClick={() => actions.openCreateCard(board.columns[0]?.name ?? 'Todo')}><Plus size={16} />New card</button>
-      </div>
+      </BoardHeader>
       <DndContext sensors={sensors} collisionDetection={stableCollisionDetection} onDragStart={handleDragStart} onDragCancel={() => setActiveCard(null)} onDragEnd={handleDragEnd}>
         <div className="board">
           {board.columns.map((column) => (
@@ -1593,25 +1617,32 @@ function TimelineView({ board, timeline }: {
   timeline: TimelineEventDto[];
 }) {
   const [filter, setFilter] = React.useState('All');
+  const [selectedEventId, setSelectedEventId] = React.useState<string | null>(null);
+  const eventRefs = React.useRef<Record<string, HTMLElement | null>>({});
   const filters = ['All', 'Cards', 'Git', 'Pipelines', 'Previews'];
   const filtered = timeline.filter((entry) => filter === 'All' || timelineBucket(entry.kind) === filter);
+  const selectEvent = (eventId: string) => {
+    setSelectedEventId(eventId);
+    requestAnimationFrame(() => eventRefs.current[eventId]?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+  };
   return (
     <section className="page timeline-page">
-      <div className="page-heading compact-heading">
-        <div>
-          <h1>Timeline</h1>
-          <p>{boardRepositorySummary(board)} - {filtered.length} events</p>
-        </div>
+      <BoardHeader board={board} subtitle={`${boardRepositorySummary(board)} - ${filtered.length} events`}>
         <div className="timeline-filters">
           {filters.map((entry) => (
             <button className={filter === entry ? 'secondary active-filter' : 'secondary'} onClick={() => setFilter(entry)} key={entry}>{entry}</button>
           ))}
         </div>
-      </div>
+      </BoardHeader>
+      <TimelineFlowGraph events={filtered} selectedEventId={selectedEventId} onSelect={selectEvent} />
       <section className="panel timeline-panel">
         {filtered.length === 0 && <EmptyState>No timeline events for this board.</EmptyState>}
         {filtered.map((entry) => (
-          <article className={`timeline-row ${timelineClass(entry.kind)}`} key={entry.id}>
+          <article
+            className={`timeline-row ${timelineClass(entry.kind)} ${selectedEventId === entry.id ? 'selected' : ''}`}
+            key={entry.id}
+            ref={(node) => { eventRefs.current[entry.id] = node; }}
+          >
             <div className="timeline-marker" aria-hidden="true">{timelineIcon(entry.kind)}</div>
             <div>
               <div className="timeline-row-head"><strong>{entry.title}</strong><span className={statusClass(entry.kind)}>{entry.kind}</span></div>
@@ -1626,6 +1657,46 @@ function TimelineView({ board, timeline }: {
   );
 }
 
+function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
+  events: TimelineEventDto[];
+  selectedEventId: string | null;
+  onSelect: (eventId: string) => void;
+}) {
+  const rows = buildTimelineFlow(events);
+  return (
+    <section className="panel timeline-flow-panel" aria-label="Timeline flow graph">
+      <div className="timeline-flow-head">
+        <div />
+        {timelineLanes.map((lane) => <span key={lane}>{lane}</span>)}
+      </div>
+      {rows.length === 0 && <EmptyState>No flow events for this filter.</EmptyState>}
+      {rows.map((row) => (
+        <div className="timeline-flow-row" key={row.id}>
+          <div className="timeline-flow-title" title={row.title}>{row.title}</div>
+          <div className="timeline-flow-track">
+            {timelineLanes.map((lane) => (
+              <div className="timeline-flow-cell" key={lane}>
+                {row.nodes.filter((node) => node.lane === lane).map((node) => (
+                  <button
+                    className={`timeline-flow-node ${timelineFlowClass(node.lane, node.kind)} ${selectedEventId === node.id ? 'selected' : ''}`}
+                    key={node.id}
+                    onClick={() => onSelect(node.id)}
+                    type="button"
+                    title={`${node.kind}: ${node.title}`}
+                    aria-label={`${node.kind}: ${node.title}`}
+                  >
+                    {timelineFlowIcon(node.lane, node.kind)}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function GitOpsView({ board, gitOpsApplications, onBack }: {
   board: Board;
   gitOpsApplications: GitOpsApplicationsResponseDto;
@@ -1633,13 +1704,9 @@ function GitOpsView({ board, gitOpsApplications, onBack }: {
 }) {
   return (
     <section className="page gitops-page">
-      <div className="page-heading compact-heading">
-        <div>
-          <h1>GitOps</h1>
-          <p>{boardRepositorySummary(board)} - ArgoCD application status</p>
-        </div>
+      <BoardHeader board={board} subtitle={`${boardRepositorySummary(board)} - ArgoCD application status`}>
         <button className="secondary" onClick={onBack}>Back to board</button>
-      </div>
+      </BoardHeader>
       <div className="gitops-content">
         <SectionTitle icon={<Boxes size={22} />} title="Applications" />
         <section className="panel form-panel">
@@ -2979,7 +3046,8 @@ function TeamsView({ teams, boards, me, actions }: {
   );
 }
 
-function SettingsView({ settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onBack }: {
+function SettingsView({ scope, settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
+  scope: 'global' | 'board';
   settings: SettingsDto;
   board: Board;
   me: UserDto;
@@ -2993,6 +3061,7 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onReasoningChange: (reasoning: string) => void;
+  onSyncBoard: () => void;
   onBack: () => void;
 }) {
   const activeProvider = resolveActiveAiProvider(settings, selectedProvider);
@@ -3021,14 +3090,23 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
 
   return (
     <section className="page settings-page">
-      <div className="page-heading">
-        <div>
-          <h1>Settings</h1>
-          <p>Integration, AI and board-level runtime configuration.</p>
-        </div>
-        <button className="secondary" onClick={onBack}>Back to board</button>
-      </div>
+      {scope === 'board'
+        ? (
+          <BoardHeader board={board} onSyncBoard={onSyncBoard} subtitle="Board-specific repository, GitOps, skills and secrets.">
+            <button className="secondary" onClick={onBack}>Back to board</button>
+          </BoardHeader>
+        )
+        : (
+          <div className="page-heading">
+            <div>
+              <h1>Settings</h1>
+              <p>Global integrations, AI providers and system settings.</p>
+            </div>
+            <button className="secondary" onClick={onBack}>Back to board</button>
+          </div>
+        )}
       <div className="settings-content">
+        {scope === 'global' && <>
         <SectionTitle icon={<Github size={22} />} title="GitHub integration" />
         <section className="panel form-panel">
           <div className="connected"><Github size={28} /><div><strong>Connected account</strong><p>{gitHubAccount}</p></div><span>{gitHubConnected ? 'Active' : 'Disconnected'}</span></div>
@@ -3073,15 +3151,21 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
           <p className={activeProvider.status === 'Ready' ? 'provider-status ready' : 'provider-status'}>{activeProvider.displayName} status: {activeProvider.status === 'LoginRequired' ? 'Login required on server' : activeProvider.status}.</p>
           <label>Auto review pull requests<input value={settings.ai.autoReviewPullRequests ? 'Enabled' : 'Disabled'} readOnly /></label>
         </section>
+        </>}
+        {scope === 'board' && <>
         <SectionTitle icon={<Boxes size={22} />} title="GitOps" />
         <section className="panel form-panel">
           <GitOpsSettingsForm board={board} actions={actions} />
         </section>
+        </>}
+        {scope === 'global' && <>
         <SectionTitle icon={<Users size={22} />} title="Current user" />
         <section className="panel form-panel">
           <div className="connected"><Users size={28} /><div><strong>{me.displayName}</strong><p>{me.email || me.subject}</p></div><span>Signed in</span></div>
           <p className="provider-status">Team membership and board assignment now live in the Teams view.</p>
         </section>
+        </>}
+        {scope === 'board' && <>
         <SectionTitle icon={<Save size={22} />} title="Board secrets" />
         <section className="panel form-panel">
           <div className="settings-inline">
@@ -3128,6 +3212,8 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
               ))}
           </div>
         </section>
+        </>}
+        {scope === 'global' && <>
         <SectionTitle icon={<ExternalLink size={22} />} title="Preview environments" />
         <section className="panel form-panel">
           <label>Domain<input value={settings.preview.domain} readOnly /></label>
@@ -3144,6 +3230,7 @@ function SettingsView({ settings, board, me, repositories, boardSecrets, githubI
           <div className="connected"><Users size={28} /><div><strong>{settings.authentik.enabled ? 'Enabled' : 'Disabled'}</strong><p>{settings.authentik.authority}</p></div><span>{settings.authentik.enabled ? 'Active' : 'Local'}</span></div>
           <label>Users endpoint<input value={settings.authentik.usersEndpoint} readOnly /></label>
         </section>
+        </>}
       </div>
     </section>
   );
@@ -3607,14 +3694,14 @@ function timelineBucket(kind: string) {
   const normalized = kind.toLowerCase();
   if (normalized.includes('preview')) return 'Previews';
   if (normalized.includes('pipeline')) return 'Pipelines';
-  if (normalized.includes('cleanup') || normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return 'Git';
+  if (normalized.includes('cleanup') || normalized.includes('pullrequest') || normalized.includes('implementation') || normalized.includes('commit') || normalized.includes('branch')) return 'Git';
   return 'Cards';
 }
 
 function timelineClass(kind: string) {
   const normalized = kind.toLowerCase();
   if (normalized.includes('cleanup')) return 'timeline-cleanup';
-  if (normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return 'timeline-git';
+  if (normalized.includes('pullrequest') || normalized.includes('implementation') || normalized.includes('commit') || normalized.includes('branch')) return 'timeline-git';
   if (normalized.includes('preview')) return 'timeline-preview';
   if (normalized.includes('pipeline')) return 'timeline-pipeline';
   return 'timeline-card';
@@ -3623,10 +3710,26 @@ function timelineClass(kind: string) {
 function timelineIcon(kind: string) {
   const normalized = kind.toLowerCase();
   if (normalized.includes('cleanup')) return <Trash2 size={15} />;
-  if (normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return <GitPullRequest size={15} />;
+  if (normalized.includes('pullrequest') || normalized.includes('implementation') || normalized.includes('commit') || normalized.includes('branch')) return <GitPullRequest size={15} />;
   if (normalized.includes('preview')) return <ExternalLink size={15} />;
   if (normalized.includes('pipeline')) return <Activity size={15} />;
   return <PanelLeft size={15} />;
+}
+
+function timelineFlowClass(lane: TimelineLane, kind: string) {
+  const status = statusClass(kind).replace('state-', '');
+  return `lane-${lane.toLowerCase().replaceAll(' ', '-')} flow-${status}`;
+}
+
+function timelineFlowIcon(lane: TimelineLane, kind: string) {
+  if (statusClass(kind) === 'state-bad') return <X size={14} />;
+  switch (lane) {
+    case 'Implementation PR': return <GitPullRequest size={14} />;
+    case 'Cleanup': return <Trash2 size={14} />;
+    case 'Preview': return <ExternalLink size={14} />;
+    case 'Pipeline': return <Activity size={14} />;
+    default: return <PanelLeft size={14} />;
+  }
 }
 
 function moveCardInBoard(board: Board, id: string, status: string, sortOrder: number): Board {
