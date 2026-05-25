@@ -95,10 +95,13 @@ if (!string.IsNullOrWhiteSpace(authority))
 }
 
 app.MapHealthChecks("/healthz");
-var hub = app.MapHub<DevOpsHub>("/hubs/devops");
-if (!string.IsNullOrWhiteSpace(authority))
+if (builder.Configuration.GetValue("Realtime:Enabled", false))
 {
-    hub.RequireAuthorization();
+    var hub = app.MapHub<DevOpsHub>("/hubs/devops");
+    if (!string.IsNullOrWhiteSpace(authority))
+    {
+        hub.RequireAuthorization();
+    }
 }
 
 var githubManifestStates = new ConcurrentDictionary<string, DateTimeOffset>(StringComparer.Ordinal);
