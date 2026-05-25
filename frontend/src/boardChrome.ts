@@ -17,6 +17,7 @@ export type TimelineChromeEvent = {
   workItemId?: string | null;
   kind: string;
   title: string;
+  message?: string | null;
   createdAt: string;
 };
 
@@ -28,7 +29,8 @@ export type TimelineFlowNode = TimelineChromeEvent & {
 
 export type TimelineFlowRow = {
   id: string;
-  title: string;
+  topic: string;
+  taskKey?: string | null;
   nodes: TimelineFlowNode[];
 };
 
@@ -66,9 +68,13 @@ export function buildTimelineFlow(events: TimelineChromeEvent[]): TimelineFlowRo
     const rowId = event.workItemId || `event:${event.id}`;
     const row = rows.get(rowId) ?? {
       id: rowId,
-      title: event.workItemId ? event.title.replace(/^TASK-\d+\s*/i, '') || event.title : 'Board events',
+      topic: event.workItemId ? topicFromTimelineEvent(event) : event.title || 'Board events',
+      taskKey: taskKeyFromTimelineEvent(event),
       nodes: []
     };
+    if (row.topic === row.taskKey) {
+      row.topic = topicFromTimelineEvent(event);
+    }
     row.nodes.push({ ...event, lane: timelineLaneForKind(event.kind) });
     rows.set(rowId, row);
   }
@@ -78,4 +84,34 @@ export function buildTimelineFlow(events: TimelineChromeEvent[]): TimelineFlowRo
     const rightTime = Date.parse(right.nodes[0]?.createdAt ?? '');
     return (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0);
   });
+}
+
+function taskKeyFromTimelineEvent(event: TimelineChromeEvent): string | null {
+  return /\bTASK-\d+\b/i.exec(`${event.title} ${event.message ?? ''}`)?.[0].toUpperCase() ?? null;
+}
+
+function topicFromTimelineEvent(event: TimelineChromeEvent): string {
+  const taskKey = taskKeyFromTimelineEvent(event);
+  const titleWithoutKey = taskKey ? event.title.replace(new RegExp(`\\b${taskKey}\\b`, 'i'), '').trim() : event.title.trim();
+  if (titleWithoutKey) return titleWithoutKey;
+
+  const message = (event.message ?? '').trim();
+  const patterns = [
+    /^Created\s+(.+?)\.?$/i,
+    /^Deleted\s+(.+?)\.?$/i,
+    /^Closed\s+(.+?)\.?$/i,
+    /^Moved\s+(.+?)\s+to\s+.+?\.?$/i,
+    /^AI plan ready for\s+(.+?)\.?$/i,
+    /^Pull request ready for\s+(.+?)\.?$/i
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(message);
+    if (match?.[1]) return trimTopic(match[1]);
+  }
+
+  return taskKey ?? (event.title || 'Board events');
+}
+
+function trimTopic(value: string): string {
+  return value.replace(/\.$/, '').trim();
 }

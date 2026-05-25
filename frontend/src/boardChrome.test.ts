@@ -51,3 +51,13 @@ test('timeline flow groups work item events in chronological lane order', () => 
   assert.deepEqual(rows[0].nodes.map((node) => node.lane), ['Card', 'Cleanup']);
   assert.equal(rows[1].nodes[0].lane, 'Preview');
 });
+
+test('timeline flow row separates topic from task key when title only contains the task key', () => {
+  const rows = buildTimelineFlow([
+    { id: '1', workItemId: 'task-4824', kind: 'CardCreated', title: 'TASK-4824', message: 'Created test project.', createdAt: '2026-05-25T10:00:00Z' },
+    { id: '2', workItemId: 'task-4824', kind: 'ImplementationFailed', title: 'TASK-4824', message: 'Repository implementation job failed.', createdAt: '2026-05-25T10:01:00Z' }
+  ]);
+
+  assert.equal(rows[0].topic, 'test project');
+  assert.equal(rows[0].taskKey, 'TASK-4824');
+});

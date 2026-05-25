@@ -1672,7 +1672,10 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
       {rows.length === 0 && <EmptyState>No flow events for this filter.</EmptyState>}
       {rows.map((row) => (
         <div className="timeline-flow-row" key={row.id}>
-          <div className="timeline-flow-title" title={row.title}>{row.title}</div>
+          <div className="timeline-flow-title" title={row.taskKey ? `${row.topic} ${row.taskKey}` : row.topic}>
+            <strong>{row.topic}</strong>
+            {row.taskKey && <span>{row.taskKey}</span>}
+          </div>
           <div className="timeline-flow-track">
             {timelineLanes.map((lane) => (
               <div className="timeline-flow-cell" key={lane}>

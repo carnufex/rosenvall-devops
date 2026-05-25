@@ -374,11 +374,13 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .timeline-flow-panel { padding: 14px; margin-bottom: 16px; overflow-x: auto; }
 .timeline-flow-head, .timeline-flow-row { min-width: 840px; display: grid; grid-template-columns: 180px repeat(5, minmax(112px, 1fr)); gap: 8px; align-items: center; }
 .timeline-flow-head { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; padding: 0 4px 10px; }
-.timeline-flow-row { position: relative; min-height: 54px; border-top: 1px solid rgba(48, 50, 54, 0.72); }
-.timeline-flow-row::before { content: ""; position: absolute; left: 188px; right: 4px; top: 27px; height: 1px; background: var(--line); }
-.timeline-flow-title { color: var(--muted-strong); font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 10px; z-index: 1; }
+.timeline-flow-row { position: relative; min-height: 62px; border-top: 1px solid rgba(48, 50, 54, 0.72); }
+.timeline-flow-row::before { content: ""; position: absolute; left: 188px; right: 4px; top: 31px; height: 1px; background: var(--line); }
+.timeline-flow-title { color: var(--muted-strong); overflow: hidden; padding-right: 10px; z-index: 1; display: grid; gap: 2px; }
+.timeline-flow-title strong { font-size: 14px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-flow-title span { color: var(--muted); font-size: 11px; line-height: 14px; font-weight: 800; letter-spacing: 0; }
 .timeline-flow-track { display: contents; }
-.timeline-flow-cell { min-height: 52px; display: flex; align-items: center; gap: 6px; z-index: 1; }
+.timeline-flow-cell { min-height: 60px; display: flex; align-items: center; gap: 6px; z-index: 1; }
 .timeline-flow-node { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface-high); color: var(--muted-strong); display: grid; place-items: center; padding: 0; box-shadow: 0 0 0 3px var(--surface); }
 .timeline-flow-node:hover, .timeline-flow-node.selected { border-color: var(--focus); color: var(--focus); background: #0f1d1f; }
 .timeline-flow-node.flow-good { border-color: rgba(45, 212, 191, 0.5); color: var(--secondary); }
