@@ -1477,7 +1477,7 @@ function DashboardView({ workspace, board, previews, events, pipelines, metrics,
           {previews.map((preview) => (
             <div className="preview-row" key={preview.id}>
               <div className="row-title"><code>{preview.workItemKey}</code><span className={statusClass(preview.status)}>{preview.status}</span></div>
-              <a href={preview.url} target="_blank" rel="noreferrer">{preview.url}</a>
+              <SafeExternalLink href={preview.url}>{preview.url}</SafeExternalLink>
               <p>{preview.namespace}</p>
               {preview.workItemId && (
                 <div className="row-actions">
@@ -1548,7 +1548,7 @@ function BoardHeader({ board, subtitle, onSyncBoard, children }: {
         <p>{subtitle}</p>
       </div>
       <div className="board-header-actions">
-        {repositoryUrl && <a className="secondary" href={repositoryUrl} target="_blank" rel="noreferrer"><ExternalLink size={16} />Go to repository</a>}
+        {repositoryUrl && <SafeExternalLink className="secondary" href={repositoryUrl}><ExternalLink size={16} />Go to repository</SafeExternalLink>}
         {syncable && <button className="secondary" onClick={onSyncBoard} type="button"><Github size={16} />Sync to provider</button>}
         {children}
       </div>
@@ -1649,7 +1649,7 @@ function TimelineView({ board, timeline }: {
             <div>
               <div className="timeline-row-head"><strong>{entry.title}</strong><span className={statusClass(entry.kind)}>{entry.kind}</span></div>
               <p>{entry.message}</p>
-              {entry.url && <a href={entry.url} target="_blank" rel="noreferrer">{entry.url}</a>}
+              {entry.url && <SafeExternalLink href={entry.url}>{entry.url}</SafeExternalLink>}
             </div>
             <time>{relativeTime(entry.createdAt)}</time>
           </article>
@@ -1973,7 +1973,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
             <section className="panel compact-panel">
               <PanelHeader icon={<Github size={20} />} title="Development" />
               <p className="repo">{detail.development.repository}<br />{detail.development.branch}</p>
-              {detail.development.pullRequestUrl && <a className="url-box" href={detail.development.pullRequestUrl} target="_blank" rel="noreferrer">Pull request <ExternalLink size={16} /></a>}
+              {detail.development.pullRequestUrl && <SafeExternalLink className="url-box" href={detail.development.pullRequestUrl}>Pull request <ExternalLink size={16} /></SafeExternalLink>}
               <p className="status-line"><span />{developmentStatusText(detail.development)}</p>
               {detail.development.pullRequestUrl && !detail.development.pullRequestApprovedAt && (
                 <button className="primary-action side-action" disabled={busy} onClick={() => void actions.approvePullRequest(detail.item.id)}><CheckCircle2 size={16} />Approve PR</button>
@@ -2198,7 +2198,7 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
       </ol>
       <p className="namespace-note">Branch: <code>{run.branch}</code></p>
       {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
-      {ready && run.pullRequestUrl && <a className="url-box" href={run.pullRequestUrl} target="_blank" rel="noreferrer">Open pull request <ExternalLink size={16} /></a>}
+      {ready && run.pullRequestUrl && <SafeExternalLink className="url-box" href={run.pullRequestUrl}>Open pull request <ExternalLink size={16} /></SafeExternalLink>}
       {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
       <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
       <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
@@ -2224,9 +2224,9 @@ function RepositoryCleanupRunPanel({ run, workItemId, busy = false, onAdopt, pro
         ))}
       </ol>
       <p className="namespace-note">Branch: <code>{run.branch}</code></p>
-      <p className="namespace-note">Source PR: <a href={run.sourcePullRequestUrl} target="_blank" rel="noreferrer">open source PR</a></p>
+      <p className="namespace-note">Source PR: <SafeExternalLink href={run.sourcePullRequestUrl}>open source PR</SafeExternalLink></p>
       {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
-      {ready && run.cleanupPullRequestUrl && <a className="url-box" href={run.cleanupPullRequestUrl} target="_blank" rel="noreferrer">Open cleanup pull request <ExternalLink size={16} /></a>}
+      {ready && run.cleanupPullRequestUrl && <SafeExternalLink className="url-box" href={run.cleanupPullRequestUrl}>Open cleanup pull request <ExternalLink size={16} /></SafeExternalLink>}
       {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
       {(run.jobName || run.podName || run.lastCondition || run.lastEventSummary) && (
         <div className="cleanup-diagnostics">
@@ -2279,7 +2279,7 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       <PanelHeader icon={<ExternalLink size={20} />} title="Preview environment" />
       {implementing && <div className="implementation-banner"><Sparkles size={16} /><span>Implementing plan...</span></div>}
       {running
-        ? <a className="demo-link" href={preview.url} target="_blank" rel="noreferrer">Open demo environment <ExternalLink size={16} /></a>
+        ? <SafeExternalLink className="demo-link" href={preview.url}>Open demo environment <ExternalLink size={16} /></SafeExternalLink>
         : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
       <ol className="preview-stepper" aria-label="Preview lifecycle">
         {steps.map((step, index) => (
@@ -3520,7 +3520,7 @@ function GitOpsApplicationsPanel({ response }: { response: GitOpsApplicationsRes
           <div className="status-badges">
             <span className={statusBadgeClass(app.syncStatus)}>{app.syncStatus}</span>
             <span className={statusBadgeClass(app.healthStatus)}>{app.healthStatus}</span>
-            {app.url && <a href={app.url} target="_blank" rel="noreferrer" aria-label={`Open ${app.name} in ArgoCD`}><ExternalLink size={16} /></a>}
+            {app.url && <SafeExternalLink href={app.url} ariaLabel={`Open ${app.name} in ArgoCD`}><ExternalLink size={16} /></SafeExternalLink>}
           </div>
         </div>
       ))}
@@ -3644,6 +3644,12 @@ function PlanReferenceButton({ plan, prefix, onSelectPlan }: { plan: AiRun; pref
       {prefix} plan #{plan.sequenceNumber}: {planTitle(plan)}
     </button>
   );
+}
+
+function SafeExternalLink({ href, className, ariaLabel, children }: { href: string | null | undefined; className?: string; ariaLabel?: string; children: React.ReactNode }) {
+  const safeHref = href ? safeMarkdownHref(href) : null;
+  if (!safeHref) return null;
+  return <a className={className} href={safeHref} target="_blank" rel="noreferrer" aria-label={ariaLabel}>{children}</a>;
 }
 
 function CommentBody({ body }: { body: string }) {
