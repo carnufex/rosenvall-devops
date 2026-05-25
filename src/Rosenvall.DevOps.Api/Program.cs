@@ -1008,7 +1008,7 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, string actor,
     }
 });
 
-api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1024,7 +1024,19 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     string plan;
     try
     {
-        plan = await planner.GeneratePlanAsync(request.Provider, request.Model, request.ReasoningEffort, context, cancellationToken);
+        var validated = AiModelPolicy.ValidatePlanningRequest(request, store.GetSettings(configuration, AuthenticatedSubjectOrNull(user)));
+        if (validated is null)
+        {
+            return Results.Problem("Requested AI provider or model is not configured for planning.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        plan = await planner.GeneratePlanAsync(validated.Provider, validated.Model, validated.ReasoningEffort, context, cancellationToken);
+        request = request with
+        {
+            Provider = validated.Provider,
+            Model = validated.Model,
+            ReasoningEffort = validated.ReasoningEffort
+        };
     }
     catch (AiPlanProviderUnavailableException ex)
     {
@@ -4185,6 +4197,41 @@ namespace Rosenvall.DevOps.Api
             }
 
             return planner.GeneratePlanAsync(model, reasoningEffort, context, cancellationToken);
+        }
+    }
+
+    public static class AiModelPolicy
+    {
+        public static StartAiPlanRequest? ValidatePlanningRequest(StartAiPlanRequest request, SettingsDto settings)
+        {
+            var provider = settings.Ai.AvailableProviders.FirstOrDefault(entry =>
+                entry.Provider.Equals(request.Provider, StringComparison.OrdinalIgnoreCase) &&
+                !entry.Status.Equals("Unavailable", StringComparison.OrdinalIgnoreCase));
+            if (provider is null)
+            {
+                return null;
+            }
+
+            var model = provider.AvailableModels.FirstOrDefault(entry => entry.Equals(request.Model, StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                return null;
+            }
+
+            var reasoningEffort = CodexCliArguments.NormalizeReasoningEffort(request.ReasoningEffort);
+            if (!string.IsNullOrWhiteSpace(request.ReasoningEffort) && string.IsNullOrWhiteSpace(reasoningEffort))
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(reasoningEffort) &&
+                provider.AvailableReasoningEfforts is { Count: > 0 } efforts &&
+                !efforts.Contains(reasoningEffort, StringComparer.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return new StartAiPlanRequest(provider.Provider, model, reasoningEffort);
         }
     }
 

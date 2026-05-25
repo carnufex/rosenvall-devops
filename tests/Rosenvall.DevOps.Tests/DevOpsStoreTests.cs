@@ -2727,6 +2727,32 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Ai_model_policy_rejects_unconfigured_provider_model_and_reasoning_effort()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var settings = fixture.Store.GetSettings(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:DefaultModel"] = "qwen3.5:latest",
+                ["Ai:Codex:Model"] = "gpt-5.5"
+            })
+            .Build());
+
+        var valid = AiModelPolicy.ValidatePlanningRequest(new StartAiPlanRequest("codex", "gpt-5.5", "high"), settings);
+        var badProvider = AiModelPolicy.ValidatePlanningRequest(new StartAiPlanRequest("unknown", "gpt-5.5", "high"), settings);
+        var badModel = AiModelPolicy.ValidatePlanningRequest(new StartAiPlanRequest("codex", "gpt-unknown", "high"), settings);
+        var badReasoning = AiModelPolicy.ValidatePlanningRequest(new StartAiPlanRequest("codex", "gpt-5.5", "max"), settings);
+
+        Assert.NotNull(valid);
+        Assert.Equal("codex", valid.Provider);
+        Assert.Equal("gpt-5.5", valid.Model);
+        Assert.Equal("high", valid.ReasoningEffort);
+        Assert.Null(badProvider);
+        Assert.Null(badModel);
+        Assert.Null(badReasoning);
+    }
+
+    [Fact]
     public void Pull_request_can_be_approved_by_human()
     {
         using var fixture = DevOpsStoreFixture.Create();
