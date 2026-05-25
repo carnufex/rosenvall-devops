@@ -379,6 +379,8 @@ public sealed class DevOpsStoreTests
         Assert.False(store.CanRecordPipelineRun(validRequest, guest.Subject));
         Assert.True(store.CanMutatePipelineRun(run.Id, owner.Subject));
         Assert.False(store.CanMutatePipelineRun(run.Id, guest.Subject));
+        Assert.Equal(1, store.GetMetrics(boardA.Id, owner.Subject).PipelineRuns);
+        Assert.Equal(0, store.GetMetrics(boardA.Id, guest.Subject).PipelineRuns);
     }
 
     [Fact]

@@ -1177,8 +1177,24 @@ api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId
 api.MapGet("/preview-environments", (ClaimsPrincipal user, DevOpsStore store) => store.GetPreviewEnvironments(AuthenticatedSubjectOrNull(user)));
 api.MapGet("/preview-events", (ClaimsPrincipal user, DevOpsStore store) => store.GetPreviewEvents(AuthenticatedSubjectOrNull(user)));
 api.MapGet("/pipelines", (ClaimsPrincipal user, DevOpsStore store) => store.GetPipelineStatuses(AuthenticatedSubjectOrNull(user)));
-api.MapGet("/metrics", (Guid? boardId, DevOpsStore store) => store.GetMetrics(boardId));
-api.MapGet("/assignees", (Guid? boardId, DevOpsStore store, IConfiguration configuration) => store.GetAssignees(boardId, configuration));
+api.MapGet("/metrics", (Guid? boardId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (boardId is { } id && !CanViewBoardRequest(store, id, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return Results.Ok(store.GetMetrics(boardId, AuthenticatedSubjectOrNull(user)));
+});
+api.MapGet("/assignees", (Guid? boardId, ClaimsPrincipal user, DevOpsStore store, IConfiguration configuration) =>
+{
+    if (boardId is { } id && !CanViewBoardRequest(store, id, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    return Results.Ok(store.GetAssignees(boardId, configuration, AuthenticatedSubjectOrNull(user)));
+});
 
 api.MapPost("/pipeline-runs", (RecordPipelineRunRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -7690,26 +7706,41 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public MetricsDto GetMetrics(Guid? boardId = null)
+        public MetricsDto GetMetrics(Guid? boardId = null, string? actorSubject = null)
         {
             lock (_lock)
             {
-                var runs = _pipelineRuns
-                    .Where(run => boardId is null || run.BoardId == boardId)
-                    .ToArray();
+                var runs = _pipelineRuns.AsEnumerable();
+                if (boardId is not null)
+                {
+                    runs = runs.Where(run => run.BoardId == boardId);
+                }
+
+                if (!string.IsNullOrWhiteSpace(actorSubject))
+                {
+                    var visibleBoardIds = VisibleBoardIdsWithoutLock(actorSubject);
+                    var visibleRepositoryIds = VisibleRepositoryIdsWithoutLock(actorSubject);
+                    runs = runs.Where(run =>
+                        (run.BoardId is { } runBoardId && visibleBoardIds.Contains(runBoardId)) ||
+                        (run.WorkItemId is { } workItemId && _items.Any(item => item.Id == workItemId && visibleBoardIds.Contains(item.BoardId))) ||
+                        (run.BoardId is null && visibleRepositoryIds.Contains(run.RepositoryId)));
+                }
+
+                var scopedRuns = runs.ToArray();
                 return new MetricsDto(
                     boardId,
-                    runs.Sum(run => run.TokensUsed),
-                    runs.Sum(run => run.CodeAdded),
-                    runs.Sum(run => run.CodeDeleted),
-                    runs.Length);
+                    scopedRuns.Sum(run => run.TokensUsed),
+                    scopedRuns.Sum(run => run.CodeAdded),
+                    scopedRuns.Sum(run => run.CodeDeleted),
+                    scopedRuns.Length);
             }
         }
 
-        public IReadOnlyList<AssigneeDto> GetAssignees(Guid? boardId, IConfiguration configuration)
+        public IReadOnlyList<AssigneeDto> GetAssignees(Guid? boardId, IConfiguration configuration, string? actorSubject = null)
         {
             lock (_lock)
             {
+                var visibleBoardIds = string.IsNullOrWhiteSpace(actorSubject) ? null : VisibleBoardIdsWithoutLock(actorSubject);
                 var assignees = new Dictionary<string, AssigneeDto>(StringComparer.OrdinalIgnoreCase);
                 foreach (var configured in configuration.GetSection("Authentik:Users").Get<ConfiguredAuthentikUser[]>() ?? [])
                 {
@@ -7719,7 +7750,9 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 foreach (var assignee in _items
-                    .Where(item => boardId is null || item.BoardId == boardId)
+                    .Where(item =>
+                        (boardId is null || item.BoardId == boardId) &&
+                        (visibleBoardIds is null || visibleBoardIds.Contains(item.BoardId)))
                     .Select(item => item.Assignee)
                     .Where(assignee => !string.IsNullOrWhiteSpace(assignee))
                     .Select(assignee => assignee!.Trim())
