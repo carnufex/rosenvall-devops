@@ -1965,7 +1965,13 @@ namespace Rosenvall.DevOps.Api
             return string.IsNullOrWhiteSpace(normalized) ? "implementation-run" : normalized[..Math.Min(normalized.Length, 63)].Trim('-');
         }
 
-        private static string Escape(string? value) => (value ?? "").Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+        private static string Escape(string? value) =>
+            (value ?? "")
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal)
+                .Replace("\t", "\\t", StringComparison.Ordinal);
     }
 
     public static class GitHubAppSecretRenderer
@@ -1995,7 +2001,10 @@ namespace Rosenvall.DevOps.Api
 
         private static string Escape(string value) =>
             value.Replace("\\", "\\\\", StringComparison.Ordinal)
-                .Replace("\"", "\\\"", StringComparison.Ordinal);
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal)
+                .Replace("\t", "\\t", StringComparison.Ordinal);
     }
 
     public static class RepositoryCleanupJobManifestRenderer
@@ -2244,7 +2253,13 @@ namespace Rosenvall.DevOps.Api
             return string.IsNullOrWhiteSpace(normalized) ? "repository-cleanup-run" : normalized[..Math.Min(normalized.Length, 63)].Trim('-');
         }
 
-        private static string Escape(string? value) => (value ?? "").Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+        private static string Escape(string? value) =>
+            (value ?? "")
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal)
+                .Replace("\t", "\\t", StringComparison.Ordinal);
     }
 
     public static class BoardSecretManifestRenderer

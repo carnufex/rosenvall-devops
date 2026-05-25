@@ -842,6 +842,31 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_runner_manifest_escapes_control_characters_in_quoted_values()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "GitHub",
+            "demo",
+            "https://github.com/rosenvall/demo.git\nmalicious: true",
+            "main",
+            "https://github.com/rosenvall/demo",
+            "rosenvall",
+            "code-repo"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("demo", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "escape yaml", "Ensure manifest values stay quoted.", "Todo", "Medium", null))!;
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var manifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build())!;
+
+        Assert.Contains("https://github.com/rosenvall/demo.git\\nmalicious: true", manifest);
+        Assert.DoesNotContain("https://github.com/rosenvall/demo.git\nmalicious: true", manifest);
+    }
+
+    [Fact]
     public void Repository_runner_can_reference_per_run_github_app_token_secret()
     {
         using var fixture = DevOpsStoreFixture.Create();
