@@ -960,6 +960,25 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Board_can_start_without_repository_and_sync_to_github_later()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Preview only", null, null, null, null, null, null))!;
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "new-private-board", "https://github.com/carnufex/new-private-board.git", "main", "https://github.com/carnufex/new-private-board", "carnufex", "code-repo"));
+
+        var linked = store.LinkRepositoryToBoard(board.Id, new LinkBoardRepositoryRequest(repository.Id, true, "code-repo"))!;
+
+        Assert.Null(board.Repository);
+        Assert.Equal("Preview only", board.RepositorySyncState);
+        Assert.Contains("sync-github", board.ProviderCapabilities!);
+        Assert.Equal(repository.Id, linked.Repository!.Id);
+        Assert.Equal("Synced to GitHub", linked.RepositorySyncState);
+        Assert.Contains("repository-implementation", linked.ProviderCapabilities!);
+    }
+
+    [Fact]
     public void Board_secrets_store_metadata_only_and_runner_references_kubernetes_secret()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -1321,6 +1340,73 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_cleanup_run_does_not_duplicate_while_existing_attempt_is_pending()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "test", "Create test.rosenvall.se.", "Review", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/34");
+
+        var first = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
+        var second = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
+
+        Assert.Equal(first.Id, second.Id);
+        Assert.Single(store.GetRepositoryCleanupRuns(item.Id));
+    }
+
+    [Fact]
+    public void External_cleanup_pull_request_can_be_adopted_on_same_card()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "test", "Create test.rosenvall.se.", "Done", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/34");
+
+        var adopted = store.AdoptRepositoryCleanupPullRequest(item.Id, implementationRun.Id, "crille", "https://github.com/carnufex/Rosenvalls-Homelab/pull/35", "rdo/cleanup-test-namespace", "open", false)!;
+        var detail = store.GetWorkItemDetail(item.Id)!;
+
+        Assert.True(adopted.Adopted);
+        Assert.Equal("PullRequestReady", adopted.Status);
+        Assert.Equal("rdo/cleanup-test-namespace", adopted.Branch);
+        Assert.Equal("https://github.com/carnufex/Rosenvalls-Homelab/pull/35", detail.Item.PullRequestUrl);
+        Assert.Equal("CleanupReady", detail.Item.AiStatus);
+        Assert.Contains(store.GetTimeline(board.Id), entry => entry.Kind == "RepositoryCleanupPullRequest" && entry.Url == adopted.CleanupPullRequestUrl);
+    }
+
+    [Fact]
+    public void Stuck_cleanup_run_records_diagnostics_and_fails_card_cleanup()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "test", "Create test.rosenvall.se.", "Review", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/34");
+        var cleanupRun = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
+
+        var failed = store.MarkRepositoryCleanupRunStuck(cleanupRun.Id, "cleanup-task-4826", "cleanup-task-4826-pod", "ContainersNotReady", "pod has unbound immediate PersistentVolumeClaims")!;
+
+        Assert.Equal("Failed", failed.Status);
+        Assert.Equal("cleanup-task-4826", failed.JobName);
+        Assert.Equal("cleanup-task-4826-pod", failed.PodName);
+        Assert.Contains("PersistentVolumeClaims", failed.LastEventSummary);
+        Assert.Equal("CleanupFailed", store.GetWorkItemDetail(item.Id)!.Item.AiStatus);
+    }
+
+    [Fact]
     public void Work_item_cleanup_manifest_includes_repository_cleanup_jobs_and_token_secrets()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -1385,6 +1471,35 @@ public sealed class DevOpsStoreTests
         Assert.True(commented);
         Assert.Contains(requests, request => request.Method.Method == "PATCH" && request.Body.Contains("\"state\":\"closed\"", StringComparison.Ordinal));
         Assert.Contains(requests, request => request.Method == HttpMethod.Post && request.Body.Contains("Closed by cleanup.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task GitHub_client_creates_private_repository_with_readme_initialization()
+    {
+        var requests = new List<(HttpMethod Method, string Path, string Body)>();
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            var body = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? "";
+            requests.Add((request.Method, request.RequestUri!.PathAndQuery, body));
+            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath == "/user/repos")
+            {
+                return JsonResponse("""{"name":"new-board","full_name":"carnufex/new-board","clone_url":"https://github.com/carnufex/new-board.git","html_url":"https://github.com/carnufex/new-board","default_branch":"main","owner":{"login":"carnufex"}}""");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{}") };
+        }))
+        {
+            BaseAddress = new Uri("https://api.github.com")
+        };
+        var github = new GitHubRepositoryClient(httpClient, new ConfigurationBuilder().Build());
+        var integration = new GitHubIntegrationDto(Guid.NewGuid(), 123, "carnufex", "User", "Active", 1, "crille", DateTimeOffset.UtcNow);
+
+        var repository = await github.CreateRepositoryAsync(integration, new SyncGitHubRepositoryRequest(Name: "new-board", Private: true, ImplementationProfile: "code-repo"), "token", CancellationToken.None);
+
+        Assert.NotNull(repository);
+        Assert.Equal("new-board", repository.Name);
+        Assert.Equal("https://github.com/carnufex/new-board.git", repository.RemoteUrl);
+        Assert.Contains(requests, request => request.Method == HttpMethod.Post && request.Body.Contains("\"private\":true", StringComparison.OrdinalIgnoreCase) && request.Body.Contains("\"auto_init\":true", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

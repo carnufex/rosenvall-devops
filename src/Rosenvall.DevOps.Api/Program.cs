@@ -314,6 +314,65 @@ api.MapGet("/integrations/github/repository-profile", async (string owner, strin
 
 api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepositoryRequest request, DevOpsStore store) =>
     store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound());
+api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, SyncGitHubRepositoryRequest request, DevOpsStore store, GitHubRepositoryClient github, CancellationToken cancellationToken) =>
+{
+    if (request.RepositoryId is { } repositoryId)
+    {
+        return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(repositoryId, true, request.ImplementationProfile)) is { } linked
+            ? Results.Ok(linked)
+            : Results.NotFound();
+    }
+
+    if (!request.CreateNew)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.RemoteUrl))
+        {
+            return Results.Problem("Linking an existing GitHub repository requires a repository name and clone URL.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var linkedRepository = store.CreateRepository(new CreateRepositoryRequest(
+            "GitHub",
+            request.Name,
+            request.RemoteUrl,
+            string.IsNullOrWhiteSpace(request.DefaultBranch) ? "main" : request.DefaultBranch,
+            request.WebUrl,
+            request.Owner,
+            request.ImplementationProfile));
+        return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(linkedRepository.Id, true, request.ImplementationProfile ?? linkedRepository.ImplementationProfile)) is { } syncedBoard
+            ? Results.Created($"/api/repositories/{linkedRepository.Id}", syncedBoard)
+            : Results.NotFound();
+    }
+
+    var integration = store.GetGitHubIntegration(request.InstallationId);
+    if (integration is null)
+    {
+        return Results.Problem("No GitHub App installation is available for repository creation.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var token = await github.CreateInstallationTokenAsync(integration.InstallationId, cancellationToken);
+    if (string.IsNullOrWhiteSpace(token))
+    {
+        return Results.Problem($"Could not mint GitHub App installation token for {integration.AccountLogin}.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var createdRepository = await github.CreateRepositoryAsync(integration, request, token, cancellationToken);
+    if (createdRepository is null)
+    {
+        return Results.Problem("GitHub repository creation failed. Check GitHub App permissions for repository administration.", statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var repository = store.CreateRepository(new CreateRepositoryRequest(
+        createdRepository.Provider,
+        createdRepository.Name,
+        createdRepository.RemoteUrl,
+        createdRepository.DefaultBranch,
+        createdRepository.WebUrl,
+        createdRepository.Owner,
+        request.ImplementationProfile ?? createdRepository.ImplementationProfile));
+    return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(repository.Id, true, request.ImplementationProfile ?? repository.ImplementationProfile)) is { } board
+        ? Results.Created($"/api/repositories/{repository.Id}", board)
+        : Results.NotFound();
+});
 api.MapPut("/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile", (Guid boardId, Guid repositoryId, RepositoryProfileDto request, DevOpsStore store) =>
     store.UpsertBoardRepositoryProfile(boardId, repositoryId, request) is { } board ? Results.Ok(board) : Results.NotFound());
 api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid boardId, Guid repositoryId, DevOpsStore store) =>
@@ -545,6 +604,52 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     }
 
     return Results.Accepted($"/api/repository-cleanup-runs/{cleanupRun.Id}", updated);
+});
+
+api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid workItemId, AdoptCleanupPullRequestRequest request, DevOpsStore store, GitHubRepositoryClient github, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    var actor = string.IsNullOrWhiteSpace(request.Actor) ? "crille" : request.Actor.Trim();
+    var sourceRun = request.SourceImplementationRunId is { } sourceImplementationRunId
+        ? store.GetImplementationRuns(workItemId).SingleOrDefault(run => run.Id == sourceImplementationRunId)
+        : store.GetImplementationRuns(workItemId)
+            .Where(run => !string.IsNullOrWhiteSpace(run.PullRequestUrl))
+            .OrderByDescending(run => run.UpdatedAt)
+            .FirstOrDefault();
+    if (sourceRun is null)
+    {
+        return Results.Problem("Could not find an implementation PR on this card to anchor the adopted cleanup PR.", statusCode: StatusCodes.Status409Conflict);
+    }
+
+    var repository = store.GetImplementationRunRepository(sourceRun.Id);
+    var integration = repository is null ? null : store.GetGitHubIntegrationForRepository(repository);
+    var token = integration is null ? github.ConfiguredToken : await github.CreateInstallationTokenAsync(integration.InstallationId, cancellationToken);
+    GitHubPullRequestDto? pullRequest = null;
+    if (!string.IsNullOrWhiteSpace(token))
+    {
+        pullRequest = await github.GetPullRequestAsync(request.PullRequestUrl, token, cancellationToken);
+    }
+
+    var cleanupRun = store.AdoptRepositoryCleanupPullRequest(
+        workItemId,
+        sourceRun.Id,
+        actor,
+        request.PullRequestUrl,
+        pullRequest?.HeadRef,
+        pullRequest?.State,
+        pullRequest?.Merged == true);
+    if (cleanupRun is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", cleanupRun);
+    var detail = store.GetWorkItemDetail(workItemId);
+    if (detail is not null)
+    {
+        await hub.Clients.All.SendAsync("workItemChanged", detail.Item);
+    }
+
+    return Results.Created($"/api/repository-cleanup-runs/{cleanupRun.Id}", cleanupRun);
 });
 
 api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWorkItemRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
@@ -918,7 +1023,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardGitOpsSettingsDto(Guid BoardId, IReadOnlyList<string> AllowedPaths, string ArgoNamespace, string ArgoApplicationSelector);
     public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain);
     public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, RepositoryProfileDto? RepositoryProfileDraft = null);
-    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null);
+    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, string RepositorySyncState = "Preview only", IReadOnlyList<string>? ProviderCapabilities = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
     public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null, BoardPlanningContextDto? BoardContext = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null);
@@ -930,8 +1035,8 @@ namespace Rosenvall.DevOps.Api
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
-    public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
-    public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null);
+    public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, bool Adopted = false, DateTimeOffset? MergedAt = null, DateTimeOffset? VerifiedAt = null, string? VerificationFailure = null);
+    public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null, string? HeadRef = null);
     public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt);
     public sealed record GitOpsApplicationsResponseDto(IReadOnlyList<GitOpsApplicationStatusDto> Applications, string? Message = null);
     public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt);
@@ -975,6 +1080,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardGitOpsSettingsRequest(IReadOnlyList<string>? AllowedPaths, string? ArgoNamespace, string? ArgoApplicationSelector);
     public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain);
     public sealed record LinkBoardRepositoryRequest(Guid RepositoryId, bool IsPrimary, string? ImplementationProfile = null);
+    public sealed record SyncGitHubRepositoryRequest(Guid? RepositoryId = null, string? Owner = null, string? Name = null, bool Private = true, string? Description = null, long? InstallationId = null, string? ImplementationProfile = null, bool CreateNew = false, string? RemoteUrl = null, string? WebUrl = null, string? DefaultBranch = null);
     public sealed record UpsertBoardTeamAccessRequest(string Role);
     public sealed record CreateBoardSecretRequest(string Key, string Value, Guid? RepositoryId = null);
     public sealed record CreateWorkItemRequest(Guid BoardId, string Type, string Title, string Description, string Status, string Priority, string? Assignee);
@@ -988,6 +1094,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record ApprovePullRequestRequest(string ApprovedBy);
     public sealed record PreviewActionRequest(string Actor);
     public sealed record DeleteAndCleanupRequest(string Actor);
+    public sealed record AdoptCleanupPullRequestRequest(string Actor, string PullRequestUrl, Guid? SourceImplementationRunId = null);
     public sealed record RecordPipelineRunRequest(Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record ExecutePipelineRunRequest(string Actor);
     public sealed record StartImplementationRunRequest(Guid AiRunId, string Actor, Guid? RepositoryId = null, string? ReasoningEffort = null);
@@ -2462,6 +2569,7 @@ namespace Rosenvall.DevOps.Api
     public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrchestrator jobs, IHubContext<DevOpsHub> hub, ILogger<ImplementationRunMonitor> logger) : BackgroundService
     {
         private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(8);
+        private static readonly TimeSpan CleanupStuckTimeout = TimeSpan.FromMinutes(10);
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -2543,6 +2651,21 @@ namespace Rosenvall.DevOps.Api
                 var cleanupNamespace = RepositoryCleanupJobManifestRenderer.Namespace;
                 var logsResult = await jobs.GetOutputAsync($"logs -n {cleanupNamespace} job/{jobName} --all-containers --tail=220", cancellationToken);
                 var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
+                if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > CleanupStuckTimeout)
+                {
+                    var podName = await FirstKubectlLineAsync($"get pods -n {cleanupNamespace} -l job-name={jobName} -o jsonpath='{{.items[0].metadata.name}}'", cancellationToken);
+                    var condition = await LastJobConditionAsync(cleanupNamespace, jobName, cancellationToken);
+                    var events = string.IsNullOrWhiteSpace(podName)
+                        ? await FirstKubectlLineAsync($"describe job {jobName} -n {cleanupNamespace}", cancellationToken)
+                        : await FirstKubectlLineAsync($"get events -n {cleanupNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp", cancellationToken);
+                    var stuck = store.MarkRepositoryCleanupRunStuck(run.Id, jobName, podName, condition, events);
+                    if (stuck is not null)
+                    {
+                        await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", stuck, cancellationToken);
+                    }
+
+                    continue;
+                }
                 var nextStatus = StatusFromLogs(logs, run.Status);
 
                 var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {cleanupNamespace} -o json", cancellationToken);
@@ -2575,6 +2698,41 @@ namespace Rosenvall.DevOps.Api
                     await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", updated, cancellationToken);
                 }
             }
+        }
+
+        private async Task<string?> FirstKubectlLineAsync(string arguments, CancellationToken cancellationToken)
+        {
+            var result = await jobs.GetOutputAsync(arguments, cancellationToken);
+            return result.Succeeded
+                ? result.Message.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault()
+                : result.Message;
+        }
+
+        private async Task<string?> LastJobConditionAsync(string cleanupNamespace, string jobName, CancellationToken cancellationToken)
+        {
+            var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {cleanupNamespace} -o json", cancellationToken);
+            if (!jobResult.Succeeded)
+            {
+                return jobResult.Message;
+            }
+
+            using var document = JsonDocument.Parse(jobResult.Message);
+            if (!document.RootElement.TryGetProperty("status", out var status) ||
+                !status.TryGetProperty("conditions", out var conditions) ||
+                conditions.ValueKind != JsonValueKind.Array)
+            {
+                return "No Job condition was reported.";
+            }
+
+            return conditions.EnumerateArray()
+                .Select(condition =>
+                {
+                    var type = condition.TryGetProperty("type", out var typeElement) ? typeElement.GetString() : null;
+                    var reason = condition.TryGetProperty("reason", out var reasonElement) ? reasonElement.GetString() : null;
+                    var message = condition.TryGetProperty("message", out var messageElement) ? messageElement.GetString() : null;
+                    return string.Join(" - ", new[] { type, reason, message }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                })
+                .LastOrDefault(value => !string.IsNullOrWhiteSpace(value));
         }
 
         private static int StatusInt(JsonElement root, string property)
@@ -4292,6 +4450,43 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public async Task<RepositoryDto?> CreateRepositoryAsync(GitHubIntegrationDto integration, SyncGitHubRepositoryRequest createRequest, string token, CancellationToken cancellationToken)
+        {
+            var name = NormalizeRepositoryName(createRequest.Name);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return null;
+            }
+
+            var owner = string.IsNullOrWhiteSpace(createRequest.Owner) ? integration.AccountLogin : createRequest.Owner.Trim();
+            var organization = integration.AccountType.Equals("Organization", StringComparison.OrdinalIgnoreCase) ||
+                integration.AccountType.Equals("Org", StringComparison.OrdinalIgnoreCase);
+            var url = organization
+                ? $"https://api.github.com/orgs/{Uri.EscapeDataString(owner)}/repos"
+                : "https://api.github.com/user/repos";
+            using var request = CreateGitHubRequest(HttpMethod.Post, url, token);
+            request.Content = JsonContent.Create(new
+            {
+                name,
+                description = string.IsNullOrWhiteSpace(createRequest.Description) ? $"Rosenvall DevOps board repository for {name}." : createRequest.Description.Trim(),
+                @private = createRequest.Private,
+                auto_init = true
+            });
+            using var timeout = CreateGitHubTimeout(cancellationToken);
+            using var response = await httpClient.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var repository = NormalizeRepositories(JsonSerializer.SerializeToElement(new[] { document.RootElement })).FirstOrDefault();
+            return repository is null
+                ? null
+                : repository with { ImplementationProfile = NormalizeTextValue(createRequest.ImplementationProfile, "code-repo") };
+        }
+
         public async Task<GitHubPullRequestDto?> GetPullRequestAsync(string pullRequestUrl, string token, CancellationToken cancellationToken)
         {
             if (!TryParsePullRequestUrl(pullRequestUrl, out var owner, out var repo, out var number))
@@ -4311,6 +4506,7 @@ namespace Rosenvall.DevOps.Api
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             var root = document.RootElement;
+            var headRef = root.TryGetProperty("head", out var head) ? GetString(head, "ref") : "";
             return new GitHubPullRequestDto(
                 owner,
                 repo,
@@ -4318,7 +4514,8 @@ namespace Rosenvall.DevOps.Api
                 NormalizeTextValue(GetString(root, "state"), "unknown"),
                 root.TryGetProperty("merged", out var merged) && merged.ValueKind == JsonValueKind.True,
                 NormalizeTextValue(GetString(root, "html_url"), pullRequestUrl),
-                string.IsNullOrWhiteSpace(GetString(root, "diff_url")) ? null : GetString(root, "diff_url"));
+                string.IsNullOrWhiteSpace(GetString(root, "diff_url")) ? null : GetString(root, "diff_url"),
+                string.IsNullOrWhiteSpace(headRef) ? null : headRef);
         }
 
         public async Task<string?> GetPullRequestDiffAsync(GitHubPullRequestDto pullRequest, string token, CancellationToken cancellationToken)
@@ -4594,6 +4791,18 @@ namespace Rosenvall.DevOps.Api
 
         private static string NormalizeTextValue(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+        private static string NormalizeRepositoryName(string? value)
+        {
+            var normalized = new string((value ?? "").Trim().Select(character =>
+                char.IsLetterOrDigit(character) || character is '-' or '_' or '.' ? character : '-').ToArray()).Trim('-', '.', '_');
+            while (normalized.Contains("--", StringComparison.Ordinal))
+            {
+                normalized = normalized.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return normalized;
+        }
 
         private string PublicBaseUrl()
         {
@@ -5833,6 +6042,18 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public GitHubIntegrationDto? GetGitHubIntegration(long? installationId = null)
+        {
+            lock (_lock)
+            {
+                return installationId is { } id
+                    ? _githubIntegrations.SingleOrDefault(integration => integration.InstallationId == id)
+                    : _githubIntegrations
+                        .OrderByDescending(integration => integration.CreatedAt)
+                        .FirstOrDefault();
+            }
+        }
+
         public GitHubIntegrationDto CreateGitHubIntegration(GitHubIntegrationCallbackRequest request)
         {
             lock (_lock)
@@ -6402,6 +6623,15 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
+                var pending = _repositoryCleanupRuns
+                    .Where(run => run.WorkItemId == item.Id && run.SourceImplementationRunId == sourceRun.Id)
+                    .OrderByDescending(run => run.CreatedAt)
+                    .FirstOrDefault(run => IsRepositoryCleanupPendingStatus(run.Status));
+                if (pending is not null)
+                {
+                    return pending;
+                }
+
                 var attemptNumber = _repositoryCleanupRuns.Count(run => run.WorkItemId == item.Id && run.SourceImplementationRunId == sourceRun.Id) + 1;
                 var branchBase = $"rdo/{item.Key.ToLowerInvariant()}-{SlugifyRepositoryName(item.Title)}-cleanup";
                 var branch = attemptNumber == 1 ? branchBase : $"{branchBase}-retry-{attemptNumber}";
@@ -6431,6 +6661,59 @@ namespace Rosenvall.DevOps.Api
                 item.AiStatus = "CleanupRunning";
                 item.Status = "AI Planning";
                 AddTimelineForItem(item, "RepositoryCleanupQueued", item.Key, attemptNumber == 1 ? "Repository cleanup queued." : $"Repository cleanup attempt {attemptNumber} queued.", actor, sourceRun.PullRequestUrl);
+                Persist();
+                return runDto;
+            }
+        }
+
+        public RepositoryCleanupRunDto? AdoptRepositoryCleanupPullRequest(Guid workItemId, Guid sourceImplementationRunId, string actor, string cleanupPullRequestUrl, string? branch, string? state, bool merged)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                var sourceRun = _implementationRuns.SingleOrDefault(run => run.Id == sourceImplementationRunId && run.WorkItemId == workItemId);
+                if (item is null || sourceRun is null || string.IsNullOrWhiteSpace(sourceRun.PullRequestUrl) || string.IsNullOrWhiteSpace(cleanupPullRequestUrl))
+                {
+                    return null;
+                }
+
+                var existing = _repositoryCleanupRuns
+                    .FirstOrDefault(run => run.WorkItemId == workItemId &&
+                        string.Equals(run.CleanupPullRequestUrl, cleanupPullRequestUrl.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (existing is not null)
+                {
+                    return existing;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var runDto = new RepositoryCleanupRunDto(
+                    Guid.NewGuid(),
+                    sourceRun.RepositoryId,
+                    item.Id,
+                    sourceRun.Id,
+                    item.Key,
+                    item.Title,
+                    merged ? "Merged" : "PullRequestReady",
+                    string.IsNullOrWhiteSpace(branch) ? $"adopted-cleanup-pr-{now:yyyyMMddHHmmss}" : branch.Trim(),
+                    sourceRun.PullRequestUrl,
+                    cleanupPullRequestUrl.Trim(),
+                    null,
+                    null,
+                    string.IsNullOrWhiteSpace(state) ? "adopted" : state.Trim(),
+                    null,
+                    now,
+                    now,
+                    [
+                        new PreviewTerminalLineDto(now, "system", $"Adopted cleanup pull request for {item.Key}."),
+                        new PreviewTerminalLineDto(now, "system", $"Cleanup pull request: {cleanupPullRequestUrl.Trim()}.")
+                    ],
+                    Adopted: true,
+                    MergedAt: merged ? now : null);
+                _repositoryCleanupRuns.Add(runDto);
+                item.AiStatus = merged ? "CleanupMerged" : "CleanupReady";
+                item.Status = "Review";
+                item.PullRequestUrl = cleanupPullRequestUrl.Trim();
+                AddTimelineForItem(item, merged ? "RepositoryCleanupMerged" : "RepositoryCleanupPullRequest", item.Key, merged ? "Adopted cleanup pull request is merged." : "Adopted cleanup pull request is ready for review.", actor, cleanupPullRequestUrl.Trim());
                 Persist();
                 return runDto;
             }
@@ -6501,6 +6784,52 @@ namespace Rosenvall.DevOps.Api
 
                         AddTimelineForItem(item, updated.Status == "PullRequestReady" ? "RepositoryCleanupPullRequest" : "RepositoryCleanupFailed", item.Key, updated.Status == "PullRequestReady" ? $"Cleanup pull request ready for {item.Key}." : updated.FailureReason ?? "Repository cleanup failed.", "runner", updated.CleanupPullRequestUrl);
                     }
+                }
+
+                Persist();
+                return updated;
+            }
+        }
+
+        public RepositoryCleanupRunDto? MarkRepositoryCleanupRunStuck(Guid cleanupRunId, string jobName, string? podName, string? condition, string? eventSummary)
+        {
+            lock (_lock)
+            {
+                var index = _repositoryCleanupRuns.FindIndex(run => run.Id == cleanupRunId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _repositoryCleanupRuns[index];
+                var message = "Cleanup job produced no runner output before timeout.";
+                var now = DateTimeOffset.UtcNow;
+                var lines = (existing.TerminalLines ?? [])
+                    .Concat([
+                        new PreviewTerminalLineDto(now, "system", message),
+                        new PreviewTerminalLineDto(now, "system", $"Job: {jobName}. Pod: {podName ?? "unknown"}. Condition: {condition ?? "unknown"}."),
+                        new PreviewTerminalLineDto(now, "system", $"Last event: {eventSummary ?? "No Kubernetes event summary was available."}")
+                    ])
+                    .TakeLast(200)
+                    .ToArray();
+                var updated = existing with
+                {
+                    Status = "Failed",
+                    FailureReason = message,
+                    UpdatedAt = now,
+                    TerminalLines = lines,
+                    JobName = jobName,
+                    PodName = podName,
+                    LastCondition = condition,
+                    LastEventSummary = eventSummary
+                };
+                _repositoryCleanupRuns[index] = updated;
+
+                var item = _items.SingleOrDefault(entry => entry.Id == updated.WorkItemId);
+                if (item is not null)
+                {
+                    item.AiStatus = "CleanupFailed";
+                    AddTimelineForItem(item, "RepositoryCleanupFailed", item.Key, message, "runner", updated.CleanupPullRequestUrl);
                 }
 
                 Persist();
@@ -7408,10 +7737,10 @@ namespace Rosenvall.DevOps.Api
                     providers),
                 new PreviewSettingsDto("rosenvall.se", 7, "per-preview namespace"),
                 new RepositoryHostingSettingsDto(
-                    configuration["Repositories:Provider"] ?? "Forgejo",
-                    configuration["Repositories:Mode"] ?? "LinkExistingFirst",
-                    configuration["Repositories:Forgejo:ApiBaseUrl"] ?? "https://git.rosenvall.se/api/v1",
-                    configuration.GetValue("Repositories:Forgejo:CanCreateRepositories", false)),
+                    githubAppConfigured ? "GitHub" : configuration["Repositories:Provider"] ?? "Forgejo",
+                    githubAppConfigured ? "GitHubApp" : configuration["Repositories:Mode"] ?? "LinkExistingFirst",
+                    githubAppConfigured ? "https://api.github.com" : configuration["Repositories:Forgejo:ApiBaseUrl"] ?? "https://git.rosenvall.se/api/v1",
+                    githubAppConfigured || configuration.GetValue("Repositories:Forgejo:CanCreateRepositories", false)),
                 new AuthentikSettingsDto(
                     !string.IsNullOrWhiteSpace(configuration["Authentik:Authority"]) || !string.IsNullOrWhiteSpace(configuration["Authentik:UsersEndpoint"]),
                     configuration["Authentik:Authority"] ?? configuration["Authentication:Authority"] ?? "https://authentik.rosenvall.se",
@@ -7616,7 +7945,44 @@ namespace Rosenvall.DevOps.Api
                 BoardRepositoriesFor(board.Id),
                 BoardTeamAccessFor(board.Id),
                 GitOpsSettingsFor(board.Id),
-                AiContextFor(board.Id));
+                AiContextFor(board.Id),
+                BoardRepositorySyncState(board.Id),
+                BoardProviderCapabilities(board.Id));
+
+        private string BoardRepositorySyncState(Guid boardId)
+        {
+            var repository = RepositoryIdForBoard(boardId) is { } repositoryId
+                ? _repositories.SingleOrDefault(entry => entry.Id == repositoryId)
+                : null;
+            if (repository is null)
+            {
+                return "Preview only";
+            }
+
+            return string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase)
+                ? "GitOps board"
+                : repository.Provider.Equals("GitHub", StringComparison.OrdinalIgnoreCase)
+                    ? "Synced to GitHub"
+                    : "Synced to provider";
+        }
+
+        private IReadOnlyList<string> BoardProviderCapabilities(Guid boardId)
+        {
+            var capabilities = new List<string> { "preview" };
+            if (RepositoryIdForBoard(boardId) is null)
+            {
+                capabilities.Add("sync-github");
+                return capabilities;
+            }
+
+            capabilities.Add("repository-implementation");
+            if (string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase))
+            {
+                capabilities.Add("gitops");
+            }
+
+            return capabilities;
+        }
 
         private TeamDto EnrichTeam(TeamDto team) =>
             team with
@@ -7878,6 +8244,9 @@ namespace Rosenvall.DevOps.Api
             status.Contains("cancel", StringComparison.OrdinalIgnoreCase) ||
             status.Contains("approved", StringComparison.OrdinalIgnoreCase) ||
             status.Contains("passed", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsRepositoryCleanupPendingStatus(string status) =>
+            status is "Queued" or "Cloning" or "Implementing" or "Validating" or "Pushing";
 
         private static string NormalizeText(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
@@ -8226,8 +8595,8 @@ namespace Rosenvall.DevOps.Api
         private void Seed()
         {
             var workspace = new WorkspaceDto(Guid.Parse("3a469909-9487-4bf5-9fd4-5bd2e4d59fb5"), "Frontend Re-architecture", "Production Environment", "us-east-1", 14, 32, 847, 64);
-            var repository = new RepositoryDto(Guid.Parse("8a5bca6d-69d1-4a58-bb4f-a629243a9337"), "GitHub", "auth-service", "https://github.com/rosenvall/auth-service.git", "https://github.com/rosenvall/auth-service", "main", DateTimeOffset.UtcNow.AddDays(-7), "rosenvall", "code-repo");
-            var board = new BoardRecord(Guid.Parse("6942aca6-5c36-4498-aeaa-c3a2ebe4e8db"), workspace.Id, "Sprint 42", ["Todo", "In Progress", "AI Planning", "Review", "Done"], repository.Id);
+            var repository = new RepositoryDto(Guid.Parse("8a5bca6d-69d1-4a58-bb4f-a629243a9337"), "Sample", "auth-service demo", "sample://rosenvall/auth-service", null, "main", DateTimeOffset.UtcNow.AddDays(-7), "sample", "code-repo");
+            var board = new BoardRecord(Guid.Parse("6942aca6-5c36-4498-aeaa-c3a2ebe4e8db"), workspace.Id, "Demo Sprint 42", ["Todo", "In Progress", "AI Planning", "Review", "Done"], repository.Id);
             var task = new WorkItemRecord(Guid.Parse("4f55f9a2-3f05-4ff5-bfd8-a43740bebccb"), board.Id, "TASK-4821", "Feature", "Implement OAuth2 Flow for Partner API Integrations", "Upgrade the current API authentication to support full OAuth2 authorization code flow for third-party partner integrations.", "In Progress", "High", "Sarah J.", 0);
             var aiTask = new WorkItemRecord(Guid.Parse("9d81428e-f407-4689-a0c8-20e6e48175bb"), board.Id, "FE-901", "Feature", "Generate Unit Tests for Auth Module", "Generate a focused suite for authentication edge cases.", "AI Planning", "Medium", null, 0)
             {
@@ -8254,11 +8623,11 @@ namespace Rosenvall.DevOps.Api
             seededRun.PostPlan("Based on the requirements and current architecture, implement OAuth2 support behind tests, then publish a PR and preview URL for review.");
             _aiRuns.Add(seededRun);
             var seededResources = PreviewResourceSet.Create(task.Key, task.Title, "ghcr.io/rosenvall/auth-service@sha256:demo");
-            _development.Add(new DevelopmentDtoRecord(task.Id, new DevelopmentDto("rosenvall/auth-service", "feat/oauth2-flow", "https://github.com/rosenvall/auth-service/pull/142", "Checks passed")));
+            _development.Add(new DevelopmentDtoRecord(task.Id, new DevelopmentDto("sample/auth-service", "feat/oauth2-flow", null, "Demo data")));
             var seededPreview = new PreviewDto(Guid.NewGuid(), task.Id, "https://feat-auth.rosenvall.se", "ghcr.io/rosenvall/auth-service@sha256:demo", "Running", DateTimeOffset.UtcNow.AddDays(7), null, seededResources.Namespace, seededResources.Name);
             _previews.Add(seededPreview);
             AddPreviewEvent(task, seededPreview, "Created", "seed", "Seed preview created.");
-            AddTimelineEvent(board.Id, repository.Id, task.Id, "Commit", task.Key, "Initial auth-service history imported.", "seed", "https://github.com/rosenvall/auth-service/commit/demo", DateTimeOffset.UtcNow.AddHours(-3));
+            AddTimelineEvent(board.Id, repository.Id, task.Id, "Commit", task.Key, "Sample auth-service history imported.", "seed", null, DateTimeOffset.UtcNow.AddHours(-3));
         }
 
         private bool TryLoad()
@@ -8327,7 +8696,55 @@ namespace Rosenvall.DevOps.Api
             _boardGitOpsSettings.AddRange(snapshot.BoardGitOpsSettings ?? []);
             _boardAiContexts.AddRange(snapshot.BoardAiContexts ?? []);
             _nextTaskNumber = Math.Max(snapshot.NextTaskNumber, NextTaskNumberFromItems());
+            if (BackfillDemoSeedWithoutLock())
+            {
+                Persist();
+            }
             return true;
+        }
+
+        private bool BackfillDemoSeedWithoutLock()
+        {
+            var changed = false;
+            var demoBoardId = Guid.Parse("6942aca6-5c36-4498-aeaa-c3a2ebe4e8db");
+            var demoRepositoryId = Guid.Parse("8a5bca6d-69d1-4a58-bb4f-a629243a9337");
+            var boardIndex = _boards.FindIndex(board => board.Id == demoBoardId && board.Name == "Sprint 42");
+            if (boardIndex >= 0)
+            {
+                var board = _boards[boardIndex];
+                _boards[boardIndex] = new BoardRecord(board.Id, board.WorkspaceId, "Demo Sprint 42", board.Columns, board.RepositoryId);
+                changed = true;
+            }
+
+            var repositoryIndex = _repositories.FindIndex(repository => repository.Id == demoRepositoryId && repository.Provider == "GitHub" && repository.Name == "auth-service");
+            if (repositoryIndex >= 0)
+            {
+                _repositories[repositoryIndex] = new RepositoryDto(demoRepositoryId, "Sample", "auth-service demo", "sample://rosenvall/auth-service", null, "main", _repositories[repositoryIndex].CreatedAt, "sample", "code-repo");
+                changed = true;
+            }
+
+            for (var index = 0; index < _development.Count; index++)
+            {
+                var development = _development[index];
+                if (development.Development.Repository == "rosenvall/auth-service" ||
+                    development.Development.PullRequestUrl?.Contains("github.com/rosenvall/auth-service", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    _development[index] = development with { Development = development.Development with { Repository = "sample/auth-service", PullRequestUrl = null, ChecksStatus = "Demo data" } };
+                    changed = true;
+                }
+            }
+
+            for (var index = 0; index < _timelineEvents.Count; index++)
+            {
+                var entry = _timelineEvents[index];
+                if (entry.Url?.Contains("github.com/rosenvall/auth-service", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    _timelineEvents[index] = entry with { Url = null, Message = entry.Message.Replace("Initial auth-service history imported.", "Sample auth-service history imported.", StringComparison.Ordinal) };
+                    changed = true;
+                }
+            }
+
+            return changed;
         }
 
         private void Persist()

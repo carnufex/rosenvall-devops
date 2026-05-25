@@ -74,6 +74,8 @@ type Board = {
   teamAccess?: BoardTeamAccessDto[] | null;
   gitOpsSettings?: BoardGitOpsSettingsDto | null;
   aiContext?: BoardAiContextDto | null;
+  repositorySyncState?: string | null;
+  providerCapabilities?: string[] | null;
 };
 
 type BoardGitOpsSettingsDto = {
@@ -226,6 +228,14 @@ type RepositoryCleanupRunDto = {
   createdAt: string;
   updatedAt: string;
   terminalLines?: PreviewTerminalLineDto[] | null;
+  jobName?: string | null;
+  podName?: string | null;
+  lastCondition?: string | null;
+  lastEventSummary?: string | null;
+  adopted?: boolean;
+  mergedAt?: string | null;
+  verifiedAt?: string | null;
+  verificationFailure?: string | null;
 };
 
 type GitOpsApplicationStatusDto = {
@@ -566,6 +576,7 @@ function App() {
   const [selected, setSelected] = React.useState<SelectedState>({ status: 'closed' });
   const [createStatus, setCreateStatus] = React.useState<string | null>(null);
   const [createBoardOpen, setCreateBoardOpen] = React.useState(false);
+  const [syncBoardOpen, setSyncBoardOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
   const [toasts, setToasts] = React.useState<ToastMessage[]>([]);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
@@ -904,6 +915,20 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
+    syncBoardRepository: async (boardId, request) => {
+      await runAction('Syncing board to GitHub', async () => {
+        const board = await api.post<Board>(`/api/boards/${boardId}/repositories/github`, request);
+        setSyncBoardOpen(false);
+        setSelectedBoardId(board.id);
+        await loadShell(board.id);
+      });
+    },
+    adoptCleanupPullRequest: async (workItemId, pullRequestUrl) => {
+      await runAction('Adopting cleanup pull request', async () => {
+        await api.post<RepositoryCleanupRunDto>(`/api/work-items/${workItemId}/cleanup-runs/adopt`, { actor, pullRequestUrl });
+        await refreshAfterChange(workItemId);
+      });
+    },
     createBoardSecret: async (boardId, key, value, repositoryId) => {
       await runAction('Saving board secret', async () => {
         await api.post<BoardSecretDto>(`/api/boards/${boardId}/secrets`, { key, value, repositoryId: repositoryId || null });
@@ -1043,7 +1068,18 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar view={activeView} showGitOps={gitOpsAvailable} onChange={setView} onNewCard={() => setCreateStatus('Todo')} />
+      <Sidebar
+        view={activeView}
+        showGitOps={gitOpsAvailable}
+        boards={shell.status === 'ready' ? shell.boards : []}
+        selectedBoardId={activeBoardId}
+        activeBoard={shell.status === 'ready' ? shell.board : null}
+        onSelectBoard={actions.selectBoard}
+        onAddBoard={() => setCreateBoardOpen(true)}
+        onSyncBoard={() => setSyncBoardOpen(true)}
+        onChange={setView}
+        onNewCard={() => setCreateStatus('Todo')}
+      />
       <main className="main">
         <Topbar query={query} onQueryChange={setQuery} userName={auth.status === 'ready' ? auth.userName : null} />
         {auth.status === 'checking' && <Loading message="Checking authentication..." />}
@@ -1053,9 +1089,9 @@ function App() {
         {shell.status === 'ready' && board && (
           <>
             {activeView === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
-            {activeView === 'board' && <BoardView board={board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} actions={actions} />}
-            {activeView === 'timeline' && <TimelineView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} timeline={shell.timeline} actions={actions} />}
-            {activeView === 'gitops' && <GitOpsView board={shell.board} boards={shell.boards} selectedBoardId={activeBoardId ?? shell.board.id} gitOpsApplications={shell.gitOpsApplications} actions={actions} onBack={() => setView('board')} />}
+            {activeView === 'board' && <BoardView board={board} actions={actions} />}
+            {activeView === 'timeline' && <TimelineView board={shell.board} timeline={shell.timeline} />}
+            {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} onBack={() => setView('board')} />}
             {activeView === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
             {activeView === 'settings' && <SettingsView settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onBack={() => setView('board')} />}
           </>
@@ -1092,6 +1128,16 @@ function App() {
           actions={actions}
           onCreate={actions.createBoard}
           onClose={() => setCreateBoardOpen(false)}
+        />
+      )}
+      {syncBoardOpen && shell.status === 'ready' && (
+        <SyncBoardRepositoryModal
+          board={shell.board}
+          repositories={shell.repositories}
+          settings={shell.settings}
+          githubIntegrations={shell.githubIntegrations}
+          onSync={(request) => actions.syncBoardRepository(shell.board.id, request)}
+          onClose={() => setSyncBoardOpen(false)}
         />
       )}
       <ToastStack busyAction={busyAction ?? (shell.status === 'ready' && shell.busy ? 'Syncing API state' : null)} toasts={toasts} onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))} />
@@ -1257,6 +1303,8 @@ type BoardActions = {
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<void>;
   addGitHubIntegration(): Promise<void>;
   syncGitHubIntegration(): Promise<void>;
+  syncBoardRepository(boardId: string, request: SyncBoardRepositoryRequest): Promise<void>;
+  adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<void>;
   createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<void>;
   deleteBoardSecret(boardId: string, secretId: string): Promise<void>;
   updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<void>;
@@ -1277,6 +1325,20 @@ type BoardActions = {
   moveCard(id: string, status: string, sortOrder: number): Promise<void>;
 };
 
+type SyncBoardRepositoryRequest = {
+  repositoryId?: string | null;
+  name?: string | null;
+  owner?: string | null;
+  private?: boolean;
+  description?: string | null;
+  installationId?: number | null;
+  implementationProfile?: string | null;
+  createNew?: boolean;
+  remoteUrl?: string | null;
+  webUrl?: string | null;
+  defaultBranch?: string | null;
+};
+
 function useStateFromHash(): [View, (view: View) => void] {
   const readHash = () => {
     const next = (window.location.hash.replace('#', '') as View) || 'board';
@@ -1295,7 +1357,19 @@ function useStateFromHash(): [View, (view: View) => void] {
   return [view, setView];
 }
 
-function Sidebar({ view, showGitOps, onChange, onNewCard }: { view: View; showGitOps: boolean; onChange: (view: View) => void; onNewCard: () => void }) {
+function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSelectBoard, onAddBoard, onSyncBoard, onChange, onNewCard }: {
+  view: View;
+  showGitOps: boolean;
+  boards: Board[];
+  selectedBoardId: string | null;
+  activeBoard: Board | null;
+  onSelectBoard: (id: string) => void;
+  onAddBoard: () => void;
+  onSyncBoard: () => void;
+  onChange: (view: View) => void;
+  onNewCard: () => void;
+}) {
+  const canSync = activeBoard && !activeBoard.repository;
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -1305,6 +1379,15 @@ function Sidebar({ view, showGitOps, onChange, onNewCard }: { view: View; showGi
           <div className="brand-subtitle">DevOps Engine</div>
         </div>
       </div>
+      {boards.length > 0 && (
+        <div className="sidebar-board-picker">
+          <BoardSelector boards={boards} selectedBoardId={selectedBoardId ?? activeBoard?.id ?? ''} onSelect={onSelectBoard} onAdd={onAddBoard} />
+          <span className={activeBoard?.repositorySyncState === 'GitOps board' ? 'state-good' : activeBoard?.repository ? 'state-muted' : 'state-warn'}>
+            {activeBoard?.repositorySyncState ?? (activeBoard?.repository ? 'Synced to provider' : 'Preview only')}
+          </span>
+          {canSync && <button className="secondary compact inline" onClick={onSyncBoard} type="button"><Github size={14} />Sync to provider</button>}
+        </div>
+      )}
       <button className="primary-action" onClick={onNewCard}><Plus size={16} />New card</button>
       <nav className="side-nav">
         <NavButton active={view === 'board'} icon={<PanelLeft size={20} />} label="Board" onClick={() => onChange('board')} />
@@ -1443,7 +1526,7 @@ function Metric({ label, value, note, icon, accent }: { label: string; value: st
   );
 }
 
-function BoardView({ board, boards, selectedBoardId, actions }: { board: Board; boards: Board[]; selectedBoardId: string; actions: BoardActions }) {
+function BoardView({ board, actions }: { board: Board; actions: BoardActions }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const itemIds = board.columns.flatMap((column) => column.items.map((item) => item.id));
   const [activeCard, setActiveCard] = React.useState<WorkItemSummary | null>(null);
@@ -1466,7 +1549,7 @@ function BoardView({ board, boards, selectedBoardId, actions }: { board: Board; 
     <section className="page board-page">
       <div className="page-heading compact-heading">
         <div>
-          <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
+          <h1>{board.name}</h1>
           <p>{boardRepositorySummary(board)} - {board.columns.reduce((total, column) => total + column.items.length, 0)} active items</p>
         </div>
         <button className="primary-action" onClick={() => actions.openCreateCard(board.columns[0]?.name ?? 'Todo')}><Plus size={16} />New card</button>
@@ -1505,12 +1588,9 @@ function BoardSelector({ boards, selectedBoardId, onSelect, onAdd }: {
   );
 }
 
-function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
+function TimelineView({ board, timeline }: {
   board: Board;
-  boards: Board[];
-  selectedBoardId: string;
   timeline: TimelineEventDto[];
-  actions: BoardActions;
 }) {
   const [filter, setFilter] = React.useState('All');
   const filters = ['All', 'Cards', 'Git', 'Pipelines', 'Previews'];
@@ -1519,7 +1599,7 @@ function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
     <section className="page timeline-page">
       <div className="page-heading compact-heading">
         <div>
-          <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
+          <h1>Timeline</h1>
           <p>{boardRepositorySummary(board)} - {filtered.length} events</p>
         </div>
         <div className="timeline-filters">
@@ -1531,7 +1611,8 @@ function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
       <section className="panel timeline-panel">
         {filtered.length === 0 && <EmptyState>No timeline events for this board.</EmptyState>}
         {filtered.map((entry) => (
-          <article className="timeline-row" key={entry.id}>
+          <article className={`timeline-row ${timelineClass(entry.kind)}`} key={entry.id}>
+            <div className="timeline-marker" aria-hidden="true">{timelineIcon(entry.kind)}</div>
             <div>
               <div className="timeline-row-head"><strong>{entry.title}</strong><span className={statusClass(entry.kind)}>{entry.kind}</span></div>
               <p>{entry.message}</p>
@@ -1545,19 +1626,16 @@ function TimelineView({ board, boards, selectedBoardId, timeline, actions }: {
   );
 }
 
-function GitOpsView({ board, boards, selectedBoardId, gitOpsApplications, actions, onBack }: {
+function GitOpsView({ board, gitOpsApplications, onBack }: {
   board: Board;
-  boards: Board[];
-  selectedBoardId: string;
   gitOpsApplications: GitOpsApplicationsResponseDto;
-  actions: BoardActions;
   onBack: () => void;
 }) {
   return (
     <section className="page gitops-page">
       <div className="page-heading compact-heading">
         <div>
-          <BoardSelector boards={boards} selectedBoardId={selectedBoardId} onSelect={actions.selectBoard} onAdd={actions.openCreateBoard} />
+          <h1>GitOps</h1>
           <p>{boardRepositorySummary(board)} - ArgoCD application status</p>
         </div>
         <button className="secondary" onClick={onBack}>Back to board</button>
@@ -1664,6 +1742,16 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   }, [targetRepositories, targetRepositoryId]);
   const activeImplementationRun = latestImplementationRun(detail.implementationRuns);
   const activeRepositoryCleanupRun = latestRepositoryCleanupRun(detail.repositoryCleanupRuns);
+  const cleanupPending = isImplementationRunPendingStatus(activeRepositoryCleanupRun?.status);
+  const cleanupReady = activeRepositoryCleanupRun?.status === 'PullRequestReady' || activeRepositoryCleanupRun?.status === 'Merged';
+  const hasRepositoryPr = !!detail.item.pullRequestUrl || (detail.implementationRuns ?? []).some((run) => !!run.pullRequestUrl);
+  const cleanupActionLabel = cleanupPending
+    ? 'Repository cleanup running'
+    : cleanupReady
+      ? 'Delete card after cleanup'
+      : hasRepositoryPr && detail.item.status === 'Done'
+        ? 'Start repository cleanup'
+        : 'Delete and clean up';
 
   return (
     <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose}>
@@ -1679,8 +1767,11 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           </div>
           <div className="modal-actions">
             <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
-            <button className="danger-button" disabled={busy} onClick={() => confirm('Delete this work item and clean up runtime resources and repository PR state? Open implementation PRs will be closed. Merged implementation PRs will create a cleanup PR first.') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />Delete and clean up</button>
+            <button className={cleanupReady ? 'primary-action' : 'danger-button'} disabled={busy || cleanupPending} onClick={() => confirm('Delete this work item and clean up runtime resources and repository PR state? Open implementation PRs will be closed. Merged implementation PRs will create a cleanup PR first.') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />{cleanupActionLabel}</button>
           </div>
+          {activeRepositoryCleanupRun && (
+            <RepositoryCleanupRunPanel run={activeRepositoryCleanupRun} workItemId={detail.item.id} busy={busy} onAdopt={actions.adoptCleanupPullRequest} prominent />
+          )}
           <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
           <section className="activity">
             <h2>Activity</h2>
@@ -1729,9 +1820,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           {activeImplementationRun && (
             <ImplementationRunPanel run={activeImplementationRun} />
           )}
-          {activeRepositoryCleanupRun && (
-            <RepositoryCleanupRunPanel run={activeRepositoryCleanupRun} />
-          )}
+          {!activeRepositoryCleanupRun && hasRepositoryPr && <CleanupAdoptionPanel workItemId={detail.item.id} busy={busy} onAdopt={actions.adoptCleanupPullRequest} />}
           {detail.preview && (
             <PreviewPanel preview={detail.preview} busy={busy} onRetry={() => actions.startPreview(detail.item.id)} />
           )}
@@ -1946,14 +2035,15 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
   );
 }
 
-function RepositoryCleanupRunPanel({ run }: { run: RepositoryCleanupRunDto }) {
+function RepositoryCleanupRunPanel({ run, workItemId, busy = false, onAdopt, prominent = false }: { run: RepositoryCleanupRunDto; workItemId?: string; busy?: boolean; onAdopt?: (workItemId: string, pullRequestUrl: string) => Promise<void>; prominent?: boolean }) {
   const pending = isImplementationRunPendingStatus(run.status);
   const failed = run.status === 'Failed';
-  const ready = run.status === 'PullRequestReady';
+  const ready = run.status === 'PullRequestReady' || run.status === 'Merged';
   const steps = implementationRunSteps(run.status);
   return (
-    <section className="panel compact-panel implementation-panel">
+    <section className={prominent ? 'panel cleanup-panel prominent-cleanup-panel' : 'panel compact-panel cleanup-panel'}>
       <PanelHeader icon={<Trash2 size={20} />} title="Cleanup run" />
+      {run.adopted && <p className="namespace-note">Adopted external cleanup PR.</p>}
       <ol className="preview-stepper implementation-stepper" aria-label="Repository cleanup lifecycle">
         {steps.map((step, index) => (
           <li className={`stepper-item ${step.state}`} key={step.key}>
@@ -1967,9 +2057,33 @@ function RepositoryCleanupRunPanel({ run }: { run: RepositoryCleanupRunDto }) {
       {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
       {ready && run.cleanupPullRequestUrl && <a className="url-box" href={run.cleanupPullRequestUrl} target="_blank" rel="noreferrer">Open cleanup pull request <ExternalLink size={16} /></a>}
       {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
+      {(run.jobName || run.podName || run.lastCondition || run.lastEventSummary) && (
+        <div className="cleanup-diagnostics">
+          {run.jobName && <p>Job: <code>{run.jobName}</code></p>}
+          {run.podName && <p>Pod: <code>{run.podName}</code></p>}
+          {run.lastCondition && <p>Condition: {run.lastCondition}</p>}
+          {run.lastEventSummary && <p>Last event: {run.lastEventSummary}</p>}
+        </div>
+      )}
+      {workItemId && onAdopt && <CleanupAdoptionPanel workItemId={workItemId} busy={busy} onAdopt={onAdopt} compact />}
       <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
       <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
     </section>
+  );
+}
+
+function CleanupAdoptionPanel({ workItemId, busy, onAdopt, compact = false }: { workItemId: string; busy: boolean; onAdopt: (workItemId: string, pullRequestUrl: string) => Promise<void>; compact?: boolean }) {
+  const [pullRequestUrl, setPullRequestUrl] = React.useState('');
+  return (
+    <form className={compact ? 'cleanup-adopt-form compact' : 'panel compact-panel cleanup-adopt-form'} onSubmit={(event) => {
+      event.preventDefault();
+      if (!pullRequestUrl.trim()) return;
+      void onAdopt(workItemId, pullRequestUrl.trim()).then(() => setPullRequestUrl(''));
+    }}>
+      {!compact && <PanelHeader icon={<GitPullRequest size={20} />} title="Adopt cleanup PR" />}
+      <label>Cleanup PR URL<input value={pullRequestUrl} onChange={(event) => setPullRequestUrl(event.target.value)} placeholder="https://github.com/owner/repo/pull/35" /></label>
+      <button className="secondary compact inline" disabled={busy || !pullRequestUrl.trim()}><GitPullRequest size={14} />Adopt cleanup PR</button>
+    </form>
   );
 }
 
@@ -2509,6 +2623,133 @@ function CreateBoardModal({ teams, actions, onCreate, onClose }: {
         {!usesGitHub && form.repositoryRemoteUrl && !isPublicGitUrl(form.repositoryRemoteUrl) && <p className="provider-status">Custom URL supports public HTTP(S) clone URLs only in v1.</p>}
         <div className="modal-actions">
           <button className="primary-action" disabled={!canCreate}><Plus size={16} />Create board</button>
+          <button className="secondary" type="button" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </ModalFrame>
+  );
+}
+
+function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegrations, onSync, onClose }: {
+  board: Board;
+  repositories: RepositoryDto[];
+  settings: SettingsDto;
+  githubIntegrations: GitHubIntegrationDto[];
+  onSync: (request: SyncBoardRepositoryRequest) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [mode, setMode] = React.useState<'existing' | 'create'>('existing');
+  const [availableRepos, setAvailableRepos] = React.useState<RepositoryDto[]>(repositories.filter((repository) => repository.provider === 'GitHub'));
+  const [pickerStatus, setPickerStatus] = React.useState<'idle' | 'loading' | 'error'>('idle');
+  const [pickerMessage, setPickerMessage] = React.useState<string | null>(null);
+  const [selectedRepoKey, setSelectedRepoKey] = React.useState('');
+  const [newRepoName, setNewRepoName] = React.useState(slugFromText(board.name));
+  const [description, setDescription] = React.useState(`Repository for ${board.name}.`);
+  const [isPrivate, setIsPrivate] = React.useState(true);
+  const [implementationProfile, setImplementationProfile] = React.useState('code-repo');
+  const installationId = githubIntegrations[0]?.installationId ?? null;
+
+  React.useEffect(() => {
+    let cancelled = false;
+    async function loadPicker() {
+      setPickerStatus('loading');
+      setPickerMessage(null);
+      try {
+        const result = await api.get<GitHubRepositoryPickerDto>('/api/integrations/github/repository-picker', { timeoutMs: 15000 });
+        if (cancelled) return;
+        const merged = [...repositories.filter((repository) => repository.provider === 'GitHub'), ...(result.repositories ?? [])];
+        setAvailableRepos(uniqueRepositories(merged));
+        setPickerStatus(result.status.toLowerCase() === 'error' ? 'error' : 'idle');
+        setPickerMessage(result.message ?? null);
+      } catch (error) {
+        if (!cancelled) {
+          setPickerStatus('error');
+          setPickerMessage(error instanceof Error ? error.message : 'Could not load GitHub repositories');
+        }
+      }
+    }
+
+    if (settings.gitHub.connected || settings.gitHub.appConfigured) {
+      void loadPicker();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [repositories, settings.gitHub.appConfigured, settings.gitHub.connected]);
+
+  const selectedRepo = availableRepos.find((repository) => repositoryKey(repository) === selectedRepoKey) ?? null;
+  const canSync = mode === 'create'
+    ? newRepoName.trim().length > 0 && settings.repositories.canCreateRepositories
+    : !!selectedRepo;
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!canSync) return;
+    if (mode === 'create') {
+      await onSync({
+        createNew: true,
+        name: newRepoName.trim(),
+        description,
+        private: isPrivate,
+        installationId,
+        implementationProfile
+      });
+      return;
+    }
+
+    await onSync({
+      createNew: false,
+      repositoryId: selectedRepo?.id && selectedRepo.id !== '00000000-0000-0000-0000-000000000000' ? selectedRepo.id : null,
+      owner: selectedRepo?.owner ?? null,
+      name: selectedRepo?.name ?? null,
+      remoteUrl: selectedRepo?.remoteUrl ?? null,
+      webUrl: selectedRepo?.webUrl ?? null,
+      defaultBranch: selectedRepo?.defaultBranch ?? 'main',
+      implementationProfile
+    });
+  }
+
+  return (
+    <ModalFrame title="Sync board to GitHub" onClose={onClose}>
+      <form className="create-form" onSubmit={(event) => void submit(event)}>
+        <div className="sync-mode-tabs" role="tablist" aria-label="Repository sync mode">
+          <button type="button" className={mode === 'existing' ? 'secondary active-filter' : 'secondary'} onClick={() => setMode('existing')}><Github size={16} />Link existing</button>
+          <button type="button" className={mode === 'create' ? 'secondary active-filter' : 'secondary'} onClick={() => setMode('create')}><Plus size={16} />Create private repo</button>
+        </div>
+        {mode === 'existing' ? (
+          <div className="form-grid two">
+            <label className="full-width">GitHub repository<select value={selectedRepoKey} onChange={(event) => setSelectedRepoKey(event.target.value)}>
+              <option value="">{pickerStatus === 'loading' ? 'Loading repositories...' : 'Select repository...'}</option>
+              {availableRepos.map((repository) => <option key={repositoryKey(repository)} value={repositoryKey(repository)}>{repositoryLabel(repository)} - {repository.defaultBranch}</option>)}
+            </select></label>
+            <label>Implementation profile<select value={implementationProfile} onChange={(event) => setImplementationProfile(event.target.value)}>
+              <option value="code-repo">Code repo</option>
+              <option value="gitops-homelab">GitOps homelab</option>
+              <option value="unity">Unity</option>
+              <option value="react-preview">React preview</option>
+            </select></label>
+          </div>
+        ) : (
+          <div className="form-grid two">
+            <label>Name<input value={newRepoName} onChange={(event) => setNewRepoName(slugFromText(event.target.value))} /></label>
+            <label>Visibility<select value={isPrivate ? 'private' : 'public'} onChange={(event) => setIsPrivate(event.target.value === 'private')}>
+              <option value="private">Private</option>
+              <option value="public">Public</option>
+            </select></label>
+            <label className="full-width">Description<input value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+            <label>Implementation profile<select value={implementationProfile} onChange={(event) => setImplementationProfile(event.target.value)}>
+              <option value="code-repo">Code repo</option>
+              <option value="gitops-homelab">GitOps homelab</option>
+              <option value="unity">Unity</option>
+              <option value="react-preview">React preview</option>
+            </select></label>
+          </div>
+        )}
+        {pickerMessage && <p className={pickerStatus === 'error' ? 'failure-reason' : 'provider-status'}>{pickerMessage}</p>}
+        {mode === 'create' && !settings.repositories.canCreateRepositories && <p className="failure-reason">GitHub repository creation is not enabled for the current installation.</p>}
+        <div className="modal-actions">
+          <button className="primary-action" disabled={!canSync}><Github size={16} />Sync to GitHub</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -3366,8 +3607,26 @@ function timelineBucket(kind: string) {
   const normalized = kind.toLowerCase();
   if (normalized.includes('preview')) return 'Previews';
   if (normalized.includes('pipeline')) return 'Pipelines';
-  if (normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return 'Git';
+  if (normalized.includes('cleanup') || normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return 'Git';
   return 'Cards';
+}
+
+function timelineClass(kind: string) {
+  const normalized = kind.toLowerCase();
+  if (normalized.includes('cleanup')) return 'timeline-cleanup';
+  if (normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return 'timeline-git';
+  if (normalized.includes('preview')) return 'timeline-preview';
+  if (normalized.includes('pipeline')) return 'timeline-pipeline';
+  return 'timeline-card';
+}
+
+function timelineIcon(kind: string) {
+  const normalized = kind.toLowerCase();
+  if (normalized.includes('cleanup')) return <Trash2 size={15} />;
+  if (normalized.includes('pullrequest') || normalized.includes('commit') || normalized.includes('branch')) return <GitPullRequest size={15} />;
+  if (normalized.includes('preview')) return <ExternalLink size={15} />;
+  if (normalized.includes('pipeline')) return <Activity size={15} />;
+  return <PanelLeft size={15} />;
 }
 
 function moveCardInBoard(board: Board, id: string, status: string, sortOrder: number): Board {
@@ -3466,6 +3725,25 @@ function webUrlFromRemote(remoteUrl: string) {
 
 function repositoryLabel(repository: RepositoryDto) {
   return repository.owner ? `${repository.owner}/${repository.name}` : repository.name;
+}
+
+function repositoryKey(repository: RepositoryDto) {
+  return `${repository.owner ?? ''}/${repository.name}/${repository.remoteUrl}`;
+}
+
+function uniqueRepositories(repositories: RepositoryDto[]) {
+  const seen = new Set<string>();
+  return repositories.filter((repository) => {
+    const key = `${repository.owner ?? ''}/${repository.name}`.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((left, right) => repositoryLabel(left).localeCompare(repositoryLabel(right)));
+}
+
+function slugFromText(value: string) {
+  const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').replace(/--+/g, '-');
+  return slug || 'new-board';
 }
 
 function boardRepositorySummary(board: Board) {
