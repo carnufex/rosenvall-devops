@@ -34,12 +34,6 @@ export type TimelineFlowRow = {
   nodes: TimelineFlowNode[];
 };
 
-export type TimelineFlowNodeCluster = {
-  visibleNodes: TimelineFlowNode[];
-  hiddenCount: number;
-  expanded: boolean;
-};
-
 export const timelineLanes: TimelineLane[] = ['Card', 'Implementation PR', 'Cleanup', 'Preview', 'Pipeline'];
 
 export function boardSyncLabel(board: BoardChromeBoard): string {
@@ -106,18 +100,6 @@ export function filterTimelineFlowRows(rows: TimelineFlowRow[], query: string): 
 export function containedWheelScrollTop(currentScrollTop: number, deltaY: number, maxScrollTop: number): number {
   if (maxScrollTop <= 0) return currentScrollTop;
   return Math.min(Math.max(currentScrollTop + deltaY, 0), maxScrollTop);
-}
-
-export function clusterTimelineFlowNodes(nodes: TimelineFlowNode[], expanded: boolean, maxVisible = 5): TimelineFlowNodeCluster {
-  if (expanded || nodes.length <= maxVisible) {
-    return { visibleNodes: nodes, hiddenCount: 0, expanded };
-  }
-
-  return {
-    visibleNodes: nodes.slice(0, Math.max(maxVisible - 1, 1)),
-    hiddenCount: nodes.length - Math.max(maxVisible - 1, 1),
-    expanded: false
-  };
 }
 
 function taskKeyFromTimelineEvent(event: TimelineChromeEvent): string | null {

@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, clusterTimelineFlowNodes, containedWheelScrollTop, filterTimelineFlowRows, timelineLanes, type TimelineFlowNode, type TimelineLane } from './boardChrome';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -1664,21 +1664,27 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
 }) {
   const rows = buildTimelineFlow(events);
   const [query, setQuery] = React.useState('');
-  const [expandedClusters, setExpandedClusters] = React.useState<Set<string>>(() => new Set());
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
+  const railDragRef = React.useRef<{
+    rail: HTMLDivElement;
+    pointerId: number;
+    startX: number;
+    startScrollLeft: number;
+    dragging: boolean;
+  } | null>(null);
+  const suppressRailClickUntil = React.useRef(0);
   const visibleRows = filterTimelineFlowRows(rows, query);
-  const toggleCluster = (clusterId: string) => {
-    setExpandedClusters((current) => {
-      const next = new Set(current);
-      if (next.has(clusterId)) {
-        next.delete(clusterId);
-      } else {
-        next.add(clusterId);
-      }
-      return next;
-    });
-  };
   const handleWheel = (event: React.WheelEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement | null;
+    const rail = target?.closest('.timeline-flow-rail') as HTMLDivElement | null;
+    if (rail && (Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.shiftKey)) {
+      const delta = event.shiftKey && event.deltaX === 0 ? event.deltaY : event.deltaX;
+      if (delta !== 0 && rail.scrollWidth > rail.clientWidth) {
+        event.preventDefault();
+        rail.scrollLeft += delta;
+      }
+      return;
+    }
     if (event.deltaY === 0) return;
     const body = bodyRef.current;
     if (!body) return;
@@ -1686,6 +1692,44 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
     if (maxScrollTop <= 0) return;
     event.preventDefault();
     body.scrollTop = containedWheelScrollTop(body.scrollTop, event.deltaY, maxScrollTop);
+  };
+  const handleRailPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const rail = event.currentTarget;
+    if (rail.scrollWidth <= rail.clientWidth) return;
+    railDragRef.current = {
+      rail,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: rail.scrollLeft,
+      dragging: false
+    };
+    rail.setPointerCapture(event.pointerId);
+  };
+  const handleRailPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const state = railDragRef.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    const delta = event.clientX - state.startX;
+    if (Math.abs(delta) > 3) {
+      state.dragging = true;
+      state.rail.classList.add('dragging');
+      event.preventDefault();
+    }
+    if (state.dragging) {
+      state.rail.scrollLeft = state.startScrollLeft - delta;
+    }
+  };
+  const handleRailPointerEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    const state = railDragRef.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    if (state.dragging) {
+      suppressRailClickUntil.current = Date.now() + 180;
+    }
+    state.rail.classList.remove('dragging');
+    if (state.rail.hasPointerCapture(event.pointerId)) {
+      state.rail.releasePointerCapture(event.pointerId);
+    }
+    railDragRef.current = null;
   };
   return (
     <section className="panel timeline-flow-panel" aria-label="Timeline flow graph" onWheel={handleWheel}>
@@ -1700,80 +1744,44 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
         </label>
       </div>
       <div className="timeline-flow-scroll">
-        <div className="timeline-flow-head">
-          <div />
-          {timelineLanes.map((lane) => <span key={lane}>{lane}</span>)}
-        </div>
         <div className="timeline-flow-body" ref={bodyRef}>
           {rows.length > 0 && visibleRows.length === 0 && <EmptyState>No matching flow rows.</EmptyState>}
-          {visibleRows.map((row) => {
-            const expandedLaneDetails = timelineLanes
-              .map((lane) => {
-                const clusterId = `${row.id}:${lane}`;
-                const laneNodes = row.nodes.filter((node) => node.lane === lane);
-                return expandedClusters.has(clusterId) && laneNodes.length > 0 ? { clusterId, lane, laneNodes } : null;
-              })
-              .filter((entry): entry is { clusterId: string; lane: TimelineLane; laneNodes: TimelineFlowNode[] } => entry !== null);
-            return (
-              <div className={expandedLaneDetails.length > 0 ? 'timeline-flow-row expanded' : 'timeline-flow-row'} key={row.id}>
-                <div className="timeline-flow-title" title={row.taskKey ? `${row.topic} ${row.taskKey}` : row.topic}>
-                  <strong>{row.topic}</strong>
-                  {row.taskKey && <span>{row.taskKey}</span>}
-                </div>
-                <div className="timeline-flow-track">
-                  {timelineLanes.map((lane) => {
-                    const clusterId = `${row.id}:${lane}`;
-                    const laneNodes = row.nodes.filter((node) => node.lane === lane);
-                    const maxVisibleNodes = lane === 'Implementation PR' ? 7 : 5;
-                    const cluster = clusterTimelineFlowNodes(laneNodes, false, maxVisibleNodes);
-                    return (
-                      <div className="timeline-flow-cell" key={lane}>
-                        {cluster.visibleNodes.map((node) => (
-                          <button
-                            className={`timeline-flow-node ${timelineFlowClass(node.lane, node.kind)} ${selectedEventId === node.id ? 'selected' : ''}`}
-                            key={node.id}
-                            onClick={() => onSelect(node.id)}
-                            type="button"
-                            title={`${node.kind}: ${node.title}`}
-                            aria-label={`${node.kind}: ${node.title}`}
-                          >
-                            {timelineFlowIcon(node.lane, node.kind)}
-                          </button>
-                        ))}
-                        {cluster.hiddenCount > 0 && (
-                          <button className="timeline-flow-cluster" type="button" onClick={() => toggleCluster(clusterId)} title={`Show ${cluster.hiddenCount} more ${lane} events`}>
-                            +{cluster.hiddenCount}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                {expandedLaneDetails.map(({ clusterId, lane, laneNodes }) => (
-                  <div className="timeline-flow-expanded" key={clusterId}>
-                    <div className="timeline-flow-expanded-head">
-                      <strong>{lane}</strong>
-                      <span>{laneNodes.length} events for {row.taskKey ?? row.topic}</span>
-                      <button className="timeline-flow-expanded-close" type="button" onClick={() => toggleCluster(clusterId)}>Collapse</button>
-                    </div>
-                    <div className="timeline-flow-expanded-events">
-                      {laneNodes.map((node) => (
-                        <button
-                          className={`timeline-flow-expanded-event ${selectedEventId === node.id ? 'selected' : ''}`}
-                          key={node.id}
-                          onClick={() => onSelect(node.id)}
-                          type="button"
-                        >
-                          <span className={`timeline-flow-node mini ${timelineFlowClass(node.lane, node.kind)}`}>{timelineFlowIcon(node.lane, node.kind)}</span>
-                          <span>{node.kind}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+          {visibleRows.map((row) => (
+            <div className="timeline-flow-row" key={row.id}>
+              <div className="timeline-flow-title" title={row.taskKey ? `${row.topic} ${row.taskKey}` : row.topic}>
+                <strong>{row.topic}</strong>
+                {row.taskKey && <span>{row.taskKey}</span>}
               </div>
-            );
-          })}
+              <div
+                className="timeline-flow-rail"
+                onPointerCancel={handleRailPointerEnd}
+                onPointerDown={handleRailPointerDown}
+                onPointerMove={handleRailPointerMove}
+                onPointerUp={handleRailPointerEnd}
+              >
+                <div className="timeline-flow-rail-inner" style={{ minWidth: `max(100%, ${Math.max(row.nodes.length * 48, 320)}px)` }}>
+                  {row.nodes.map((node) => (
+                    <button
+                      className={`timeline-flow-node ${timelineFlowClass(node.lane, node.kind)} ${selectedEventId === node.id ? 'selected' : ''}`}
+                      key={node.id}
+                      onClick={(event) => {
+                        if (Date.now() < suppressRailClickUntil.current) {
+                          event.preventDefault();
+                          return;
+                        }
+                        onSelect(node.id);
+                      }}
+                      type="button"
+                      title={`${node.kind}: ${node.title}`}
+                      aria-label={`${node.kind}: ${node.title}`}
+                    >
+                      {timelineFlowIcon(node.lane, node.kind)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
           {rows.length === 0 && <EmptyState>No flow events for this filter.</EmptyState>}
         </div>
       </div>
