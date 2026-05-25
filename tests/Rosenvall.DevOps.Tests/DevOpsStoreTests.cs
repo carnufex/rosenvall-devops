@@ -2563,6 +2563,34 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Codex_preview_source_provider_uses_workspace_sandbox_by_default()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+        var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "sandboxed preview", "Generate a preview safely.", "Todo", "Medium", null));
+        var run = fixture.Store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build the preview.")!;
+        run.Approve("crille");
+        var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+        var argsCapture = Path.Combine(Path.GetTempPath(), $"codex-args-{Guid.NewGuid():N}.txt");
+        var fakeCodex = CreateFakeCodexImplementationScript(0, "export default function App() { return <main>Sandboxed</main>; }", argsCapture);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:Path"] = fakeCodex,
+                ["Ai:Codex:Home"] = Path.Combine(Path.GetTempPath(), $"codex-home-{Guid.NewGuid():N}")
+            })
+            .Build();
+        var provider = new CodexCliPreviewSourceProvider(configuration, NullLogger<CodexCliPreviewSourceProvider>.Instance);
+
+        await provider.GenerateSourceAsync("gpt-5.4", run, context, null, CancellationToken.None);
+
+        var args = await File.ReadAllTextAsync(argsCapture);
+        Assert.Contains("--sandbox", args);
+        Assert.Contains("workspace-write", args);
+        Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", args);
+    }
+
+    [Fact]
     public async Task Codex_preview_source_provider_rejects_unchanged_seed_placeholder()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -2897,14 +2925,18 @@ exit /b {exitCode}
         return scriptPath;
     }
 
-    private static string CreateFakeCodexImplementationScript(int exitCode, string appSource)
+    private static string CreateFakeCodexImplementationScript(int exitCode, string appSource, string? argsCapturePath = null)
     {
         if (!OperatingSystem.IsWindows())
         {
             var unixScriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-implementation-{Guid.NewGuid():N}.sh");
             var escapedAppSource = appSource.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+            var argsCapture = string.IsNullOrWhiteSpace(argsCapturePath)
+                ? ""
+                : $"printf '%s\\n' \"$*\" > '{argsCapturePath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
             File.WriteAllText(unixScriptPath, $$"""
 #!/usr/bin/env sh
+{{argsCapture}}
 mkdir -p src
 printf '%s\n' '{{escapedAppSource}}' > src/App.tsx
 exit {{exitCode}}
@@ -2920,8 +2952,10 @@ exit {{exitCode}}
             .Replace("<", "^<", StringComparison.Ordinal)
             .Replace(">", "^>", StringComparison.Ordinal)
             .Replace("|", "^|", StringComparison.Ordinal);
+        var argsCaptureCommand = string.IsNullOrWhiteSpace(argsCapturePath) ? "" : $"echo %* > \"{argsCapturePath}\"";
         File.WriteAllText(scriptPath, $"""
 @echo off
+{argsCaptureCommand}
 if not exist src mkdir src
 > src\App.tsx echo {escapedSource}
 exit /b {exitCode}

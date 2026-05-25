@@ -5912,7 +5912,7 @@ namespace Rosenvall.DevOps.Api
             startInfo.ArgumentList.Add("--skip-git-repo-check");
             startInfo.ArgumentList.Add("-C");
             startInfo.ArgumentList.Add(workspacePath);
-            if (configuration.GetValue("Ai:Codex:ImplementationBypassSandbox", OperatingSystem.IsWindows()))
+            if (configuration.GetValue("Ai:Codex:ImplementationBypassSandbox", false))
             {
                 startInfo.ArgumentList.Add("--dangerously-bypass-approvals-and-sandbox");
             }
