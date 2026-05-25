@@ -1355,6 +1355,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("sort -u > \"$workspace/changed-files.txt\"", manifest);
         Assert.Contains("if [ ! -s \"$workspace/changed-files.txt\" ]; then echo \"RDO_FAILURE=No changes produced\"; exit 20; fi", manifest);
         Assert.Contains("if [ -s \"$workspace/uncommitted-files.txt\" ]; then", manifest);
+        Assert.Contains("json_escape() {", manifest);
+        Assert.Contains("ROSENVALL_WORK_ITEM_TITLE", manifest);
+        Assert.Contains("git commit -m \"$commit_title\"", manifest);
+        Assert.Contains("pr_payload=\"{\\\"title\\\":\\\"$pr_title\\\"", manifest);
         Assert.Contains("No uncommitted changes remain; using existing branch commits.", manifest);
         Assert.Contains("curl -fsS -G \"https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
         Assert.Contains("--data-urlencode \"head=$repo_owner:$ROSENVALL_BRANCH\"", manifest);
@@ -1461,6 +1465,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("curl -fsS -G \"https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
         Assert.Contains("--data-urlencode \"head=$repo_owner:$ROSENVALL_BRANCH\"", manifest);
         Assert.Contains("if [ -n \"$existing_pr_url\" ]; then", manifest);
+        Assert.Contains("json_escape() {", manifest);
+        Assert.Contains("ROSENVALL_WORK_ITEM_TITLE", manifest);
+        Assert.Contains("git commit -m \"$cleanup_title\"", manifest);
+        Assert.Contains("pr_payload=\"{\\\"title\\\":\\\"$pr_title\\\"", manifest);
         Assert.Contains("RDO_CLEANUP_PULL_REQUEST_URL=", manifest);
         Assert.True(manifest.IndexOf("RDO_STEP=PullRequestReady", StringComparison.Ordinal) < manifest.IndexOf("RDO_CLEANUP_PULL_REQUEST_URL=$pr_url", StringComparison.Ordinal));
         Assert.Contains("github-token-cleanup", manifest);
