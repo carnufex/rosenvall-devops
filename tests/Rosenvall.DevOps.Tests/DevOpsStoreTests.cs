@@ -1032,6 +1032,8 @@ public sealed class DevOpsStoreTests
         Assert.False(store.CanViewWorkItem(item.Id, guest.Subject));
         Assert.True(store.CanCreateRepository(owner.Subject));
         Assert.False(store.CanCreateRepository(guest.Subject));
+        Assert.Contains(store.GetWorkspaces(owner.Subject), entry => entry.Id == workspace.Id);
+        Assert.DoesNotContain(store.GetWorkspaces(guest.Subject), entry => entry.Id == workspace.Id);
         Assert.Contains(store.GetBoards(workspace.Id, owner.Subject), entry => entry.Id == board.Id);
         Assert.DoesNotContain(store.GetBoards(workspace.Id, guest.Subject), entry => entry.Id == board.Id);
         Assert.Contains(store.GetWorkItems(owner.Subject), entry => entry.Id == item.Id);

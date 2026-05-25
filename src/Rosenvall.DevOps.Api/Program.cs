@@ -163,7 +163,7 @@ if (!string.IsNullOrWhiteSpace(authority))
     api.RequireAuthorization();
 }
 
-api.MapGet("/workspaces", (DevOpsStore store) => store.GetWorkspaces());
+api.MapGet("/workspaces", (ClaimsPrincipal user, DevOpsStore store) => store.GetWorkspaces(AuthenticatedSubjectOrNull(user)));
 api.MapPost("/workspaces", async (CreateWorkspaceRequest request, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
     var workspace = store.CreateWorkspace(request.Name, request.EnvironmentName, request.Region);
@@ -6128,15 +6128,27 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public IReadOnlyList<WorkspaceDto> GetWorkspaces()
+        public IReadOnlyList<WorkspaceDto> GetWorkspaces(string? actorSubject = null)
         {
             lock (_lock)
             {
-                var items = _items.ToArray();
+                var visibleBoardIds = string.IsNullOrWhiteSpace(actorSubject) ? null : VisibleBoardIdsWithoutLock(actorSubject);
+                var workspaces = _workspaces.AsEnumerable();
+                if (visibleBoardIds is not null)
+                {
+                    workspaces = workspaces.Where(workspace => _boards.Any(board => board.WorkspaceId == workspace.Id && visibleBoardIds.Contains(board.Id)));
+                }
+
+                var items = _items
+                    .Where(item => visibleBoardIds is null || visibleBoardIds.Contains(item.BoardId))
+                    .ToArray();
                 var activeAi = items.Count(item => item.AiStatus is "Planning" or "ImplementationRunning");
-                var openPrs = _development.Count(development => !string.IsNullOrWhiteSpace(development.Development.PullRequestUrl) && development.Development.PullRequestApprovedAt is null);
+                var openPrs = _development.Count(development =>
+                    !string.IsNullOrWhiteSpace(development.Development.PullRequestUrl) &&
+                    development.Development.PullRequestApprovedAt is null &&
+                    _items.Any(item => item.Id == development.WorkItemId && (visibleBoardIds is null || visibleBoardIds.Contains(item.BoardId))));
                 var completed = items.Count(item => string.Equals(item.AiStatus, "Completed", StringComparison.OrdinalIgnoreCase));
-                return _workspaces
+                return workspaces
                     .Select(workspace => workspace with
                     {
                         ActiveProjects = items.Length,
