@@ -1180,11 +1180,23 @@ api.MapGet("/pipelines", (ClaimsPrincipal user, DevOpsStore store) => store.GetP
 api.MapGet("/metrics", (Guid? boardId, DevOpsStore store) => store.GetMetrics(boardId));
 api.MapGet("/assignees", (Guid? boardId, DevOpsStore store, IConfiguration configuration) => store.GetAssignees(boardId, configuration));
 
-api.MapPost("/pipeline-runs", (RecordPipelineRunRequest request, DevOpsStore store) =>
-    store.RecordPipelineRun(request) is { } run ? Results.Created($"/api/pipeline-runs/{run.Id}", run) : Results.NotFound());
-
-api.MapPost("/pipeline-runs/{pipelineRunId:guid}/execute", async (Guid pipelineRunId, ExecutePipelineRunRequest request, DevOpsStore store, PipelineJobOrchestrator jobs, CancellationToken cancellationToken) =>
+api.MapPost("/pipeline-runs", (RecordPipelineRunRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
+    if (!CanRecordPipelineRunRequest(store, request, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.RecordPipelineRun(request) is { } run ? Results.Created($"/api/pipeline-runs/{run.Id}", run) : Results.NotFound();
+});
+
+api.MapPost("/pipeline-runs/{pipelineRunId:guid}/execute", async (Guid pipelineRunId, ExecutePipelineRunRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, CancellationToken cancellationToken) =>
+{
+    if (!CanMutatePipelineRunRequest(store, pipelineRunId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
     var manifest = store.RenderPipelineJobManifest(pipelineRunId);
     if (manifest is null)
     {
@@ -1380,6 +1392,12 @@ static bool CanViewImplementationRunRequest(DevOpsStore store, Guid implementati
 
 static bool CanViewPipelineRunRequest(DevOpsStore store, Guid pipelineRunId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanViewPipelineRun(pipelineRunId, UserIdentityFromClaims(user).Subject);
+
+static bool CanRecordPipelineRunRequest(DevOpsStore store, RecordPipelineRunRequest request, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanRecordPipelineRun(request, UserIdentityFromClaims(user).Subject);
+
+static bool CanMutatePipelineRunRequest(DevOpsStore store, Guid pipelineRunId, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanMutatePipelineRun(pipelineRunId, UserIdentityFromClaims(user).Subject);
 
 static bool CanViewTeamRequest(DevOpsStore store, Guid teamId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanViewTeam(teamId, UserIdentityFromClaims(user).Subject);
@@ -6237,25 +6255,7 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
-                var user = _users.SingleOrDefault(entry => entry.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
-                if (user is null)
-                {
-                    return !HasAnyTeamOrAccess();
-                }
-
-                if (_boardAccess.Any(access => access.BoardId == boardId && access.UserId == user.Id && IsMutatingRole(access.Role)))
-                {
-                    return true;
-                }
-
-                return _boardTeamAccess.Any(access =>
-                {
-                    var team = _teams.SingleOrDefault(entry => entry.Id == access.TeamId);
-                    var member = team?.Members.SingleOrDefault(entry => entry.UserId == user.Id);
-                    return access.BoardId == boardId &&
-                        member is not null &&
-                        IsMutatingRole(MostRestrictiveRole(access.Role, member.Role));
-                });
+                return CanMutateBoardWithoutLock(boardId, actorSubject);
             }
         }
 
@@ -6329,6 +6329,38 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 return VisibleRepositoryIdsWithoutLock(actorSubject).Contains(run.RepositoryId);
+            }
+        }
+
+        public bool CanRecordPipelineRun(RecordPipelineRunRequest request, string actorSubject)
+        {
+            lock (_lock)
+            {
+                if (!TryResolvePipelineRunTargetWithoutLock(request.RepositoryId, request.BoardId, request.WorkItemId, out var boardId))
+                {
+                    return false;
+                }
+
+                return boardId is { } id
+                    ? CanMutateBoardWithoutLock(id, actorSubject)
+                    : CanMutateRepositoryOnlyPipelineWithoutLock(request.RepositoryId, actorSubject);
+            }
+        }
+
+        public bool CanMutatePipelineRun(Guid pipelineRunId, string actorSubject)
+        {
+            lock (_lock)
+            {
+                var run = _pipelineRuns.SingleOrDefault(entry => entry.Id == pipelineRunId);
+                if (run is null ||
+                    !TryResolvePipelineRunTargetWithoutLock(run.RepositoryId, run.BoardId, run.WorkItemId, out var boardId))
+                {
+                    return false;
+                }
+
+                return boardId is { } id
+                    ? CanMutateBoardWithoutLock(id, actorSubject)
+                    : CanMutateRepositoryOnlyPipelineWithoutLock(run.RepositoryId, actorSubject);
             }
         }
 
@@ -7116,7 +7148,7 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
-                if (_repositories.All(repository => repository.Id != request.RepositoryId))
+                if (!TryResolvePipelineRunTargetWithoutLock(request.RepositoryId, request.BoardId, request.WorkItemId, out var boardId))
                 {
                     return null;
                 }
@@ -7125,7 +7157,7 @@ namespace Rosenvall.DevOps.Api
                 var run = new PipelineRunDto(
                     Guid.NewGuid(),
                     request.RepositoryId,
-                    request.BoardId,
+                    boardId,
                     request.WorkItemId,
                     NormalizeText(request.Stage, "Pipeline"),
                     NormalizeText(request.Status, "Running"),
@@ -9018,6 +9050,34 @@ namespace Rosenvall.DevOps.Api
 
         private bool HasAnyTeamOrAccess() => _teams.Count > 0 || _boardAccess.Count > 0 || _boardTeamAccess.Count > 0;
 
+        private bool CanMutateBoardWithoutLock(Guid boardId, string actorSubject)
+        {
+            if (_boards.All(board => board.Id != boardId))
+            {
+                return false;
+            }
+
+            var user = _users.SingleOrDefault(entry => entry.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+            if (user is null)
+            {
+                return !HasAnyTeamOrAccess();
+            }
+
+            if (_boardAccess.Any(access => access.BoardId == boardId && access.UserId == user.Id && IsMutatingRole(access.Role)))
+            {
+                return true;
+            }
+
+            return _boardTeamAccess.Any(access =>
+            {
+                var team = _teams.SingleOrDefault(entry => entry.Id == access.TeamId);
+                var member = team?.Members.SingleOrDefault(entry => entry.UserId == user.Id);
+                return access.BoardId == boardId &&
+                    member is not null &&
+                    IsMutatingRole(MostRestrictiveRole(access.Role, member.Role));
+            });
+        }
+
         private bool CanViewBoardWithoutLock(Guid boardId, string actorSubject)
         {
             if (_boards.All(board => board.Id != boardId))
@@ -9069,6 +9129,53 @@ namespace Rosenvall.DevOps.Api
 
             return repositoryIds;
         }
+
+        private bool TryResolvePipelineRunTargetWithoutLock(Guid repositoryId, Guid? boardId, Guid? workItemId, out Guid? targetBoardId)
+        {
+            targetBoardId = null;
+            if (_repositories.All(repository => repository.Id != repositoryId))
+            {
+                return false;
+            }
+
+            if (workItemId is { } id)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == id);
+                if (item is null || (boardId is { } explicitBoardId && explicitBoardId != item.BoardId))
+                {
+                    return false;
+                }
+
+                targetBoardId = item.BoardId;
+                return IsPipelineRepositoryAllowedForBoardWithoutLock(item.BoardId, repositoryId);
+            }
+
+            if (boardId is { } runBoardId)
+            {
+                if (_boards.All(board => board.Id != runBoardId))
+                {
+                    return false;
+                }
+
+                targetBoardId = runBoardId;
+                return IsPipelineRepositoryAllowedForBoardWithoutLock(runBoardId, repositoryId);
+            }
+
+            return true;
+        }
+
+        private bool IsPipelineRepositoryAllowedForBoardWithoutLock(Guid boardId, Guid repositoryId) =>
+            RepositoryIdForBoard(boardId) == repositoryId ||
+            BoardRepositoriesFor(boardId).Any(link => link.RepositoryId == repositoryId) ||
+            (RepositoryIdForBoard(boardId) is null && IsLocalPreviewRepository(repositoryId));
+
+        private bool IsLocalPreviewRepository(Guid repositoryId) =>
+            _repositories.Any(repository =>
+                repository.Id == repositoryId &&
+                repository.Name.Equals("local/vite-react-tailwind", StringComparison.OrdinalIgnoreCase));
+
+        private bool CanMutateRepositoryOnlyPipelineWithoutLock(Guid repositoryId, string actorSubject) =>
+            !HasAnyTeamOrAccess() || VisibleRepositoryIdsWithoutLock(actorSubject).Contains(repositoryId);
 
         private static bool CanUseGitHubIntegrationWithoutLock(GitHubIntegrationDto integration, string? actorSubject) =>
             string.IsNullOrWhiteSpace(actorSubject) ||

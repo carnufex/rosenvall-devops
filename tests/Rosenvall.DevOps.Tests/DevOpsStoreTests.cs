@@ -352,6 +352,36 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Pipeline_runs_validate_board_repository_work_item_and_authorization_scope()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repositoryA = store.CreateRepository(new CreateRepositoryRequest("GitHub", "org/app-a", "https://github.com/org/app-a.git", "main", "https://github.com/org/app-a"));
+        var repositoryB = store.CreateRepository(new CreateRepositoryRequest("GitHub", "org/app-b", "https://github.com/org/app-b.git", "main", "https://github.com/org/app-b"));
+        var boardA = store.CreateBoard(workspace.Id, new CreateBoardRequest("App A", repositoryA.Id, null, null, null, null, null))!;
+        var boardB = store.CreateBoard(workspace.Id, new CreateBoardRequest("App B", repositoryB.Id, null, null, null, null, null))!;
+        var itemA = store.CreateWorkItem(new CreateWorkItemRequest(boardA.Id, "Feature", "Build A", "Run scoped build.", "Todo", "Medium", null))!;
+        var validRequest = new RecordPipelineRunRequest(repositoryA.Id, boardA.Id, itemA.Id, "Build", "Queued", "Build A");
+
+        var run = store.RecordPipelineRun(validRequest);
+
+        Assert.NotNull(run);
+        Assert.Null(store.RecordPipelineRun(new RecordPipelineRunRequest(repositoryB.Id, boardA.Id, itemA.Id, "Build", "Queued", "Wrong repository")));
+        Assert.Null(store.RecordPipelineRun(new RecordPipelineRunRequest(repositoryA.Id, boardB.Id, itemA.Id, "Build", "Queued", "Wrong board")));
+
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var guest = store.GetOrCreateUser(new UserIdentityRequest("authentik|guest", "Guest", "guest@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("App A team"), owner.Subject);
+        store.UpsertBoardTeamAccess(boardA.Id, team.Id, "Member");
+
+        Assert.True(store.CanRecordPipelineRun(validRequest, owner.Subject));
+        Assert.False(store.CanRecordPipelineRun(validRequest, guest.Subject));
+        Assert.True(store.CanMutatePipelineRun(run.Id, owner.Subject));
+        Assert.False(store.CanMutatePipelineRun(run.Id, guest.Subject));
+    }
+
+    [Fact]
     public void Settings_expose_forgejo_authentik_and_repository_policy()
     {
         using var fixture = DevOpsStoreFixture.Create();
