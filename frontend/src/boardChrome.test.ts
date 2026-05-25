@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, timelineLaneForKind } from './boardChrome.ts';
+import { boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, clusterTimelineFlowNodes, containedWheelScrollTop, filterTimelineFlowRows, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -78,4 +78,24 @@ test('contained wheel scroll clamps inside flow list bounds', () => {
   assert.equal(containedWheelScrollTop(230, 40, 240), 240);
   assert.equal(containedWheelScrollTop(10, -40, 240), 0);
   assert.equal(containedWheelScrollTop(10, 40, 0), 10);
+});
+
+test('timeline flow node clustering keeps dense lanes compact until expanded', () => {
+  const rows = buildTimelineFlow(Array.from({ length: 8 }, (_, index) => ({
+    id: `event-${index}`,
+    workItemId: 'task-4825',
+    kind: index % 2 === 0 ? 'ImplementationRunQueued' : 'ImplementationFailed',
+    title: 'TASK-4825',
+    message: 'Repository implementation event.',
+    createdAt: `2026-05-25T10:0${index}:00Z`
+  })));
+  const nodes = rows[0].nodes;
+
+  const collapsed = clusterTimelineFlowNodes(nodes, false, 5);
+  const expanded = clusterTimelineFlowNodes(nodes, true, 5);
+
+  assert.equal(collapsed.visibleNodes.length, 4);
+  assert.equal(collapsed.hiddenCount, 4);
+  assert.equal(expanded.visibleNodes.length, 8);
+  assert.equal(expanded.hiddenCount, 0);
 });
