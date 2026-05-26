@@ -809,6 +809,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("namespace: rosenvall-devops", manifest);
         Assert.Contains("automountServiceAccountToken: false", manifest);
         Assert.Contains("initContainers:", manifest);
+        Assert.Contains("affinity:", manifest);
+        Assert.Contains("podAffinity:", manifest);
+        Assert.Contains("app.kubernetes.io/name: rosenvall-devops-api", manifest);
+        Assert.Contains("topologyKey: kubernetes.io/hostname", manifest);
         Assert.Contains("name: prepare-codex-home", manifest);
         Assert.Contains("name: codex-home-source", manifest);
         Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
@@ -1657,6 +1661,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RDO_CLEANUP_PULL_REQUEST_URL=", manifest);
         Assert.True(manifest.IndexOf("RDO_STEP=PullRequestReady", StringComparison.Ordinal) < manifest.IndexOf("RDO_CLEANUP_PULL_REQUEST_URL=$pr_url", StringComparison.Ordinal));
         Assert.Contains("github-token-cleanup", manifest);
+        Assert.Contains("app.kubernetes.io/name: rosenvall-devops-api", manifest);
+        Assert.Contains("topologyKey: kubernetes.io/hostname", manifest);
         Assert.DoesNotContain("rosenvall-devops-codex-home\n                             mountPath: /app/codex-home", manifest);
     }
 
@@ -1684,6 +1690,28 @@ public sealed class DevOpsStoreTests
         Assert.Contains(persisted, run => run.Id == first.Id && run.Status == "Failed");
         Assert.Contains(persisted, run => run.Id == second.Id && run.Status == "Queued");
         Assert.NotNull(reopened.GetWorkItemDetail(item.Id)!.RepositoryCleanupRuns);
+    }
+
+    [Fact]
+    public void Repository_implementation_branches_slug_spaces_and_invalid_ref_characters()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "demo", "https://github.com/carnufex/demo.git", "main", "https://github.com/carnufex/demo", "carnufex", "code-repo"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "implement app: clock/site?", "Create a clock app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan")!;
+
+        var first = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(first.Id, "Failed", "RDO_FAILURE=failed", "failed");
+        var retry = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        Assert.EndsWith("-implement-app-clock-site", first.Branch, StringComparison.Ordinal);
+        Assert.EndsWith("-implement-app-clock-site-retry-2", retry.Branch, StringComparison.Ordinal);
+        Assert.DoesNotContain(' ', retry.Branch);
+        Assert.DoesNotContain(':', retry.Branch);
+        Assert.DoesNotContain('?', retry.Branch);
     }
 
     [Fact]
@@ -1809,11 +1837,36 @@ public sealed class DevOpsStoreTests
         var failed = store.MarkImplementationRunStuck(implementationRun.Id, "impl-task-4826", "impl-task-4826-pod", "FailedScheduling - Insufficient memory", "0/4 nodes are available: 4 Insufficient memory.")!;
 
         Assert.Equal("Failed", failed.Status);
-        Assert.Equal("Implementation job produced no runner output before timeout.", failed.FailureReason);
+        Assert.Contains("Implementation job produced no runner output before timeout.", failed.FailureReason);
+        Assert.Contains("insufficient memory", failed.FailureReason);
         Assert.Equal("impl-task-4826", failed.JobName);
         Assert.Equal("impl-task-4826-pod", failed.PodName);
         Assert.Contains("Insufficient memory", failed.LastEventSummary);
         Assert.Equal("Failed", store.GetWorkItemDetail(item.Id)!.Item.AiStatus);
+    }
+
+    [Fact]
+    public void Stuck_implementation_run_classifies_multi_attach_volume_diagnostics()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "demo", "https://github.com/carnufex/demo.git", "main", "https://github.com/carnufex/demo", "carnufex", "code-repo"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "clock app", "Create a clock app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var failed = store.MarkImplementationRunStuck(
+            implementationRun.Id,
+            "impl-task-4833",
+            "impl-task-4833-pod",
+            "Pod phase: Pending; init prepare-codex-home waiting: PodInitializing; container runner waiting: PodInitializing",
+            "Warning FailedAttachVolume Multi-Attach error for volume pvc-123 Volume is already used by pod(s) rosenvall-devops-api");
+
+        Assert.Contains("RWO PVC", failed.FailureReason);
+        Assert.Contains("FailedAttachVolume", failed.LastEventSummary);
+        Assert.Contains("prepare-codex-home", failed.LastCondition);
     }
 
     [Fact]
@@ -2526,6 +2579,28 @@ public sealed class DevOpsStoreTests
         Assert.Contains("verbs: [\"delete\"]", rbac);
         Assert.Contains("name: rosenvall-devops-runtime", rbac);
         Assert.Contains("namespace: rosenvall-devops", rbac);
+    }
+
+    [Fact]
+    public void Homelab_rbac_allows_runtime_to_read_events_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var rbacPath = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "rosenvall-devops",
+            "preview-rbac.yaml");
+        if (!File.Exists(rbacPath))
+        {
+            return;
+        }
+
+        var rbac = File.ReadAllText(rbacPath);
+
+        Assert.Contains("resources: [\"events\"]", rbac);
+        Assert.Contains("verbs: [\"get\", \"list\", \"watch\"]", rbac);
     }
 
     [Fact]
@@ -3311,6 +3386,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("serviceAccountName: rosenvall-devops-runtime", manifest);
         Assert.Contains("app.kubernetes.io/part-of: rosenvall-devops-preview-source", manifest);
         Assert.Contains("name: prepare-codex-home", manifest);
+        Assert.Contains("app.kubernetes.io/name: rosenvall-devops-api", manifest);
+        Assert.Contains("topologyKey: kubernetes.io/hostname", manifest);
         Assert.Contains("name: codex-home-source", manifest);
         Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
         Assert.Contains("readOnly: true", manifest);

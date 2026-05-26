@@ -2024,6 +2024,12 @@ namespace Rosenvall.DevOps.Api
                 return "Kubernetes image pull failed for the runner job.";
             }
 
+            if (text.Contains("FailedAttachVolume", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("Multi-Attach", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Kubernetes could not attach the runner's RWO PVC. The job must run on the same node as the API pod or avoid the shared Codex PVC.";
+            }
+
             if (text.Contains("quota", StringComparison.OrdinalIgnoreCase))
             {
                 return "Kubernetes resource quota blocked the runner job.";
@@ -2158,6 +2164,13 @@ namespace Rosenvall.DevOps.Api
                          labels:
                            app.kubernetes.io/name: {{jobName}}
                        spec:
+                         affinity:
+                           podAffinity:
+                             requiredDuringSchedulingIgnoredDuringExecution:
+                               - labelSelector:
+                                   matchLabels:
+                                     app.kubernetes.io/name: rosenvall-devops-api
+                                 topologyKey: kubernetes.io/hostname
                          automountServiceAccountToken: false
                          restartPolicy: Never
                          securityContext:
@@ -2516,6 +2529,13 @@ namespace Rosenvall.DevOps.Api
                          labels:
                            app.kubernetes.io/name: {{jobName}}
                        spec:
+                         affinity:
+                           podAffinity:
+                             requiredDuringSchedulingIgnoredDuringExecution:
+                               - labelSelector:
+                                   matchLabels:
+                                     app.kubernetes.io/name: rosenvall-devops-api
+                                 topologyKey: kubernetes.io/hostname
                          automountServiceAccountToken: false
                          restartPolicy: Never
                          securityContext:
@@ -3957,10 +3977,14 @@ namespace Rosenvall.DevOps.Api
                 if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)
                 {
                     var podName = await FirstKubectlLineAsync($"get pods -n {implementationNamespace} -l job-name={jobName} -o jsonpath='{{.items[0].metadata.name}}'", cancellationToken);
-                    var condition = await LastJobConditionAsync(implementationNamespace, jobName, cancellationToken);
+                    var jobCondition = await LastJobConditionAsync(implementationNamespace, jobName, cancellationToken);
+                    var podCondition = string.IsNullOrWhiteSpace(podName)
+                        ? null
+                        : await PodDiagnosticSummaryAsync(implementationNamespace, podName, cancellationToken);
+                    var condition = string.Join("; ", new[] { jobCondition, podCondition }.Where(value => !string.IsNullOrWhiteSpace(value)));
                     var events = string.IsNullOrWhiteSpace(podName)
                         ? await FirstKubectlLineAsync($"describe job {jobName} -n {implementationNamespace}", cancellationToken)
-                        : await FirstKubectlLineAsync($"get events -n {implementationNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp", cancellationToken);
+                        : await FirstKubectlLineAsync($"get events -n {implementationNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp --no-headers", cancellationToken);
                     var stuck = store.MarkImplementationRunStuck(run.Id, jobName, podName, condition, events);
                     if (stuck is not null)
                     {
@@ -4021,10 +4045,14 @@ namespace Rosenvall.DevOps.Api
                 if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)
                 {
                     var podName = await FirstKubectlLineAsync($"get pods -n {cleanupNamespace} -l job-name={jobName} -o jsonpath='{{.items[0].metadata.name}}'", cancellationToken);
-                    var condition = await LastJobConditionAsync(cleanupNamespace, jobName, cancellationToken);
+                    var jobCondition = await LastJobConditionAsync(cleanupNamespace, jobName, cancellationToken);
+                    var podCondition = string.IsNullOrWhiteSpace(podName)
+                        ? null
+                        : await PodDiagnosticSummaryAsync(cleanupNamespace, podName, cancellationToken);
+                    var condition = string.Join("; ", new[] { jobCondition, podCondition }.Where(value => !string.IsNullOrWhiteSpace(value)));
                     var events = string.IsNullOrWhiteSpace(podName)
                         ? await FirstKubectlLineAsync($"describe job {jobName} -n {cleanupNamespace}", cancellationToken)
-                        : await FirstKubectlLineAsync($"get events -n {cleanupNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp", cancellationToken);
+                        : await FirstKubectlLineAsync($"get events -n {cleanupNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp --no-headers", cancellationToken);
                     var stuck = store.MarkRepositoryCleanupRunStuck(run.Id, jobName, podName, condition, events);
                     if (stuck is not null)
                     {
@@ -4100,6 +4128,64 @@ namespace Rosenvall.DevOps.Api
                     return string.Join(" - ", new[] { type, reason, message }.Where(value => !string.IsNullOrWhiteSpace(value)));
                 })
                 .LastOrDefault(value => !string.IsNullOrWhiteSpace(value));
+        }
+
+        private async Task<string?> PodDiagnosticSummaryAsync(string podNamespace, string podName, CancellationToken cancellationToken)
+        {
+            var podResult = await jobs.GetOutputAsync($"get pod {podName} -n {podNamespace} -o json", cancellationToken);
+            if (!podResult.Succeeded)
+            {
+                return podResult.Message;
+            }
+
+            using var document = JsonDocument.Parse(podResult.Message);
+            if (!document.RootElement.TryGetProperty("status", out var status))
+            {
+                return null;
+            }
+
+            var parts = new List<string>();
+            if (status.TryGetProperty("phase", out var phase) && !string.IsNullOrWhiteSpace(phase.GetString()))
+            {
+                parts.Add($"Pod phase: {phase.GetString()}");
+            }
+
+            AddContainerDiagnostics(parts, status, "initContainerStatuses", "init");
+            AddContainerDiagnostics(parts, status, "containerStatuses", "container");
+            return parts.Count == 0 ? null : string.Join("; ", parts);
+        }
+
+        private static void AddContainerDiagnostics(List<string> parts, JsonElement status, string propertyName, string label)
+        {
+            if (!status.TryGetProperty(propertyName, out var statuses) || statuses.ValueKind != JsonValueKind.Array)
+            {
+                return;
+            }
+
+            foreach (var container in statuses.EnumerateArray())
+            {
+                var name = container.TryGetProperty("name", out var nameElement) ? nameElement.GetString() : "unknown";
+                if (!container.TryGetProperty("state", out var state))
+                {
+                    continue;
+                }
+
+                foreach (var stateName in new[] { "waiting", "terminated", "running" })
+                {
+                    if (!state.TryGetProperty(stateName, out var stateValue))
+                    {
+                        continue;
+                    }
+
+                    var reason = stateValue.TryGetProperty("reason", out var reasonElement) ? reasonElement.GetString() : null;
+                    var message = stateValue.TryGetProperty("message", out var messageElement) ? messageElement.GetString() : null;
+                    var detail = string.Join(" - ", new[] { reason, message }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                    parts.Add(string.IsNullOrWhiteSpace(detail)
+                        ? $"{label} {name} {stateName}"
+                        : $"{label} {name} {stateName}: {detail}");
+                    break;
+                }
+            }
         }
 
         private static int StatusInt(JsonElement root, string property)
@@ -7489,6 +7575,13 @@ namespace Rosenvall.DevOps.Api
                            rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
                            rosenvall.devops/preview-source-run: {{run.Id}}
                        spec:
+                         affinity:
+                           podAffinity:
+                             requiredDuringSchedulingIgnoredDuringExecution:
+                               - labelSelector:
+                                   matchLabels:
+                                     app.kubernetes.io/name: rosenvall-devops-api
+                                 topologyKey: kubernetes.io/hostname
                          serviceAccountName: rosenvall-devops-runtime
                          automountServiceAccountToken: true
                          restartPolicy: Never
@@ -9543,6 +9636,7 @@ namespace Rosenvall.DevOps.Api
                 var sanitizedEventSummary = string.IsNullOrWhiteSpace(eventSummary)
                     ? null
                     : RedactTerminalMessage(eventSummary);
+                var failureReason = KubernetesFailureClassifier.Classify(string.Join(" ", new[] { condition, sanitizedEventSummary }.Where(value => !string.IsNullOrWhiteSpace(value))));
                 var lines = (existing.TerminalLines ?? [])
                     .Concat([
                         new PreviewTerminalLineDto(now, "system", message),
@@ -9554,7 +9648,7 @@ namespace Rosenvall.DevOps.Api
                 var updated = existing with
                 {
                     Status = "Failed",
-                    FailureReason = message,
+                    FailureReason = failureReason == "Kubernetes job submission failed." ? message : $"{message} {failureReason}",
                     UpdatedAt = now,
                     TerminalLines = lines,
                     JobName = jobName,
@@ -9781,6 +9875,7 @@ namespace Rosenvall.DevOps.Api
                 var sanitizedEventSummary = string.IsNullOrWhiteSpace(eventSummary)
                     ? null
                     : RedactTerminalMessage(eventSummary);
+                var failureReason = KubernetesFailureClassifier.Classify(string.Join(" ", new[] { condition, sanitizedEventSummary }.Where(value => !string.IsNullOrWhiteSpace(value))));
                 var lines = (existing.TerminalLines ?? [])
                     .Concat([
                         new PreviewTerminalLineDto(now, "system", message),
@@ -9792,7 +9887,7 @@ namespace Rosenvall.DevOps.Api
                 var updated = existing with
                 {
                     Status = "Failed",
-                    FailureReason = message,
+                    FailureReason = failureReason == "Kubernetes job submission failed." ? message : $"{message} {failureReason}",
                     UpdatedAt = now,
                     TerminalLines = lines,
                     JobName = jobName,
@@ -11709,8 +11804,24 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        private static string SlugifyRepositoryName(string value) =>
-            string.Join('-', NormalizeText(value, "repository").Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
+        private static string SlugifyRepositoryName(string value)
+        {
+            var normalized = NormalizeText(value, "repository").ToLowerInvariant();
+            var builder = new StringBuilder(normalized.Length);
+            foreach (var character in normalized)
+            {
+                builder.Append(character is >= 'a' and <= 'z' or >= '0' and <= '9' ? character : '-');
+            }
+
+            var slug = builder.ToString();
+            while (slug.Contains("--", StringComparison.Ordinal))
+            {
+                slug = slug.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            slug = slug.Trim('-');
+            return string.IsNullOrWhiteSpace(slug) ? "repository" : slug;
+        }
 
         private static string NormalizePreviewStatus(string status) =>
             string.Equals(status, "Healthy", StringComparison.OrdinalIgnoreCase) ? "Running" : status;
