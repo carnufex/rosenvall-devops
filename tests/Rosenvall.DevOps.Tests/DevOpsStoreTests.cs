@@ -2529,6 +2529,26 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Homelab_app_project_allows_devops_pipeline_namespace_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var projectPath = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "project.yaml");
+        if (!File.Exists(projectPath))
+        {
+            return;
+        }
+
+        var project = File.ReadAllText(projectPath);
+
+        Assert.Contains("namespace: rosenvall-devops-pipelines", project);
+    }
+
+    [Fact]
     public void Discarding_ai_run_marks_run_and_removes_active_ai_state()
     {
         using var fixture = DevOpsStoreFixture.Create();
