@@ -2503,6 +2503,32 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Homelab_rbac_allows_runtime_to_delete_legacy_pipeline_token_secrets_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var rbacPath = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "rosenvall-devops",
+            "preview-rbac.yaml");
+        if (!File.Exists(rbacPath))
+        {
+            return;
+        }
+
+        var rbac = File.ReadAllText(rbacPath);
+
+        Assert.Contains("name: rosenvall-devops-pipeline-token-cleanup", rbac);
+        Assert.Contains("namespace: rosenvall-devops-pipelines", rbac);
+        Assert.Contains("resources: [\"secrets\"]", rbac);
+        Assert.Contains("verbs: [\"delete\"]", rbac);
+        Assert.Contains("name: rosenvall-devops-runtime", rbac);
+        Assert.Contains("namespace: rosenvall-devops", rbac);
+    }
+
+    [Fact]
     public void Discarding_ai_run_marks_run_and_removes_active_ai_state()
     {
         using var fixture = DevOpsStoreFixture.Create();
