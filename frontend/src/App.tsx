@@ -607,6 +607,7 @@ const api = createApiClient({
   refreshAccessToken: () => authSession.refreshAccessToken?.() ?? Promise.resolve(null),
   handleUnauthorized: () => authSession.handleUnauthorized?.() ?? Promise.resolve()
 });
+const AI_PLAN_TIMEOUT_MS = 150000;
 
 function App() {
   const auth = useAuth();
@@ -931,7 +932,7 @@ function App() {
           provider: provider.provider,
           model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
           reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
-        });
+        }, { timeoutMs: AI_PLAN_TIMEOUT_MS });
         await refreshAfterChange(id);
       });
     },
@@ -1073,7 +1074,7 @@ function App() {
           provider: provider.provider,
           model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
           reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
-        });
+        }, { timeoutMs: AI_PLAN_TIMEOUT_MS });
         await refreshAfterChange(id);
       });
     },
