@@ -2706,6 +2706,96 @@ namespace Rosenvall.DevOps.Api
             new("Failed", "Failed", message, podName, reason, failureLog);
     }
 
+    public sealed record KubernetesKubeconfigResolution(string? Path, bool UseInClusterAuth, IReadOnlyList<string> CheckedPaths, string? MissingMessage);
+
+    public static class KubernetesKubeconfigResolver
+    {
+        public const string DefaultKubeconfigPath = "tofu/output/kubeconfig";
+        private static readonly string[] HomelabSiblingNames = ["Rosenvalls-Homelab", "rosenvalls-homelab"];
+
+        public static KubernetesKubeconfigResolution Resolve(string? configuredPath) =>
+            Resolve(configuredPath, [Directory.GetCurrentDirectory(), AppContext.BaseDirectory]);
+
+        public static KubernetesKubeconfigResolution Resolve(string? configuredPath, IEnumerable<string> roots)
+        {
+            if (string.IsNullOrWhiteSpace(configuredPath))
+            {
+                return new KubernetesKubeconfigResolution(null, true, [], null);
+            }
+
+            var trimmed = configuredPath.Trim();
+            var checkedPaths = new List<string>();
+            if (Path.IsPathRooted(trimmed))
+            {
+                checkedPaths.Add(trimmed);
+                return File.Exists(trimmed)
+                    ? new KubernetesKubeconfigResolution(trimmed, false, checkedPaths, null)
+                    : Missing(checkedPaths);
+            }
+
+            string? found = null;
+            foreach (var root in roots.Where(root => !string.IsNullOrWhiteSpace(root)).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var directory = new DirectoryInfo(root);
+                while (directory is not null)
+                {
+                    AddCandidate(CombineRelative(directory.FullName, trimmed));
+                    if (found is not null)
+                    {
+                        return new KubernetesKubeconfigResolution(found, false, checkedPaths, null);
+                    }
+
+                    if (IsDefaultKubeconfigPath(trimmed) && directory.Parent is not null)
+                    {
+                        foreach (var sibling in HomelabSiblingNames)
+                        {
+                            AddCandidate(CombineRelative(Path.Combine(directory.Parent.FullName, sibling), DefaultKubeconfigPath));
+                            if (found is not null)
+                            {
+                                return new KubernetesKubeconfigResolution(found, false, checkedPaths, null);
+                            }
+                        }
+                    }
+
+                    directory = directory.Parent;
+                }
+            }
+
+            return Missing(checkedPaths);
+
+            void AddCandidate(string candidate)
+            {
+                if (checkedPaths.Contains(candidate, StringComparer.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                checkedPaths.Add(candidate);
+                if (File.Exists(candidate))
+                {
+                    found = candidate;
+                }
+            }
+        }
+
+        private static bool IsDefaultKubeconfigPath(string configuredPath)
+        {
+            var normalized = configuredPath.Replace("\\", "/", StringComparison.Ordinal).Trim('/');
+            return normalized.Equals(DefaultKubeconfigPath, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string CombineRelative(string root, string relativePath) =>
+            Path.Combine(new[] { root }.Concat(relativePath.Replace("\\", "/", StringComparison.Ordinal).Split('/', StringSplitOptions.RemoveEmptyEntries)).ToArray());
+
+        private static KubernetesKubeconfigResolution Missing(IReadOnlyList<string> checkedPaths)
+        {
+            var message = checkedPaths.Count == 0
+                ? "Configured kubeconfig was not found."
+                : $"Configured kubeconfig was not found. Checked: {string.Join("; ", checkedPaths)}";
+            return new KubernetesKubeconfigResolution(null, false, checkedPaths, message);
+        }
+    }
+
     public sealed class PreviewEnvironmentOrchestrator(IConfiguration configuration, ILogger<PreviewEnvironmentOrchestrator> logger)
     {
         public Task<PreviewCleanupResult> ApplyAsync(string manifest, CancellationToken cancellationToken) =>
@@ -2750,15 +2840,15 @@ namespace Rosenvall.DevOps.Api
         private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Preview:KubectlPath"] ?? "kubectl";
-            var kubeconfigPath = ResolveKubeconfigPath(configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
-            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
+            if (kubeconfig.MissingMessage is not null)
             {
-                return PreviewCleanupResult.Failed($"Preview orchestration failed: Configured kubeconfig was not found: {kubeconfigPath}");
+                return PreviewCleanupResult.Failed($"Preview orchestration failed: {kubeconfig.MissingMessage}");
             }
 
-            var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
+            var arguments = kubeconfig.UseInClusterAuth
                 ? command
-                : $"--kubeconfig \"{kubeconfigPath}\" {command}";
+                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
 
             try
             {
@@ -2818,15 +2908,15 @@ namespace Rosenvall.DevOps.Api
         private async Task<PreviewCleanupResult> RunKubectlOutputAsync(string command, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Preview:KubectlPath"] ?? "kubectl";
-            var kubeconfigPath = ResolveKubeconfigPath(configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
-            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
+            if (kubeconfig.MissingMessage is not null)
             {
-                return PreviewCleanupResult.Failed($"Configured kubeconfig was not found: {kubeconfigPath}");
+                return PreviewCleanupResult.Failed(kubeconfig.MissingMessage);
             }
 
-            var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
+            var arguments = kubeconfig.UseInClusterAuth
                 ? command
-                : $"--kubeconfig \"{kubeconfigPath}\" {command}";
+                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
 
             try
             {
@@ -3002,35 +3092,6 @@ namespace Rosenvall.DevOps.Api
             message.Contains("namespaces", StringComparison.OrdinalIgnoreCase) &&
             message.Contains("not found", StringComparison.OrdinalIgnoreCase);
 
-        private static string? ResolveKubeconfigPath(string? configuredPath)
-        {
-            if (string.IsNullOrWhiteSpace(configuredPath))
-            {
-                return null;
-            }
-
-            if (Path.IsPathRooted(configuredPath))
-            {
-                return configuredPath;
-            }
-
-            foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
-            {
-                var directory = new DirectoryInfo(start);
-                while (directory is not null)
-                {
-                    var candidate = Path.Combine(directory.FullName, configuredPath);
-                    if (File.Exists(candidate))
-                    {
-                        return candidate;
-                    }
-
-                    directory = directory.Parent;
-                }
-            }
-
-            return configuredPath;
-        }
     }
 
     public sealed class PipelineJobOrchestrator(IConfiguration configuration, ILogger<PipelineJobOrchestrator> logger)
@@ -3047,15 +3108,15 @@ namespace Rosenvall.DevOps.Api
         private async Task<PreviewCleanupResult> RunKubectlOutputAsync(string command, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Pipelines:KubectlPath"] ?? configuration["Preview:KubectlPath"] ?? "kubectl";
-            var kubeconfigPath = ResolveKubeconfigPath(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
-            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
+            if (kubeconfig.MissingMessage is not null)
             {
-                return PreviewCleanupResult.Failed($"Pipeline job command failed: Configured kubeconfig was not found: {kubeconfigPath}");
+                return PreviewCleanupResult.Failed($"Pipeline job command failed: {kubeconfig.MissingMessage}");
             }
 
-            var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
+            var arguments = kubeconfig.UseInClusterAuth
                 ? command
-                : $"--kubeconfig \"{kubeconfigPath}\" {command}";
+                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
 
             try
             {
@@ -3092,15 +3153,15 @@ namespace Rosenvall.DevOps.Api
         private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Pipelines:KubectlPath"] ?? configuration["Preview:KubectlPath"] ?? "kubectl";
-            var kubeconfigPath = ResolveKubeconfigPath(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? "tofu/output/kubeconfig");
-            if (!string.IsNullOrWhiteSpace(kubeconfigPath) && !File.Exists(kubeconfigPath))
+            var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
+            if (kubeconfig.MissingMessage is not null)
             {
-                return PreviewCleanupResult.Failed($"Pipeline job submission failed: Configured kubeconfig was not found: {kubeconfigPath}");
+                return PreviewCleanupResult.Failed($"Pipeline job submission failed: {kubeconfig.MissingMessage}");
             }
 
-            var arguments = string.IsNullOrWhiteSpace(kubeconfigPath)
+            var arguments = kubeconfig.UseInClusterAuth
                 ? command
-                : $"--kubeconfig \"{kubeconfigPath}\" {command}";
+                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
 
             try
             {
@@ -3165,35 +3226,6 @@ namespace Rosenvall.DevOps.Api
             return string.IsNullOrWhiteSpace(error) ? output : error;
         }
 
-        private static string? ResolveKubeconfigPath(string? configuredPath)
-        {
-            if (string.IsNullOrWhiteSpace(configuredPath))
-            {
-                return null;
-            }
-
-            if (Path.IsPathRooted(configuredPath))
-            {
-                return configuredPath;
-            }
-
-            foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
-            {
-                var directory = new DirectoryInfo(start);
-                while (directory is not null)
-                {
-                    var candidate = Path.Combine(directory.FullName, configuredPath);
-                    if (File.Exists(candidate))
-                    {
-                        return candidate;
-                    }
-
-                    directory = directory.Parent;
-                }
-            }
-
-            return configuredPath;
-        }
     }
 
     public sealed class GitOpsStatusReader(PipelineJobOrchestrator jobs)
@@ -7061,7 +7093,7 @@ namespace Rosenvall.DevOps.Api
             var apply = await jobs.ApplyAsync(PreviewSourceJobManifestRenderer.Render(run, context, model, reasoningEffort), cancellationToken);
             if (!apply.Succeeded)
             {
-                throw new AiPlanProviderUnavailableException($"{KubernetesFailureClassifier.Classify(apply.Message)} No preview was deployed.");
+                throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(apply.Message, "submission")} No preview was deployed.");
             }
 
             var startedAt = DateTimeOffset.UtcNow;
@@ -7091,7 +7123,7 @@ namespace Rosenvall.DevOps.Api
                         var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
                         if (!result.Succeeded)
                         {
-                            throw new AiPlanProviderUnavailableException("Preview source job finished without its result ConfigMap; no preview was deployed.");
+                            throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(result.Message, "result lookup")} No preview was deployed.");
                         }
 
                         await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
@@ -7101,7 +7133,7 @@ namespace Rosenvall.DevOps.Api
                     if (failed > 0)
                     {
                         var detail = logsResult.Succeeded ? logsResult.Message : jobResult.Message;
-                        var classified = KubernetesFailureClassifier.Classify(detail);
+                        var classified = PreviewSourceJobFailureMessage(detail, "execution");
                         logger.LogWarning("Preview source job {JobName} failed: {Failure}", jobName, classified);
                         throw new AiPlanProviderUnavailableException($"{classified} No preview was deployed.");
                     }
@@ -7111,6 +7143,17 @@ namespace Rosenvall.DevOps.Api
             }
 
             throw new AiPlanProviderUnavailableException($"Preview source job {jobName} timed out after {timeout.TotalSeconds:0} seconds; no preview was deployed.");
+        }
+
+        private static string PreviewSourceJobFailureMessage(string? message, string operation)
+        {
+            var classified = KubernetesFailureClassifier.Classify(message)
+                .Replace("Pipeline job submission failed: ", "", StringComparison.OrdinalIgnoreCase)
+                .Replace("Pipeline job command failed: ", "", StringComparison.OrdinalIgnoreCase)
+                .Trim();
+            return classified.StartsWith("Preview source job", StringComparison.OrdinalIgnoreCase)
+                ? classified
+                : $"Preview source job {operation} failed: {classified}";
         }
 
         private static int StatusInt(JsonElement root, string property)

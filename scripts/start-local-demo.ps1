@@ -24,6 +24,7 @@ $frontendErr = Join-Path $logDir "frontend.err.log"
 $homelabKubeconfig = Join-Path (Split-Path $repoRoot -Parent) "Rosenvalls-Homelab\tofu\output\kubeconfig"
 $previousPreviewKubeconfig = $env:Preview__KubeconfigPath
 $previousPipelinesKubeconfig = $env:Pipelines__KubeconfigPath
+$previousPreviewSourceMode = $env:Ai__Codex__PreviewSourceMode
 $previousStorageSqlitePath = $env:Storage__SqlitePath
 $previousGitHubToken = $env:GitHub__Token
 $previousGitHubAppId = $env:GitHub__AppId
@@ -108,12 +109,14 @@ function Wait-HttpOk {
     return $false
 }
 
-if ([string]::IsNullOrWhiteSpace($env:Preview__KubeconfigPath) -and (Test-Path -LiteralPath $homelabKubeconfig)) {
-    $env:Preview__KubeconfigPath = (Resolve-Path -LiteralPath $homelabKubeconfig).Path
-}
-
-if ([string]::IsNullOrWhiteSpace($env:Pipelines__KubeconfigPath) -and (Test-Path -LiteralPath $homelabKubeconfig)) {
-    $env:Pipelines__KubeconfigPath = (Resolve-Path -LiteralPath $homelabKubeconfig).Path
+if (Test-Path -LiteralPath $homelabKubeconfig) {
+    $resolvedHomelabKubeconfig = (Resolve-Path -LiteralPath $homelabKubeconfig).Path
+    Set-EnvIfBlank "Preview__KubeconfigPath" $resolvedHomelabKubeconfig
+    Set-EnvIfBlank "Pipelines__KubeconfigPath" $resolvedHomelabKubeconfig
+    Set-EnvIfBlank "Ai__Codex__PreviewSourceMode" "kubernetes-job"
+} else {
+    Set-EnvIfBlank "Ai__Codex__PreviewSourceMode" "in-process"
+    Write-Warning "Homelab kubeconfig was not found at $homelabKubeconfig. Kubernetes preview-source jobs are disabled for this local run."
 }
 
 if ([string]::IsNullOrWhiteSpace($env:Storage__SqlitePath)) {
@@ -172,6 +175,7 @@ if ($ApiMode -eq "ClusterPortForward") {
 
 $env:Preview__KubeconfigPath = $previousPreviewKubeconfig
 $env:Pipelines__KubeconfigPath = $previousPipelinesKubeconfig
+$env:Ai__Codex__PreviewSourceMode = $previousPreviewSourceMode
 $env:Storage__SqlitePath = $previousStorageSqlitePath
 $env:GitHub__Token = $previousGitHubToken
 $env:GitHub__AppId = $previousGitHubAppId

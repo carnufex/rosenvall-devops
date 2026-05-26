@@ -2259,6 +2259,102 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Kubernetes_kubeconfig_resolver_uses_in_cluster_auth_for_empty_path()
+    {
+        var result = KubernetesKubeconfigResolver.Resolve("", ["C:\\does-not-need-to-exist"]);
+
+        Assert.True(result.UseInClusterAuth);
+        Assert.Null(result.Path);
+        Assert.Null(result.MissingMessage);
+    }
+
+    [Fact]
+    public void Kubernetes_kubeconfig_resolver_finds_sibling_homelab_kubeconfig_for_default_path()
+    {
+        var temp = Directory.CreateTempSubdirectory("rdo-kubeconfig-");
+        try
+        {
+            var devops = Directory.CreateDirectory(Path.Combine(temp.FullName, "rosenvall-devops"));
+            var homelabOutput = Directory.CreateDirectory(Path.Combine(temp.FullName, "Rosenvalls-Homelab", "tofu", "output"));
+            var kubeconfig = Path.Combine(homelabOutput.FullName, "kubeconfig");
+            File.WriteAllText(kubeconfig, "apiVersion: v1");
+
+            var result = KubernetesKubeconfigResolver.Resolve("tofu/output/kubeconfig", [devops.FullName]);
+
+            Assert.False(result.UseInClusterAuth);
+            Assert.Equal(kubeconfig, result.Path);
+            Assert.Null(result.MissingMessage);
+            Assert.Contains(result.CheckedPaths, path => path.EndsWith("Rosenvalls-Homelab\\tofu\\output\\kubeconfig", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Kubernetes_kubeconfig_resolver_reports_checked_paths_when_local_kubeconfig_is_missing()
+    {
+        var temp = Directory.CreateTempSubdirectory("rdo-missing-kubeconfig-");
+        try
+        {
+            var devops = Directory.CreateDirectory(Path.Combine(temp.FullName, "rosenvall-devops"));
+
+            var result = KubernetesKubeconfigResolver.Resolve("tofu/output/kubeconfig", [devops.FullName]);
+
+            Assert.False(result.UseInClusterAuth);
+            Assert.Null(result.Path);
+            Assert.NotNull(result.MissingMessage);
+            Assert.Contains("Configured kubeconfig was not found", result.MissingMessage);
+            Assert.Contains("tofu", result.MissingMessage);
+            Assert.Contains("Rosenvalls-Homelab", result.MissingMessage);
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Preview_source_provider_reports_preview_source_submission_failure_for_kubectl_errors()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+        var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "gör en klocksida", "Todo", "Medium", null));
+        var run = fixture.Store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build the preview.")!;
+        run.Approve("crille");
+        var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+        var missingKubeconfig = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "kubeconfig");
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Pipelines:KubectlPath"] = "kubectl",
+                ["Pipelines:KubeconfigPath"] = missingKubeconfig
+            })
+            .Build();
+        var jobs = new PipelineJobOrchestrator(configuration, NullLogger<PipelineJobOrchestrator>.Instance);
+        var provider = new KubernetesPreviewSourceProvider(jobs, configuration, NullLogger<KubernetesPreviewSourceProvider>.Instance);
+
+        var error = await Assert.ThrowsAsync<AiPlanProviderUnavailableException>(() =>
+            provider.GenerateSourceAsync("gpt-5.4", "high", run, context, null, CancellationToken.None));
+
+        Assert.Contains("Preview source job submission failed", error.Message);
+        Assert.DoesNotContain("Pipeline job submission failed", error.Message);
+    }
+
+    [Fact]
+    public void Local_start_script_sets_preview_source_mode_from_kubeconfig_availability()
+    {
+        var script = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "start-local-demo.ps1"));
+
+        Assert.Contains("Ai__Codex__PreviewSourceMode", script);
+        Assert.Contains("kubernetes-job", script);
+        Assert.Contains("in-process", script);
+        Assert.Contains("Preview__KubeconfigPath", script);
+        Assert.Contains("Pipelines__KubeconfigPath", script);
+    }
+
+    [Fact]
     public void Discarding_ai_run_marks_run_and_removes_active_ai_state()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -3485,6 +3581,22 @@ exit {{exitCode}}
 exit /b {exitCode}
 """);
         return scriptPath;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "Rosenvall.DevOps.slnx")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException("Could not find Rosenvall.DevOps.slnx from the current test directory.");
     }
 
     private sealed class DelayedHttpMessageHandler : HttpMessageHandler
