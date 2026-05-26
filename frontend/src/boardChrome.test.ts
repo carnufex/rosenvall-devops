@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -39,7 +39,20 @@ test('github repository creation permission defaults open for old API and blocks
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: false }), false);
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: true }), true);
   assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), 'You do not have permission to create repositories for carnufex. Ask the installation owner to allow your team in Settings.');
+  assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: false }), 'Authorize GitHub user access before creating repositories under carnufex.');
   assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: false }), 'Authorize GitHub user access before creating repositories under carnufex.');
+});
+
+test('github user authorization callback result is parsed from URL query', () => {
+  assert.deepEqual(githubUserAuthorizationResultFromUrl('https://devops.rosenvall.se/?githubUserAuthorization=connected#settings'), {
+    kind: 'success',
+    message: 'GitHub user authorization connected.'
+  });
+  assert.deepEqual(githubUserAuthorizationResultFromUrl('https://devops.rosenvall.se/?githubUserAuthorizationError=Token%20store%20failed#settings'), {
+    kind: 'error',
+    message: 'Token store failed'
+  });
+  assert.equal(githubUserAuthorizationResultFromUrl('https://devops.rosenvall.se/#settings'), null);
 });
 
 test('api unavailable banner message is persistent and specific for 503 or network loss', () => {

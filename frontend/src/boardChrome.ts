@@ -61,8 +61,8 @@ export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {
 
 export function canCreateRepositoryInInstallation(integration: GitHubRepositoryCreationIntegration | null | undefined): boolean {
   if (!integration) return true;
-  if (integration.canCreateRepositories === false) return false;
-  return !(integration.requiresUserAuthorizationForRepositoryCreation && !integration.hasUserAuthorization);
+  if (integration.requiresUserAuthorizationForRepositoryCreation && !integration.hasUserAuthorization) return false;
+  return integration.canCreateRepositories !== false;
 }
 
 export function repositoryCreatePermissionMessage(integration: GitHubRepositoryCreationIntegration | null | undefined): string | null {
@@ -73,6 +73,25 @@ export function repositoryCreatePermissionMessage(integration: GitHubRepositoryC
   }
 
   return `You do not have permission to create repositories for ${account}. Ask the installation owner to allow your team in Settings.`;
+}
+
+export type GitHubUserAuthorizationResult = {
+  kind: 'success' | 'error';
+  message: string;
+};
+
+export function githubUserAuthorizationResultFromUrl(url: string): GitHubUserAuthorizationResult | null {
+  const parsed = new URL(url);
+  if (parsed.searchParams.get('githubUserAuthorization') === 'connected') {
+    return { kind: 'success', message: 'GitHub user authorization connected.' };
+  }
+
+  const error = parsed.searchParams.get('githubUserAuthorizationError');
+  if (error) {
+    return { kind: 'error', message: error };
+  }
+
+  return null;
 }
 
 export function apiUnavailableBannerMessage(error: unknown): string | null {

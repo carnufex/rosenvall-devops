@@ -1106,6 +1106,26 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitHub_personal_repository_creation_is_allowed_after_matching_user_authorization()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var user = store.GetOrCreateUser(new UserIdentityRequest("authentik|crille", "Crille", "crille@example.com"));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(4444, "carnufex", "User", "github-app"));
+
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, user.Subject));
+
+        store.UpsertGitHubUserAuthorization(new GitHubUserAuthorizationDto(Guid.NewGuid(), user.Subject, integration.InstallationId, integration.AccountLogin, "carnufex", "Connected", "github-user-token-test", DateTimeOffset.UtcNow));
+
+        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, user.Subject));
+        Assert.Contains(store.GetGitHubIntegrations(user.Subject), entry =>
+            entry.InstallationId == integration.InstallationId &&
+            entry.RequiresUserAuthorizationForRepositoryCreation &&
+            entry.HasUserAuthorization &&
+            entry.CanCreateRepositories);
+    }
+
+    [Fact]
     public void GitHub_repository_creation_policy_is_persisted()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -2014,6 +2034,29 @@ public sealed class DevOpsStoreTests
 
         Assert.Contains("client-id: \"Iv1.client\"", manifest);
         Assert.Contains("client-secret: \"client-secret\"", manifest);
+    }
+
+    [Fact]
+    public void GitHub_user_authorization_secret_payload_uses_data_without_last_applied_annotation()
+    {
+        var token = new GitHubUserAuthorizationTokenDto("access-token-value", "refresh-token-value", DateTimeOffset.Parse("2026-05-26T10:00:00Z"));
+
+        var payload = GitHubUserAuthorizationTokenStore.RenderSecretPayload("github-user-token-test", token, "rosenvall-devops");
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+
+        Assert.Equal("Secret", root.GetProperty("kind").GetString());
+        Assert.Equal("github-user-token-test", root.GetProperty("metadata").GetProperty("name").GetString());
+        Assert.Equal("github-user-authorization", root.GetProperty("metadata").GetProperty("labels").GetProperty("rosenvall.devops/runtime-credential").GetString());
+        Assert.False(root.GetProperty("metadata").TryGetProperty("annotations", out var _));
+        Assert.False(root.TryGetProperty("stringData", out var _));
+
+        var data = root.GetProperty("data");
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("access-token-value")), data.GetProperty("access-token").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("refresh-token-value")), data.GetProperty("refresh-token").GetString());
+        Assert.DoesNotContain("access-token-value", payload);
+        Assert.DoesNotContain("refresh-token-value", payload);
+        Assert.DoesNotContain("kubectl.kubernetes.io/last-applied-configuration", payload);
     }
 
     [Fact]

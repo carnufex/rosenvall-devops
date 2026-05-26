@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -722,6 +722,21 @@ function App() {
       setShell({ status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
     }
   }, [auth.status, setSelectedBoardId]);
+
+  const handledGitHubUserAuthorizationResult = React.useRef(false);
+  React.useEffect(() => {
+    if (handledGitHubUserAuthorizationResult.current || (auth.status !== 'ready' && auth.status !== 'disabled')) return;
+    const result = githubUserAuthorizationResultFromUrl(window.location.href);
+    if (!result) return;
+
+    handledGitHubUserAuthorizationResult.current = true;
+    addToast(result.kind, result.message);
+    const cleanUrl = `${window.location.pathname}${window.location.hash || '#settings'}`;
+    window.history.replaceState({}, document.title, cleanUrl);
+    if (result.kind === 'success') {
+      void loadShell(undefined, { silentBusy: true });
+    }
+  }, [addToast, auth.status, loadShell]);
 
   const loadWorkItem = React.useCallback(async (id: string) => {
     setSelected((current) => current.status === 'open' && current.detail.item.id === id ? { ...current, busy: true } : { status: 'loading', id });
