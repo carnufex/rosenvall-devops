@@ -2367,6 +2367,34 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Pipeline_orchestration_uses_in_cluster_auth_for_empty_kubeconfig_path()
+    {
+        var fakeKubectl = CreateFakeKubectl();
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Pipelines:KubectlPath"] = fakeKubectl.Path,
+                    ["Pipelines:KubeconfigPath"] = ""
+                })
+                .Build();
+            var jobs = new PipelineJobOrchestrator(configuration, NullLogger<PipelineJobOrchestrator>.Instance);
+
+            var result = await jobs.ApplyAsync("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: in-cluster\n", CancellationToken.None);
+
+            Assert.True(result.Succeeded);
+            var arguments = File.ReadAllText(fakeKubectl.ArgumentsPath);
+            Assert.Contains("apply -f -", arguments);
+            Assert.DoesNotContain("--kubeconfig", arguments);
+        }
+        finally
+        {
+            fakeKubectl.Directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void Kubernetes_kubeconfig_resolver_finds_sibling_homelab_kubeconfig_for_default_path()
     {
         var temp = Directory.CreateTempSubdirectory("rdo-kubeconfig-");
@@ -2450,6 +2478,28 @@ public sealed class DevOpsStoreTests
         Assert.Contains("in-process", script);
         Assert.Contains("Preview__KubeconfigPath", script);
         Assert.Contains("Pipelines__KubeconfigPath", script);
+    }
+
+    [Fact]
+    public void Homelab_rosenvall_devops_config_declares_in_cluster_kubeconfig_paths_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var configMapPath = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "rosenvall-devops",
+            "configmap.yaml");
+        if (!File.Exists(configMapPath))
+        {
+            return;
+        }
+
+        var configMap = File.ReadAllText(configMapPath);
+
+        Assert.Contains("Preview__KubeconfigPath: \"\"", configMap);
+        Assert.Contains("Pipelines__KubeconfigPath: \"\"", configMap);
     }
 
     [Fact]
@@ -3680,6 +3730,35 @@ exit /b {exitCode}
 """);
         return scriptPath;
     }
+
+    private static FakeKubectl CreateFakeKubectl()
+    {
+        var directory = Directory.CreateTempSubdirectory("fake-kubectl-");
+        var argumentsPath = Path.Combine(directory.FullName, "arguments.txt");
+        if (!OperatingSystem.IsWindows())
+        {
+            var scriptPath = Path.Combine(directory.FullName, "kubectl");
+            File.WriteAllText(scriptPath, $$"""
+#!/usr/bin/env sh
+printf '%s\n' "$*" > '{{argumentsPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}'
+cat >/dev/null
+exit 0
+""");
+            File.SetUnixFileMode(scriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return new FakeKubectl(directory, scriptPath, argumentsPath);
+        }
+
+        var windowsScriptPath = Path.Combine(directory.FullName, "kubectl.cmd");
+        File.WriteAllText(windowsScriptPath, $$"""
+@echo off
+echo %* > "{{argumentsPath}}"
+more > nul
+exit /b 0
+""");
+        return new FakeKubectl(directory, windowsScriptPath, argumentsPath);
+    }
+
+    private sealed record FakeKubectl(DirectoryInfo Directory, string Path, string ArgumentsPath);
 
     private static string FindRepositoryRoot()
     {
