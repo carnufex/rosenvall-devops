@@ -829,7 +829,9 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("name: codex-home\n                             persistentVolumeClaim:", manifest);
         Assert.Contains("codex exec", manifest);
         Assert.Contains("codex exec --ephemeral", manifest);
-        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.Contains("--sandbox danger-full-access", manifest);
+        Assert.Contains("codex-output.log", manifest);
+        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("RDO_FAILURE=npm test failed", manifest);
         Assert.Contains("RDO_FAILURE=npm build failed", manifest);
@@ -1643,7 +1645,9 @@ public sealed class DevOpsStoreTests
         Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
         Assert.Contains("kubernetes/applications/test/kustomization.yaml", sourceDiff);
         Assert.Contains("codex exec --ephemeral", manifest);
-        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.Contains("--sandbox danger-full-access", manifest);
+        Assert.Contains("codex-output.log", manifest);
+        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
         Assert.Contains("unset GITHUB_TOKEN", manifest);
         Assert.Contains("GITHUB_TOKEN=\"$github_token_for_runner\"", manifest);
@@ -2213,7 +2217,9 @@ public sealed class DevOpsStoreTests
         Assert.Equal("11111111-1111-1111-1111-111111111111", secondSession.ProviderSessionId);
         Assert.Contains("codex exec resume", manifest);
         Assert.Contains("codex exec resume --ephemeral", manifest);
-        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.Contains("--sandbox danger-full-access", manifest);
+        Assert.Contains("codex-output.log", manifest);
+        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("ROSENVALL_CODEX_SESSION_ID", manifest);
         Assert.Contains("CODEX_REASONING_EFFORT", manifest);
@@ -2553,6 +2559,7 @@ public sealed class DevOpsStoreTests
 
         Assert.Contains("Preview__KubeconfigPath: \"\"", configMap);
         Assert.Contains("Pipelines__KubeconfigPath: \"\"", configMap);
+        Assert.Contains("Ai__Codex__KubernetesSandboxMode: danger-full-access", configMap);
     }
 
     [Fact]
@@ -3370,7 +3377,7 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Preview_source_job_manifest_uses_isolated_codex_home_and_workspace_sandbox()
+    public void Preview_source_job_manifest_uses_isolated_codex_home_and_kubernetes_sandbox()
     {
         using var fixture = DevOpsStoreFixture.Create();
         var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
@@ -3384,8 +3391,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("kind: Job", manifest);
         Assert.Contains("namespace: rosenvall-devops", manifest);
         Assert.Contains("serviceAccountName: rosenvall-devops-runtime", manifest);
+        Assert.Contains("automountServiceAccountToken: false", manifest);
         Assert.Contains("app.kubernetes.io/part-of: rosenvall-devops-preview-source", manifest);
         Assert.Contains("name: prepare-codex-home", manifest);
+        Assert.Contains("name: generate-preview-source", manifest);
+        Assert.Contains("name: publish-result", manifest);
         Assert.Contains("app.kubernetes.io/name: rosenvall-devops-api", manifest);
         Assert.Contains("topologyKey: kubernetes.io/hostname", manifest);
         Assert.Contains("name: codex-home-source", manifest);
@@ -3398,7 +3408,12 @@ public sealed class DevOpsStoreTests
         Assert.Contains("name: HOME", manifest);
         Assert.Contains("value: /home/ubuntu", manifest);
         Assert.Contains("codex exec --ephemeral", manifest);
-        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.Contains("--sandbox danger-full-access", manifest);
+        Assert.Contains("codex-output.log", manifest);
+        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
+        Assert.Contains("name: kube-api-access", manifest);
+        Assert.Contains("serviceAccountToken:", manifest);
+        Assert.Contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("ROSENVALL_PREVIEW_SEED_B64", manifest);
         Assert.Contains("ROSENVALL_RESULT_CONFIGMAP", manifest);
@@ -3435,7 +3450,7 @@ public sealed class DevOpsStoreTests
     {
         var message = KubernetesFailureClassifier.Classify("bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.");
 
-        Assert.Equal("Preview source generation could not start Codex tools because the runner sandbox is unavailable.", message);
+        Assert.Equal("Codex runner sandbox is unavailable in this Kubernetes runner.", message);
     }
 
     [Fact]

@@ -1992,7 +1992,7 @@ namespace Rosenvall.DevOps.Api
                 text.Contains("No permissions to create a new namespace", StringComparison.OrdinalIgnoreCase) ||
                 text.Contains("unprivileged user namespaces", StringComparison.OrdinalIgnoreCase))
             {
-                return "Preview source generation could not start Codex tools because the runner sandbox is unavailable.";
+                return "Codex runner sandbox is unavailable in this Kubernetes runner.";
             }
 
             if (text.Contains("OOMKilled", StringComparison.OrdinalIgnoreCase) ||
@@ -2036,6 +2036,29 @@ namespace Rosenvall.DevOps.Api
             }
 
             return text;
+        }
+    }
+
+    public static class CodexKubernetesRunner
+    {
+        public const string DefaultSandboxMode = "danger-full-access";
+
+        public static string SandboxMode(IConfiguration configuration) =>
+            NormalizeSandboxMode(configuration["Ai:Codex:KubernetesSandboxMode"]);
+
+        public static string NormalizeSandboxMode(string? value)
+        {
+            if (string.Equals(value, "workspace-write", StringComparison.OrdinalIgnoreCase))
+            {
+                return "workspace-write";
+            }
+
+            if (string.Equals(value, "danger-full-access", StringComparison.OrdinalIgnoreCase))
+            {
+                return "danger-full-access";
+            }
+
+            return DefaultSandboxMode;
         }
     }
 
@@ -2137,16 +2160,17 @@ namespace Rosenvall.DevOps.Api
                 token: "{{Escape(token)}}"
               """;
 
-        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName = "rosenvall-devops-github", AiSessionDto? aiSession = null, IReadOnlyList<BoardSecretDto>? boardSecrets = null)
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName = "rosenvall-devops-github", AiSessionDto? aiSession = null, IReadOnlyList<BoardSecretDto>? boardSecrets = null, string? sandboxMode = null)
         {
             var jobName = JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, aiRun, context)));
             var allowedPaths = Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join('\n', context.BoardContext?.GitOpsSettings?.AllowedPaths ?? [])));
             var secretEnv = RenderSecretEnvironment(boardSecrets ?? []);
+            var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
             var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
-                ? "codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
-                : "codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
+                ? $"codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
+                : $"codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -2288,7 +2312,14 @@ namespace Rosenvall.DevOps.Api
                                   echo "RDO_STEP=Implementing"
                                   github_token_for_runner="$GITHUB_TOKEN"
                                   unset GITHUB_TOKEN
-                                  {{codexCommand}}
+                                  codex_log="$workspace/codex-output.log"
+                                  set +e
+                                  {{codexCommand}} > "$codex_log" 2>&1
+                                  codex_status=$?
+                                  set -e
+                                  cat "$codex_log"
+                                  if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
+                                  if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
                                   GITHUB_TOKEN="$github_token_for_runner"
                                   export GITHUB_TOKEN
                                   if [ -f package.json ]; then
@@ -2505,13 +2536,14 @@ namespace Rosenvall.DevOps.Api
                 token: "{{Escape(token)}}"
               """;
 
-        public static string Render(RepositoryCleanupRunDto run, RepositoryDto repository, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName)
+        public static string Render(RepositoryCleanupRunDto run, RepositoryDto repository, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName, string? sandboxMode = null)
         {
             var jobName = JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, context)));
             var sourceDiff = Convert.ToBase64String(Encoding.UTF8.GetBytes(run.SourcePullRequestDiff ?? ""));
             var allowedPaths = Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join('\n', context.BoardContext?.GitOpsSettings?.AllowedPaths ?? [])));
+            var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -2653,7 +2685,14 @@ namespace Rosenvall.DevOps.Api
                                  echo "RDO_STEP=Implementing"
                                  github_token_for_runner="$GITHUB_TOKEN"
                                  unset GITHUB_TOKEN
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md"
+                                 codex_log="$workspace/codex-output.log"
+                                 set +e
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md" > "$codex_log" 2>&1
+                                 codex_status=$?
+                                 set -e
+                                 cat "$codex_log"
+                                 if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
+                                 if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
                                  GITHUB_TOKEN="$github_token_for_runner"
                                  export GITHUB_TOKEN
                                  echo "RDO_STEP=Validating"
@@ -7546,13 +7585,14 @@ namespace Rosenvall.DevOps.Api
         public static string ResultConfigMapName(AiRun run) =>
             SafeName($"preview-source-result-{run.Id:N}");
 
-        public static string Render(AiRun run, WorkItemDetailDto context, string model, string? reasoningEffort)
+        public static string Render(AiRun run, WorkItemDetailDto context, string model, string? reasoningEffort, string? sandboxMode = null)
         {
             var jobName = JobName(run, context);
             var resultConfigMap = ResultConfigMapName(run);
             var seedFiles = SeedFiles(context);
             var seed = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(seedFiles)));
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(PreviewSourcePromptBuilder.BuildImplementationPrompt(run, context)));
+            var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -7583,7 +7623,7 @@ namespace Rosenvall.DevOps.Api
                                      app.kubernetes.io/name: rosenvall-devops-api
                                  topologyKey: kubernetes.io/hostname
                          serviceAccountName: rosenvall-devops-runtime
-                         automountServiceAccountToken: true
+                         automountServiceAccountToken: false
                          restartPolicy: Never
                          securityContext:
                            fsGroup: 1000
@@ -7594,9 +7634,28 @@ namespace Rosenvall.DevOps.Api
                              emptyDir: {}
                            - name: runner-home
                              emptyDir: {}
+                           - name: result
+                             emptyDir: {}
                            - name: codex-home-source
                              persistentVolumeClaim:
                                claimName: rosenvall-devops-codex-home
+                           - name: kube-api-access
+                             projected:
+                               defaultMode: 420
+                               sources:
+                                 - serviceAccountToken:
+                                     expirationSeconds: 3600
+                                     path: token
+                                 - configMap:
+                                     name: kube-root-ca.crt
+                                     items:
+                                       - key: ca.crt
+                                         path: ca.crt
+                                 - downwardAPI:
+                                     items:
+                                       - path: namespace
+                                         fieldRef:
+                                           fieldPath: metadata.namespace
                          initContainers:
                            - name: prepare-codex-home
                              image: ghcr.io/carnufex/rosenvall-devops-api:main
@@ -7629,8 +7688,7 @@ namespace Rosenvall.DevOps.Api
                                  chmod 700 /app/codex-home/tmp
                                  if [ -f /app/codex-home/auth.json ]; then chmod 600 /app/codex-home/auth.json; fi
                                  if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
-                         containers:
-                           - name: runner
+                           - name: generate-preview-source
                              image: ghcr.io/carnufex/rosenvall-devops-api:main
                              imagePullPolicy: Always
                              securityContext:
@@ -7646,6 +7704,8 @@ namespace Rosenvall.DevOps.Api
                                  mountPath: /app/codex-home
                                - name: runner-home
                                  mountPath: /home/ubuntu
+                               - name: result
+                                 mountPath: /result
                              env:
                                - name: HOME
                                  value: /home/ubuntu
@@ -7695,7 +7755,14 @@ namespace Rosenvall.DevOps.Api
                                  NODE
                                  printf '%s' "$ROSENVALL_PREVIEW_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
                                  echo "RDO_STEP=Implementing"
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md"
+                                 codex_log="$workspace/codex-output.log"
+                                 set +e
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md" > "$codex_log" 2>&1
+                                 codex_status=$?
+                                 set -e
+                                 cat "$codex_log"
+                                 if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
+                                 if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
                                  echo "RDO_STEP=Collecting"
                                  WORKSPACE="$workspace" node <<'NODE'
                                  const fs = require('fs');
@@ -7722,8 +7789,41 @@ namespace Rosenvall.DevOps.Api
                                  walk(workspace);
                                  fs.writeFileSync(path.join(workspace, 'result.json'), JSON.stringify({ files }), 'utf8');
                                  NODE
+                                 cp "$workspace/result.json" /result/result.json
+                         containers:
+                           - name: publish-result
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               runAsNonRoot: true
+                               runAsUser: 1000
+                               runAsGroup: 1000
+                               allowPrivilegeEscalation: false
+                               capabilities:
+                                 drop:
+                                   - ALL
+                             volumeMounts:
+                               - name: result
+                                 mountPath: /result
+                                 readOnly: true
+                               - name: kube-api-access
+                                 mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+                                 readOnly: true
+                             env:
+                               - name: ROSENVALL_RESULT_NAMESPACE
+                                 value: "{{Namespace}}"
+                               - name: ROSENVALL_RESULT_CONFIGMAP
+                                 value: "{{resultConfigMap}}"
+                               - name: ROSENVALL_WORK_ITEM_KEY
+                                 value: "{{Escape(context.Item.Key)}}"
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 echo "RDO_STEP=Publishing"
                                  kubectl -n "$ROSENVALL_RESULT_NAMESPACE" delete configmap "$ROSENVALL_RESULT_CONFIGMAP" --ignore-not-found=true
-                                 kubectl -n "$ROSENVALL_RESULT_NAMESPACE" create configmap "$ROSENVALL_RESULT_CONFIGMAP" --from-file=result.json="$workspace/result.json"
+                                 kubectl -n "$ROSENVALL_RESULT_NAMESPACE" create configmap "$ROSENVALL_RESULT_CONFIGMAP" --from-file=result.json=/result/result.json
                                  kubectl -n "$ROSENVALL_RESULT_NAMESPACE" label configmap "$ROSENVALL_RESULT_CONFIGMAP" app.kubernetes.io/part-of={{PartOf}} rosenvall.devops/work-item="$ROSENVALL_WORK_ITEM_KEY" rosenvall.devops/preview-source-run={{run.Id}} --overwrite
                                  echo "RDO_RESULT_CONFIGMAP=$ROSENVALL_RESULT_CONFIGMAP"
                    """;
@@ -7785,7 +7885,7 @@ namespace Rosenvall.DevOps.Api
             await ReportTerminalAsync(onTerminalLine, "system", $"Queuing Kubernetes preview source job {jobName}.");
 
             await jobs.DeleteAsync(PreviewSourceJobManifestRenderer.RenderDelete(run, context), cancellationToken);
-            var apply = await jobs.ApplyAsync(PreviewSourceJobManifestRenderer.Render(run, context, model, reasoningEffort), cancellationToken);
+            var apply = await jobs.ApplyAsync(PreviewSourceJobManifestRenderer.Render(run, context, model, reasoningEffort, CodexKubernetesRunner.SandboxMode(configuration)), cancellationToken);
             if (!apply.Succeeded)
             {
                 throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(apply.Message, "submission")} No preview was deployed.");
@@ -9976,7 +10076,7 @@ namespace Rosenvall.DevOps.Api
                     Persist();
                 }
 
-                return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, reasoningEffort, secret, aiSession, boardSecrets);
+                return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, reasoningEffort, secret, aiSession, boardSecrets, CodexKubernetesRunner.SandboxMode(configuration));
             }
         }
 
@@ -10002,7 +10102,7 @@ namespace Rosenvall.DevOps.Api
                 var secret = string.IsNullOrWhiteSpace(githubSecretName)
                     ? configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github"
                     : githubSecretName.Trim();
-                return RepositoryCleanupJobManifestRenderer.Render(run, repository, context, model, reasoningEffort, secret);
+                return RepositoryCleanupJobManifestRenderer.Render(run, repository, context, model, reasoningEffort, secret, CodexKubernetesRunner.SandboxMode(configuration));
             }
         }
 
