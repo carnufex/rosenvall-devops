@@ -167,6 +167,9 @@ if (!string.IsNullOrWhiteSpace(authority))
     api.RequireAuthorization();
 }
 
+api.MapGet("/status", (IConfiguration configuration, DevOpsStore store) =>
+    Results.Ok(new ApiStatusDto(ApiResourceDiagnosticsReader.Read(configuration, store.LastSnapshotJsonBytes))));
+
 api.MapGet("/workspaces", (ClaimsPrincipal user, DevOpsStore store) => store.GetWorkspaces(AuthenticatedSubjectOrNull(user)));
 api.MapPost("/workspaces", async (CreateWorkspaceRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
 {
@@ -1385,6 +1388,20 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         return BoardMutationForbidden();
     }
 
+    var resourceDiagnostics = ApiResourceDiagnosticsReader.Read(configuration, store.LastSnapshotJsonBytes);
+    var preflight = ImplementationCapacityPreflight.Evaluate(resourceDiagnostics, configuration.GetValue("RepositoryRuns:ApiMemoryMinHeadroomBytes", 128L * 1024 * 1024));
+    if (!preflight.Succeeded)
+    {
+        return Results.Problem(preflight.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    if (store.GetPendingImplementationRun(workItemId) is { } pendingRun)
+    {
+        return Results.Problem(
+            $"Implementation cannot start because {pendingRun.WorkItemKey} already has a pending implementation run on branch {pendingRun.Branch}.",
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
     ImplementationRunDto? run;
     try
     {
@@ -1405,9 +1422,10 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         var cleanup = await jobs.DeleteAsync(retryCleanupManifest, cancellationToken);
         if (!cleanup.Succeeded)
         {
-            var failed = store.UpdateImplementationRun(run.Id, "Failed", cleanup.Message, $"Retry cleanup failed: {cleanup.Message}");
+            var failure = $"Retry cleanup failed: {KubernetesFailureClassifier.Classify(cleanup.Message)}";
+            var failed = store.UpdateImplementationRun(run.Id, "Failed", cleanup.Message, failure);
             await hub.Clients.All.SendAsync("implementationRunChanged", failed);
-            return Results.Problem(failed?.FailureReason ?? cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
+            return Results.Problem(failed?.FailureReason ?? failure, statusCode: StatusCodes.Status502BadGateway);
         }
     }
 
@@ -1429,9 +1447,10 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         var tokenSecretApply = await jobs.ApplyAsync(RepositoryImplementationJobManifestRenderer.RenderGitHubTokenSecret(run, token), cancellationToken);
         if (!tokenSecretApply.Succeeded)
         {
-            var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretApply.Message, tokenSecretApply.Message);
+            var failure = KubernetesFailureClassifier.Classify(tokenSecretApply.Message);
+            var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretApply.Message, failure);
             await hub.Clients.All.SendAsync("implementationRunChanged", failed);
-            return Results.Problem(tokenSecretApply.Message, statusCode: StatusCodes.Status502BadGateway);
+            return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
         }
     }
 
@@ -1445,9 +1464,10 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
     var apply = await jobs.ApplyAsync(manifest, cancellationToken);
     if (!apply.Succeeded)
     {
-        var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, apply.Message);
+        var failure = KubernetesFailureClassifier.Classify(apply.Message);
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
         await hub.Clients.All.SendAsync("implementationRunChanged", failed);
-        return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
+        return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
@@ -1600,8 +1620,11 @@ namespace Rosenvall.DevOps.Api
     public sealed record PreviewTerminalLineDto(DateTimeOffset CreatedAt, string Stream, string Message);
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
-    public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
+    public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null);
     public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, bool Adopted = false, DateTimeOffset? MergedAt = null, DateTimeOffset? VerifiedAt = null, string? VerificationFailure = null);
+    public sealed record ApiStatusDto(ApiResourceDiagnosticsDto Resources);
+    public sealed record ApiResourceDiagnosticsDto(long? ProcessRssBytes, long? MemoryCurrentBytes, long? MemoryLimitBytes, long? MemoryAvailableBytes, bool IsMemoryPressured, string Status, string? Message, long? SnapshotJsonBytes = null);
+    public sealed record ImplementationCapacityPreflightResult(bool Succeeded, string Message, ApiResourceDiagnosticsDto Diagnostics);
     public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null, string? HeadRef = null);
     public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt, IReadOnlyList<string>? ApplicationUrls = null);
     public sealed record GitOpsApplicationsResponseDto(IReadOnlyList<GitOpsApplicationStatusDto> Applications, string? Message = null);
@@ -1677,6 +1700,130 @@ namespace Rosenvall.DevOps.Api
 
     public class AiPlanProviderUnavailableException(string message) : InvalidOperationException(message);
     public sealed class OllamaUnavailableException(string message) : AiPlanProviderUnavailableException(message);
+
+    public static class ApiResourceDiagnosticsReader
+    {
+        private const long DefaultMinHeadroomBytes = 128L * 1024 * 1024;
+
+        public static ApiResourceDiagnosticsDto Read(IConfiguration configuration, long? snapshotJsonBytes = null)
+        {
+            var processRssBytes = Process.GetCurrentProcess().WorkingSet64;
+            var memoryCurrentBytes = ReadCgroupLong("/sys/fs/cgroup/memory.current") ??
+                ReadCgroupLong("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+            var memoryLimitBytes = ReadCgroupLimit("/sys/fs/cgroup/memory.max") ??
+                ReadCgroupLimit("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+            long? availableBytes = memoryCurrentBytes is { } current && memoryLimitBytes is { } limit && limit > current
+                ? limit - current
+                : null;
+            var minHeadroomBytes = configuration.GetValue("RepositoryRuns:ApiMemoryMinHeadroomBytes", DefaultMinHeadroomBytes);
+            var pressured = availableBytes is { } available && available < minHeadroomBytes;
+            var message = pressured
+                ? $"API memory headroom is below {minHeadroomBytes / 1024 / 1024} MiB."
+                : null;
+
+            return new ApiResourceDiagnosticsDto(
+                processRssBytes,
+                memoryCurrentBytes,
+                memoryLimitBytes,
+                availableBytes,
+                pressured,
+                pressured ? "Degraded" : "Healthy",
+                message,
+                snapshotJsonBytes);
+        }
+
+        private static long? ReadCgroupLong(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var value = File.ReadAllText(path).Trim();
+            return long.TryParse(value, out var parsed) ? parsed : null;
+        }
+
+        private static long? ReadCgroupLimit(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var value = File.ReadAllText(path).Trim();
+            if (string.Equals(value, "max", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            if (!long.TryParse(value, out var parsed))
+            {
+                return null;
+            }
+
+            return parsed > long.MaxValue / 4 ? null : parsed;
+        }
+    }
+
+    public static class ImplementationCapacityPreflight
+    {
+        public static ImplementationCapacityPreflightResult Evaluate(ApiResourceDiagnosticsDto diagnostics, long minHeadroomBytes)
+        {
+            if (diagnostics.IsMemoryPressured ||
+                diagnostics.MemoryAvailableBytes is { } available && available < minHeadroomBytes)
+            {
+                return new ImplementationCapacityPreflightResult(
+                    false,
+                    "Implementation cannot start because Rosenvall DevOps API is memory pressured. Try again after cleanup or restart.",
+                    diagnostics);
+            }
+
+            return new ImplementationCapacityPreflightResult(true, "Implementation capacity is available.", diagnostics);
+        }
+    }
+
+    public static class KubernetesFailureClassifier
+    {
+        public static string Classify(string? message)
+        {
+            var text = string.IsNullOrWhiteSpace(message) ? "Kubernetes job submission failed." : message.Trim();
+            if (text.Contains("OOMKilled", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("exit code: 137", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("Exit Code: 137", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Kubernetes reported OOMKilled. The container exceeded its memory limit.";
+            }
+
+            if (text.Contains("Insufficient memory", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Kubernetes could not schedule the job because of insufficient memory.";
+            }
+
+            if (text.Contains("Insufficient cpu", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Kubernetes could not schedule the job because of insufficient CPU.";
+            }
+
+            if (text.Contains("forbidden", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("RBAC", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Kubernetes RBAC denied the operation.";
+            }
+
+            if (text.Contains("ImagePullBackOff", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("ErrImagePull", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Kubernetes image pull failed for the runner job.";
+            }
+
+            if (text.Contains("quota", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Kubernetes resource quota blocked the runner job.";
+            }
+
+            return text;
+        }
+    }
 
     public static class PipelineJobManifestRenderer
     {
@@ -3228,7 +3375,7 @@ namespace Rosenvall.DevOps.Api
     public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrchestrator jobs, IHubContext<DevOpsHub> hub, ILogger<ImplementationRunMonitor> logger) : BackgroundService
     {
         private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(8);
-        private static readonly TimeSpan CleanupStuckTimeout = TimeSpan.FromMinutes(10);
+        private static readonly TimeSpan RunStuckTimeout = TimeSpan.FromMinutes(10);
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -3260,8 +3407,24 @@ namespace Rosenvall.DevOps.Api
 
                 var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, detail);
                 var implementationNamespace = RepositoryImplementationJobManifestRenderer.Namespace;
-                var logsResult = await jobs.GetOutputAsync($"logs -n {implementationNamespace} job/{jobName} --all-containers --tail=220", cancellationToken);
+                var logsResult = await jobs.GetOutputAsync($"logs -n {implementationNamespace} job/{jobName} --all-containers --tail=160", cancellationToken);
                 var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
+                if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)
+                {
+                    var podName = await FirstKubectlLineAsync($"get pods -n {implementationNamespace} -l job-name={jobName} -o jsonpath='{{.items[0].metadata.name}}'", cancellationToken);
+                    var condition = await LastJobConditionAsync(implementationNamespace, jobName, cancellationToken);
+                    var events = string.IsNullOrWhiteSpace(podName)
+                        ? await FirstKubectlLineAsync($"describe job {jobName} -n {implementationNamespace}", cancellationToken)
+                        : await FirstKubectlLineAsync($"get events -n {implementationNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp", cancellationToken);
+                    var stuck = store.MarkImplementationRunStuck(run.Id, jobName, podName, condition, events);
+                    if (stuck is not null)
+                    {
+                        await hub.Clients.All.SendAsync("implementationRunChanged", stuck, cancellationToken);
+                    }
+
+                    continue;
+                }
+
                 var nextStatus = StatusFromLogs(logs, run.Status);
 
                 var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {implementationNamespace} -o json", cancellationToken);
@@ -3286,7 +3449,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var failureReason = nextStatus == "Failed"
-                    ? FirstMarkerValue(logs, "RDO_FAILURE=") ?? "Repository implementation job failed."
+                    ? KubernetesFailureClassifier.Classify(FirstMarkerValue(logs, "RDO_FAILURE=") ?? logsResult.Message ?? "Repository implementation job failed.")
                     : null;
                 var updated = store.UpdateImplementationRun(run.Id, nextStatus, logs, failureReason);
                 if (updated is not null)
@@ -3308,9 +3471,9 @@ namespace Rosenvall.DevOps.Api
 
                 var jobName = RepositoryCleanupJobManifestRenderer.JobName(run, detail);
                 var cleanupNamespace = RepositoryCleanupJobManifestRenderer.Namespace;
-                var logsResult = await jobs.GetOutputAsync($"logs -n {cleanupNamespace} job/{jobName} --all-containers --tail=220", cancellationToken);
+                var logsResult = await jobs.GetOutputAsync($"logs -n {cleanupNamespace} job/{jobName} --all-containers --tail=160", cancellationToken);
                 var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
-                if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > CleanupStuckTimeout)
+                if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)
                 {
                     var podName = await FirstKubectlLineAsync($"get pods -n {cleanupNamespace} -l job-name={jobName} -o jsonpath='{{.items[0].metadata.name}}'", cancellationToken);
                     var condition = await LastJobConditionAsync(cleanupNamespace, jobName, cancellationToken);
@@ -3349,7 +3512,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var failureReason = nextStatus == "Failed"
-                    ? FirstMarkerValue(logs, "RDO_FAILURE=") ?? "Repository cleanup job failed."
+                    ? KubernetesFailureClassifier.Classify(FirstMarkerValue(logs, "RDO_FAILURE=") ?? logsResult.Message ?? "Repository cleanup job failed.")
                     : null;
                 var updated = store.UpdateRepositoryCleanupRun(run.Id, nextStatus, logs, failureReason);
                 if (updated is not null)
@@ -6800,6 +6963,8 @@ namespace Rosenvall.DevOps.Api
     public sealed class DevOpsStore
     {
         private const string DocumentId = "default";
+        private const int RepositoryRunTerminalTailLimit = 150;
+        private const int RepositoryRunTerminalLineMaxChars = 1000;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web)
         {
             WriteIndented = false,
@@ -6833,6 +6998,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<BoardGitOpsSettingsDto> _boardGitOpsSettings = [];
         private readonly List<BoardAiContextDto> _boardAiContexts = [];
         private int _nextTaskNumber = 4821;
+        private long? _lastSnapshotJsonBytes;
 
         public DevOpsStore(IDbContextFactory<DevOpsStateDbContext> dbFactory)
         {
@@ -6892,6 +7058,17 @@ namespace Rosenvall.DevOps.Api
                 GrantActorBoardOwnerAccessWithoutLock(board.Id, actorSubject);
                 Persist();
                 return workspace;
+            }
+        }
+
+        public long? LastSnapshotJsonBytes
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _lastSnapshotJsonBytes;
+                }
             }
         }
 
@@ -8125,12 +8302,23 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public ImplementationRunDto? GetPendingImplementationRun(Guid workItemId)
+        {
+            lock (_lock)
+            {
+                return _implementationRuns
+                    .Where(run => run.WorkItemId == workItemId && IsImplementationRunPendingStatus(run.Status))
+                    .OrderByDescending(run => run.CreatedAt)
+                    .FirstOrDefault();
+            }
+        }
+
         public IReadOnlyList<ImplementationRunDto> GetImplementationRunsAwaitingStatus()
         {
             lock (_lock)
             {
                 return _implementationRuns
-                    .Where(run => run.Status is "Queued" or "Cloning" or "Implementing" or "Testing" or "Pushing")
+                    .Where(run => IsImplementationRunPendingStatus(run.Status))
                     .ToArray();
             }
         }
@@ -8146,23 +8334,30 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var existing = _implementationRuns[index];
-                var lines = string.IsNullOrWhiteSpace(logs)
-                    ? existing.TerminalLines ?? []
-                    : logs.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", RedactTerminalMessage(line.TrimEnd())))
-                        .TakeLast(200)
-                        .ToArray();
+                var lines = RepositoryTerminalLinesFromLogs(logs, existing.TerminalLines);
                 var pullRequestUrl = FirstMarkerValue(logs, "RDO_PULL_REQUEST_URL=") ?? existing.PullRequestUrl;
                 var commitSha = FirstMarkerValue(logs, "RDO_COMMIT=") ?? existing.CommitSha;
                 var sanitizedFailureReason = string.IsNullOrWhiteSpace(failureReason)
                     ? existing.FailureReason
                     : RedactTerminalMessage(failureReason);
+                var normalizedStatus = NormalizeText(status, existing.Status);
+                var normalizedPullRequestUrl = string.IsNullOrWhiteSpace(pullRequestUrl) ? existing.PullRequestUrl : pullRequestUrl;
+                var normalizedCommitSha = string.IsNullOrWhiteSpace(commitSha) ? existing.CommitSha : commitSha;
+                if (string.Equals(existing.Status, normalizedStatus, StringComparison.Ordinal) &&
+                    string.Equals(existing.PullRequestUrl, normalizedPullRequestUrl, StringComparison.Ordinal) &&
+                    string.Equals(existing.CommitSha, normalizedCommitSha, StringComparison.Ordinal) &&
+                    string.Equals(existing.FailureReason, sanitizedFailureReason, StringComparison.Ordinal) &&
+                    TerminalLinesEquivalent(existing.TerminalLines, lines))
+                {
+                    return existing;
+                }
+
                 var updated = existing with
                 {
-                    Status = NormalizeText(status, existing.Status),
+                    Status = normalizedStatus,
                     UpdatedAt = DateTimeOffset.UtcNow,
-                    PullRequestUrl = string.IsNullOrWhiteSpace(pullRequestUrl) ? existing.PullRequestUrl : pullRequestUrl,
-                    CommitSha = string.IsNullOrWhiteSpace(commitSha) ? existing.CommitSha : commitSha,
+                    PullRequestUrl = normalizedPullRequestUrl,
+                    CommitSha = normalizedCommitSha,
                     FailureReason = sanitizedFailureReason,
                     TerminalLines = lines
                 };
@@ -8191,6 +8386,55 @@ namespace Rosenvall.DevOps.Api
                         }
                         AddTimelineForItem(item, updated.Status == "PullRequestReady" ? "PullRequest" : "ImplementationFailed", item.Key, updated.Status == "PullRequestReady" ? $"Pull request ready for {item.Key}." : updated.FailureReason ?? "Implementation failed.", "runner", updated.PullRequestUrl);
                     }
+                }
+
+                Persist();
+                return updated;
+            }
+        }
+
+        public ImplementationRunDto? MarkImplementationRunStuck(Guid implementationRunId, string jobName, string? podName, string? condition, string? eventSummary)
+        {
+            lock (_lock)
+            {
+                var index = _implementationRuns.FindIndex(run => run.Id == implementationRunId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _implementationRuns[index];
+                var message = "Implementation job produced no runner output before timeout.";
+                var now = DateTimeOffset.UtcNow;
+                var sanitizedEventSummary = string.IsNullOrWhiteSpace(eventSummary)
+                    ? null
+                    : RedactTerminalMessage(eventSummary);
+                var lines = (existing.TerminalLines ?? [])
+                    .Concat([
+                        new PreviewTerminalLineDto(now, "system", message),
+                        new PreviewTerminalLineDto(now, "system", $"Job: {jobName}. Pod: {podName ?? "unknown"}. Condition: {condition ?? "unknown"}."),
+                        new PreviewTerminalLineDto(now, "system", $"Last event: {sanitizedEventSummary ?? "No Kubernetes event summary was available."}")
+                    ])
+                    .TakeLast(RepositoryRunTerminalTailLimit)
+                    .ToArray();
+                var updated = existing with
+                {
+                    Status = "Failed",
+                    FailureReason = message,
+                    UpdatedAt = now,
+                    TerminalLines = lines,
+                    JobName = jobName,
+                    PodName = podName,
+                    LastCondition = condition,
+                    LastEventSummary = sanitizedEventSummary
+                };
+                _implementationRuns[index] = updated;
+
+                var item = _items.SingleOrDefault(entry => entry.Id == updated.WorkItemId);
+                if (item is not null)
+                {
+                    item.AiStatus = "Failed";
+                    AddTimelineForItem(item, "ImplementationFailed", item.Key, message, "runner", updated.PullRequestUrl);
                 }
 
                 Persist();
@@ -8337,23 +8581,30 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var existing = _repositoryCleanupRuns[index];
-                var lines = string.IsNullOrWhiteSpace(logs)
-                    ? existing.TerminalLines ?? []
-                    : logs.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", RedactTerminalMessage(line.TrimEnd())))
-                        .TakeLast(200)
-                        .ToArray();
+                var lines = RepositoryTerminalLinesFromLogs(logs, existing.TerminalLines);
                 var pullRequestUrl = FirstMarkerValue(logs, "RDO_CLEANUP_PULL_REQUEST_URL=") ?? existing.CleanupPullRequestUrl;
                 var commitSha = FirstMarkerValue(logs, "RDO_COMMIT=") ?? existing.CommitSha;
                 var sanitizedFailureReason = string.IsNullOrWhiteSpace(failureReason)
                     ? existing.FailureReason
                     : RedactTerminalMessage(failureReason);
+                var normalizedStatus = NormalizeText(status, existing.Status);
+                var normalizedPullRequestUrl = string.IsNullOrWhiteSpace(pullRequestUrl) ? existing.CleanupPullRequestUrl : pullRequestUrl;
+                var normalizedCommitSha = string.IsNullOrWhiteSpace(commitSha) ? existing.CommitSha : commitSha;
+                if (string.Equals(existing.Status, normalizedStatus, StringComparison.Ordinal) &&
+                    string.Equals(existing.CleanupPullRequestUrl, normalizedPullRequestUrl, StringComparison.Ordinal) &&
+                    string.Equals(existing.CommitSha, normalizedCommitSha, StringComparison.Ordinal) &&
+                    string.Equals(existing.FailureReason, sanitizedFailureReason, StringComparison.Ordinal) &&
+                    TerminalLinesEquivalent(existing.TerminalLines, lines))
+                {
+                    return existing;
+                }
+
                 var updated = existing with
                 {
-                    Status = NormalizeText(status, existing.Status),
+                    Status = normalizedStatus,
                     UpdatedAt = DateTimeOffset.UtcNow,
-                    CleanupPullRequestUrl = string.IsNullOrWhiteSpace(pullRequestUrl) ? existing.CleanupPullRequestUrl : pullRequestUrl,
-                    CommitSha = string.IsNullOrWhiteSpace(commitSha) ? existing.CommitSha : commitSha,
+                    CleanupPullRequestUrl = normalizedPullRequestUrl,
+                    CommitSha = normalizedCommitSha,
                     FailureReason = sanitizedFailureReason,
                     TerminalLines = lines
                 };
@@ -8402,7 +8653,7 @@ namespace Rosenvall.DevOps.Api
                         new PreviewTerminalLineDto(now, "system", $"Job: {jobName}. Pod: {podName ?? "unknown"}. Condition: {condition ?? "unknown"}."),
                         new PreviewTerminalLineDto(now, "system", $"Last event: {sanitizedEventSummary ?? "No Kubernetes event summary was available."}")
                     ])
-                    .TakeLast(200)
+                    .TakeLast(RepositoryRunTerminalTailLimit)
                     .ToArray();
                 var updated = existing with
                 {
@@ -8479,6 +8730,7 @@ namespace Rosenvall.DevOps.Api
                         .Where(boardSecret => boardSecret.BoardId == item.BoardId && (boardSecret.RepositoryId is null || boardSecret.RepositoryId == repository.Id))
                         .ToArray();
                 var now = DateTimeOffset.UtcNow;
+                var secretsChanged = false;
                 for (var index = 0; index < boardSecrets.Length; index++)
                 {
                     var secretIndex = _boardSecrets.FindIndex(entry => entry.Id == boardSecrets[index].Id);
@@ -8486,10 +8738,15 @@ namespace Rosenvall.DevOps.Api
                     {
                         _boardSecrets[secretIndex] = _boardSecrets[secretIndex] with { LastUsedAt = now };
                         boardSecrets[index] = _boardSecrets[secretIndex];
+                        secretsChanged = true;
                     }
                 }
 
-                Persist();
+                if (secretsChanged)
+                {
+                    Persist();
+                }
+
                 return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, reasoningEffort, secret, aiSession, boardSecrets);
             }
         }
@@ -9920,6 +10177,9 @@ namespace Rosenvall.DevOps.Api
         private static bool IsRepositoryCleanupPendingStatus(string status) =>
             status is "Queued" or "Cloning" or "Implementing" or "Validating" or "Pushing";
 
+        private static bool IsImplementationRunPendingStatus(string status) =>
+            status is "Queued" or "Cloning" or "Inspecting" or "Implementing" or "Testing" or "Validating" or "Pushing";
+
         private static string NormalizeText(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
 
@@ -10226,6 +10486,45 @@ namespace Rosenvall.DevOps.Api
                 .Where(line => line.StartsWith(marker, StringComparison.Ordinal))
                 .Select(line => line[marker.Length..].Trim())
                 .LastOrDefault();
+
+        private static IReadOnlyList<PreviewTerminalLineDto> RepositoryTerminalLinesFromLogs(string? logs, IReadOnlyList<PreviewTerminalLineDto>? existing)
+        {
+            if (string.IsNullOrWhiteSpace(logs))
+            {
+                return existing ?? [];
+            }
+
+            return logs.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "runner", TruncateTerminalMessage(RedactTerminalMessage(line.TrimEnd()))))
+                .TakeLast(RepositoryRunTerminalTailLimit)
+                .ToArray();
+        }
+
+        private static string TruncateTerminalMessage(string message) =>
+            message.Length <= RepositoryRunTerminalLineMaxChars
+                ? message
+                : string.Concat(message.AsSpan(0, RepositoryRunTerminalLineMaxChars - 3), "...");
+
+        private static bool TerminalLinesEquivalent(IReadOnlyList<PreviewTerminalLineDto>? left, IReadOnlyList<PreviewTerminalLineDto>? right)
+        {
+            var leftLines = left ?? [];
+            var rightLines = right ?? [];
+            if (leftLines.Count != rightLines.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < leftLines.Count; index++)
+            {
+                if (!string.Equals(leftLines[index].Stream, rightLines[index].Stream, StringComparison.Ordinal) ||
+                    !string.Equals(leftLines[index].Message, rightLines[index].Message, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
 
         private static void EnsureEditableHumanComment(CommentDto comment, string actor)
         {
@@ -10581,6 +10880,7 @@ namespace Rosenvall.DevOps.Api
                 return false;
             }
 
+            _lastSnapshotJsonBytes = Encoding.UTF8.GetByteCount(document.Json);
             var snapshot = JsonSerializer.Deserialize<DevOpsSnapshot>(document.Json, SnapshotJsonOptions);
             if (snapshot is null)
             {
@@ -10720,6 +11020,7 @@ namespace Rosenvall.DevOps.Api
                 _boardAiContexts.ToArray(),
                 _boardRepositoryProfiles.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
+            _lastSnapshotJsonBytes = Encoding.UTF8.GetByteCount(json);
 
             using var db = _dbFactory.CreateDbContext();
             var document = db.Documents.SingleOrDefault(d => d.Id == DocumentId);

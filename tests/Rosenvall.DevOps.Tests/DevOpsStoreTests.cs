@@ -1713,6 +1713,118 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Implementation_run_update_is_noop_when_status_reason_and_terminal_tail_are_unchanged()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "clock", "Create a clock app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var first = store.UpdateImplementationRun(implementationRun.Id, "Cloning", "RDO_STEP=Cloning\nCloning into repo...")!;
+        var second = store.UpdateImplementationRun(implementationRun.Id, "Cloning", "RDO_STEP=Cloning\nCloning into repo...")!;
+
+        Assert.Equal(first.UpdatedAt, second.UpdatedAt);
+        Assert.Equal(first.TerminalLines!.Select(line => line.Message), second.TerminalLines!.Select(line => line.Message));
+    }
+
+    [Fact]
+    public void Repository_run_terminal_tails_are_capped_and_long_lines_are_truncated()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "clock", "Create a clock app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        var longLine = new string('x', 1500);
+        var logs = string.Join('\n', Enumerable.Range(0, 175).Select(index => $"line-{index:D3}-{longLine}"));
+
+        var updated = store.UpdateImplementationRun(implementationRun.Id, "Implementing", logs)!;
+
+        Assert.Equal(150, updated.TerminalLines!.Count);
+        Assert.All(updated.TerminalLines!, line => Assert.True(line.Message.Length <= 1000));
+        Assert.DoesNotContain(updated.TerminalLines!, line => line.Message.StartsWith("line-000-", StringComparison.Ordinal));
+        Assert.Contains(updated.TerminalLines!, line => line.Message.StartsWith("line-174-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Stuck_implementation_run_records_diagnostics_and_fails_card()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "clock", "Create a clock app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var failed = store.MarkImplementationRunStuck(implementationRun.Id, "impl-task-4826", "impl-task-4826-pod", "FailedScheduling - Insufficient memory", "0/4 nodes are available: 4 Insufficient memory.")!;
+
+        Assert.Equal("Failed", failed.Status);
+        Assert.Equal("Implementation job produced no runner output before timeout.", failed.FailureReason);
+        Assert.Equal("impl-task-4826", failed.JobName);
+        Assert.Equal("impl-task-4826-pod", failed.PodName);
+        Assert.Contains("Insufficient memory", failed.LastEventSummary);
+        Assert.Equal("Failed", store.GetWorkItemDetail(item.Id)!.Item.AiStatus);
+    }
+
+    [Fact]
+    public void Implementation_capacity_preflight_blocks_when_api_memory_headroom_is_low()
+    {
+        var diagnostics = new ApiResourceDiagnosticsDto(
+            ProcessRssBytes: 900 * 1024 * 1024,
+            MemoryCurrentBytes: 950 * 1024 * 1024,
+            MemoryLimitBytes: 1024L * 1024 * 1024,
+            MemoryAvailableBytes: 74L * 1024 * 1024,
+            IsMemoryPressured: true,
+            Status: "Degraded",
+            Message: "API memory headroom is below 128 MiB.");
+
+        var result = ImplementationCapacityPreflight.Evaluate(diagnostics, 128L * 1024 * 1024);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("memory pressured", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Same(diagnostics, result.Diagnostics);
+    }
+
+    [Fact]
+    public void Pending_implementation_run_is_reported_before_starting_another_attempt()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "clock", "Create a clock app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan.")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+
+        var pending = store.GetPendingImplementationRun(item.Id);
+
+        Assert.Equal(implementationRun.Id, pending?.Id);
+    }
+
+    [Theory]
+    [InlineData("0/4 nodes are available: 4 Insufficient memory.", "insufficient memory")]
+    [InlineData("0/4 nodes are available: 4 Insufficient cpu.", "insufficient CPU")]
+    [InlineData("pods \"impl\" is forbidden: User cannot create resource", "RBAC")]
+    [InlineData("container waiting reason ImagePullBackOff", "image pull")]
+    [InlineData("Last State: Terminated Reason: OOMKilled Exit Code: 137", "OOMKilled")]
+    public void Kubernetes_failure_classifier_maps_common_runtime_errors(string message, string expected)
+    {
+        var classified = KubernetesFailureClassifier.Classify(message);
+
+        Assert.Contains(expected, classified, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Work_item_cleanup_manifest_includes_repository_cleanup_jobs_and_token_secrets()
     {
         using var fixture = DevOpsStoreFixture.Create();

@@ -60,6 +60,7 @@ a { color: inherit; text-decoration: none; }
 .nav-item.active { background: var(--surface-top); color: var(--text); box-shadow: inset 3px 0 0 var(--secondary); }
 
 .main { flex: 1; min-width: 0; }
+.api-status-banner { margin: 12px 24px 0; border: 1px solid rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.1); color: #fde68a; border-radius: 8px; padding: 10px 12px; font-weight: 700; }
 .topbar { height: 62px; border-bottom: 1px solid var(--line); background: rgba(12, 13, 14, 0.94); display: flex; align-items: center; gap: 18px; padding: 0 24px; position: sticky; top: 0; z-index: 10; backdrop-filter: blur(12px); }
 .search { width: min(420px, 46vw); height: 38px; border: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; gap: 10px; padding: 0 12px; border-radius: 8px; color: var(--muted); font-weight: 400; }
 .search input { height: 100%; border: 0; background: transparent; color: var(--text); outline: none; width: 100%; padding: 0; }
@@ -278,6 +279,7 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .stepper-item.blocked .stepper-body strong { color: #fecaca; }
 .preview-message, .failure-reason { margin: 14px 16px; color: var(--muted-strong); line-height: 22px; }
 .failure-reason { color: #fecaca; font-weight: 700; }
+.action-error { margin: 10px 0 0; }
 .failure-log { margin: 14px 16px 0; max-height: 180px; color: #fecaca; white-space: pre-wrap; font-size: 12px; }
 .preview-terminal { margin: 14px 16px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #050607; }
 .terminal-head { min-height: 38px; padding: 0 12px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted-strong); font-size: 13px; }

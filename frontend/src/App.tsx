@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -210,6 +210,10 @@ type ImplementationRunDto = {
   createdAt: string;
   updatedAt: string;
   terminalLines?: PreviewTerminalLineDto[] | null;
+  jobName?: string | null;
+  podName?: string | null;
+  lastCondition?: string | null;
+  lastEventSummary?: string | null;
 };
 
 type RepositoryCleanupRunDto = {
@@ -615,6 +619,7 @@ function App() {
   const [query, setQuery] = React.useState('');
   const [toasts, setToasts] = React.useState<ToastMessage[]>([]);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
+  const [apiBanner, setApiBanner] = React.useState<string | null>(null);
   const [selectedAiProvider, setSelectedAiProviderState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiProviderStorageKey));
   const [selectedAiModel, setSelectedAiModelState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiModelStorageKey));
   const [selectedAiReasoning, setSelectedAiReasoningState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiReasoningStorageKey));
@@ -694,11 +699,20 @@ function App() {
         api.get<GitOpsApplicationsResponseDto>(`/api/boards/${board.id}/gitops/applications`).catch(() => ({ applications: [], message: 'ArgoCD status is unavailable.' }))
       ]);
       setSelectedBoardId(board.id);
+      setApiBanner(null);
       setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, gitOpsApplications, busy: false });
     } catch (loadError) {
+      const banner = apiUnavailableBannerMessage(loadError);
+      if (banner) {
+        setApiBanner(banner);
+      }
       if (options?.silentBusy) {
         console.warn('Failed to refresh API state', loadError);
         setShell((current) => current.status === 'ready' ? { ...current, busy: false } : current);
+        return;
+      }
+      if (banner) {
+        setShell((current) => current.status === 'ready' ? { ...current, busy: false } : { status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
         return;
       }
       setShell({ status: 'error', message: loadError instanceof Error ? loadError.message : 'Failed to load API data' });
@@ -714,6 +728,8 @@ function App() {
       ]);
       setSelected({ status: 'open', detail, aiRuns: runs, busy: false });
     } catch (loadError) {
+      const banner = apiUnavailableBannerMessage(loadError);
+      if (banner) setApiBanner(banner);
       setSelected({ status: 'closed' });
       addToast('error', loadError instanceof Error ? loadError.message : 'Failed to load work item');
     }
@@ -803,10 +819,14 @@ function App() {
     setBusyAction(label);
     try {
       await action();
+      setApiBanner(null);
       addToast('success', `${label} completed.`);
       return true;
     } catch (actionError) {
-      addToast('error', actionError instanceof Error ? actionError.message : `${label} failed`);
+      const message = actionError instanceof Error ? actionError.message : `${label} failed`;
+      const banner = apiUnavailableBannerMessage(actionError);
+      if (banner) setApiBanner(banner);
+      addToast('error', message);
       return false;
     } finally {
       setBusyAction(null);
@@ -933,10 +953,16 @@ function App() {
       try {
         await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, actor, repositoryId, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
         await refreshAfterChange(workItemId);
+        setApiBanner(null);
         addToast('info', 'Repository implementation started. Follow the implementation run terminal.');
+        return null;
       } catch (implementationError) {
         await refreshAfterChange(workItemId);
-        addToast('error', implementationError instanceof Error ? implementationError.message : 'Repository implementation failed to start');
+        const message = implementationError instanceof Error ? implementationError.message : 'Repository implementation failed to start';
+        const banner = apiUnavailableBannerMessage(implementationError);
+        if (banner) setApiBanner(banner);
+        addToast('error', message);
+        return message;
       } finally {
         setBusyAction(null);
       }
@@ -1125,6 +1151,7 @@ function App() {
       />
       <main className="main">
         <Topbar query={query} onQueryChange={setQuery} userName={auth.status === 'ready' ? auth.userName : null} />
+        {apiBanner && <div className="api-status-banner" role="alert">{apiBanner}</div>}
         {auth.status === 'checking' && <Loading message="Checking authentication..." />}
         {auth.status === 'error' && <ErrorPanel message={auth.message} onRetry={() => window.location.reload()} />}
         {shell.status === 'loading' && <Loading />}
@@ -1346,7 +1373,7 @@ type BoardActions = {
   deleteCard(id: string): Promise<boolean>;
   startAiPlan(id: string): Promise<boolean>;
   approvePlan(runId: string, workItemId: string): Promise<void>;
-  startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<void>;
+  startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<string | null>;
   addGitHubIntegration(): Promise<boolean>;
   syncGitHubIntegration(): Promise<boolean>;
   saveGitHubRepositoryCreationPolicy(installationId: number, allowedTeamIds: string[]): Promise<boolean>;
@@ -2087,6 +2114,23 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
     previewHasGeneratedSource
   });
   const planQuestions = React.useMemo(() => selectedPlan?.plan ? extractPlanQuestions(selectedPlan.plan) : [], [selectedPlan?.plan]);
+  const [implementationStartError, setImplementationStartError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    setImplementationStartError(null);
+  }, [selectedPlan?.id, targetRepository?.repositoryId]);
+  const startSelectedPlan = React.useCallback(async () => {
+    if (!selectedPlan) return;
+    setImplementationStartError(null);
+    if (isRepositoryImplementation) {
+      const error = await actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null);
+      if (error) {
+        setImplementationStartError(error);
+      }
+      return;
+    }
+
+    await actions.approvePlan(selectedPlan.id, detail.item.id);
+  }, [actions, detail.item.id, isRepositoryImplementation, selectedPlan, targetRepository?.repositoryId]);
   return (
     <section className="panel ai-plan-panel">
       <PanelHeader icon={<Bot size={20} />} title="AI plans" />
@@ -2132,9 +2176,10 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
           )
           : <EmptyState>No AI plans yet.</EmptyState>}
         <div className="approval-row">
-          {selectedPlan && implementationAction.canStart && <button className="primary-action" disabled={busy} onClick={() => void (isRepositoryImplementation ? actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null) : actions.approvePlan(selectedPlan.id, detail.item.id))}><CheckCircle2 size={16} />{implementationAction.label}</button>}
+          {selectedPlan && implementationAction.canStart && <button className="primary-action" disabled={busy} onClick={() => void startSelectedPlan()}><CheckCircle2 size={16} />{implementationAction.label}</button>}
           {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
         </div>
+        {implementationStartError && <p className="failure-reason action-error">Implementation did not start: {implementationStartError}</p>}
         {implementationAction.retryContext && <p className="plan-help">{implementationAction.retryContext}</p>}
         {selectedPlan?.status === 'NeedsInput' && <p className="plan-help">Add a comment with answers, then generate a revised AI plan.</p>}
         {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{implementationAction.helpText}</p>}
@@ -2244,6 +2289,14 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
       {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
       {ready && run.pullRequestUrl && <SafeExternalLink className="url-box" href={run.pullRequestUrl}>Open pull request <ExternalLink size={16} /></SafeExternalLink>}
       {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
+      {(run.jobName || run.podName || run.lastCondition || run.lastEventSummary) && (
+        <div className="cleanup-diagnostics">
+          {run.jobName && <p>Job: <code>{run.jobName}</code></p>}
+          {run.podName && <p>Pod: <code>{run.podName}</code></p>}
+          {run.lastCondition && <p>Condition: {run.lastCondition}</p>}
+          {run.lastEventSummary && <p>Last event: {run.lastEventSummary}</p>}
+        </div>
+      )}
       <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
       <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
     </section>

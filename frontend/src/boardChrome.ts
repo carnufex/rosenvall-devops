@@ -66,6 +66,24 @@ export function repositoryCreatePermissionMessage(integration: GitHubRepositoryC
   return `You do not have permission to create repositories for ${account}. Ask the installation owner to allow your team in Settings.`;
 }
 
+export function apiUnavailableBannerMessage(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const normalized = message.toLowerCase();
+  if (normalized.includes('memory pressured')) {
+    return 'API is memory pressured. Implementation cannot start until capacity recovers.';
+  }
+
+  if (normalized.includes('503') ||
+    normalized.includes('service unavailable') ||
+    normalized.includes('failed to fetch') ||
+    normalized.includes('networkerror') ||
+    normalized.includes('api unavailable')) {
+    return 'API is restarting or unavailable. Latest known board state is still shown.';
+  }
+
+  return null;
+}
+
 export function timelineLaneForKind(kind: string): TimelineLane {
   const normalized = kind.toLowerCase();
   if (normalized.includes('cleanup')) return 'Cleanup';

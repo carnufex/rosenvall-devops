@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -37,6 +37,13 @@ test('github repository creation permission defaults open for old API and blocks
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true }), true);
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), false);
   assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), 'You do not have permission to create repositories for carnufex. Ask the installation owner to allow your team in Settings.');
+});
+
+test('api unavailable banner message is persistent and specific for 503 or network loss', () => {
+  assert.equal(apiUnavailableBannerMessage(new Error('503 Service Unavailable')), 'API is restarting or unavailable. Latest known board state is still shown.');
+  assert.equal(apiUnavailableBannerMessage(new Error('Failed to fetch')), 'API is restarting or unavailable. Latest known board state is still shown.');
+  assert.equal(apiUnavailableBannerMessage(new Error('Implementation cannot start because Rosenvall DevOps API is memory pressured.')), 'API is memory pressured. Implementation cannot start until capacity recovers.');
+  assert.equal(apiUnavailableBannerMessage(new Error('validation failed')), null);
 });
 
 test('timeline lanes classify implementation, cleanup, preview, pipeline and card events', () => {
