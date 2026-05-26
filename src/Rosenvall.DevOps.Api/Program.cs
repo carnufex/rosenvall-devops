@@ -25,6 +25,15 @@ builder.Services.AddTransient<IAiPlanProvider>(services => services.GetRequiredS
 builder.Services.AddSingleton<IAiPlanProvider, CodexCliPlanProvider>();
 builder.Services.AddSingleton<AiPlanProviderRouter>();
 builder.Services.AddSingleton<CodexCliPreviewSourceProvider>();
+builder.Services.AddSingleton<KubernetesPreviewSourceProvider>();
+builder.Services.AddSingleton<IPreviewSourceProvider>(services =>
+{
+    var configuration = services.GetRequiredService<IConfiguration>();
+    var mode = configuration["Ai:Codex:PreviewSourceMode"];
+    return string.Equals(mode, "kubernetes-job", StringComparison.OrdinalIgnoreCase)
+        ? services.GetRequiredService<KubernetesPreviewSourceProvider>()
+        : services.GetRequiredService<CodexCliPreviewSourceProvider>();
+});
 builder.Services.AddSingleton<RepositoryOnboardingDraftProvider>();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -1787,6 +1796,14 @@ namespace Rosenvall.DevOps.Api
         public static string Classify(string? message)
         {
             var text = string.IsNullOrWhiteSpace(message) ? "Kubernetes job submission failed." : message.Trim();
+            if (text.Contains("bwrap:", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("bubblewrap", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("No permissions to create a new namespace", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("unprivileged user namespaces", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Preview source generation could not start Codex tools because the runner sandbox is unavailable.";
+            }
+
             if (text.Contains("OOMKilled", StringComparison.OrdinalIgnoreCase) ||
                 text.Contains("exit code: 137", StringComparison.OrdinalIgnoreCase) ||
                 text.Contains("Exit Code: 137", StringComparison.OrdinalIgnoreCase))
@@ -2569,7 +2586,7 @@ namespace Rosenvall.DevOps.Api
 
     public sealed class PreviewImplementationRunner(
         DevOpsStore store,
-        CodexCliPreviewSourceProvider previewSourceProvider,
+        IPreviewSourceProvider previewSourceProvider,
         PreviewEnvironmentOrchestrator previews,
         IConfiguration configuration,
         IHubContext<DevOpsHub> hub,
@@ -6670,6 +6687,457 @@ namespace Rosenvall.DevOps.Api
         Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, string? reasoningEffort, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken);
     }
 
+    public static class PreviewSourceResultValidator
+    {
+        public static IReadOnlyList<PreviewSourceFile> ValidateGeneratedSource(IReadOnlyList<PreviewSourceFile> sourceFiles)
+        {
+            if (sourceFiles.All(file => !string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new AiPlanProviderUnavailableException("Codex preview source generation did not produce src/App.tsx; no preview was deployed.");
+            }
+
+            try
+            {
+                PreviewSourcePolicy.Validate(sourceFiles);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new AiPlanProviderUnavailableException($"{ex.Message} No preview was deployed.");
+            }
+
+            var appSource = sourceFiles.First(file => string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)).Content;
+            if (LooksLikeSeededPlaceholder(appSource))
+            {
+                throw new AiPlanProviderUnavailableException("Codex preview source generation left the seeded placeholder app unchanged; no preview was deployed.");
+            }
+
+            return sourceFiles;
+        }
+
+        public static bool LooksLikeSeededPlaceholder(string source) =>
+            source.Contains("React, TypeScript and Tailwind are ready for this ticket slice.", StringComparison.OrdinalIgnoreCase) ||
+            (source.Contains("\"Plan\"", StringComparison.Ordinal) &&
+             source.Contains("\"Build\"", StringComparison.Ordinal) &&
+             source.Contains("\"Preview\"", StringComparison.Ordinal));
+    }
+
+    public static class PreviewSourceJobResultParser
+    {
+        public static IReadOnlyList<PreviewSourceFile> ParseConfigMapJson(string configMapJson)
+        {
+            using var document = JsonDocument.Parse(configMapJson);
+            if (!document.RootElement.TryGetProperty("data", out var data) ||
+                data.ValueKind != JsonValueKind.Object ||
+                !data.TryGetProperty("result.json", out var resultElement) ||
+                resultElement.ValueKind != JsonValueKind.String)
+            {
+                throw new AiPlanProviderUnavailableException("Preview source job finished without a readable result artifact; no preview was deployed.");
+            }
+
+            return ParseResultJson(resultElement.GetString() ?? "");
+        }
+
+        public static IReadOnlyList<PreviewSourceFile> ParseResultJson(string resultJson)
+        {
+            using var document = JsonDocument.Parse(resultJson);
+            if (!document.RootElement.TryGetProperty("files", out var filesElement) ||
+                filesElement.ValueKind != JsonValueKind.Array)
+            {
+                throw new AiPlanProviderUnavailableException("Preview source job result did not contain source files; no preview was deployed.");
+            }
+
+            var files = filesElement.EnumerateArray()
+                .Select(file => new PreviewSourceFile(
+                    JsonString(file, "key", "Key", "source-file"),
+                    JsonString(file, "path", "Path", ""),
+                    JsonString(file, "content", "Content", "")))
+                .Where(file => !string.IsNullOrWhiteSpace(file.Path))
+                .ToArray();
+            return PreviewSourceResultValidator.ValidateGeneratedSource(files);
+        }
+
+        private static string JsonString(JsonElement element, string camelName, string pascalName, string fallback)
+        {
+            if (element.ValueKind == JsonValueKind.Object &&
+                element.TryGetProperty(camelName, out var camel) &&
+                camel.ValueKind == JsonValueKind.String)
+            {
+                return camel.GetString() ?? fallback;
+            }
+
+            if (element.ValueKind == JsonValueKind.Object &&
+                element.TryGetProperty(pascalName, out var pascal) &&
+                pascal.ValueKind == JsonValueKind.String)
+            {
+                return pascal.GetString() ?? fallback;
+            }
+
+            return fallback;
+        }
+    }
+
+    public static class PreviewSourcePromptBuilder
+    {
+        public static string BuildImplementationPrompt(AiRun run, WorkItemDetailDto context) =>
+            $$"""
+              You are implementing a Rosenvall DevOps preview source workspace.
+
+              Modify the existing Vite + React + TypeScript + Tailwind files in this current working directory.
+              Do not install packages, do not run external services, and do not remove the Vite allowedHosts configuration for .rosenvall.se.
+              Keep dependencies limited to the packages already present in package.json.
+              Implement the approved AI plan as actual interactive React source, not a placeholder summary.
+              You must replace the seeded Plan/Build/Preview placeholder UI with a domain-specific product UI for the work item.
+              Do not leave any card that says "React, TypeScript and Tailwind are ready for this ticket slice."
+              The first viewport must demonstrate the requested product or tool, not project status.
+              If the request needs save/export behavior, implement the best browser-only version using existing dependencies and Web APIs.
+              If a requested feature cannot be fully implemented without new packages or backend services, still build a convincing interactive frontend approximation and clearly preserve the requested labels, fields, and flow.
+              Preserve concrete language, visual, behavior, and content requirements from the work item and comments.
+
+              Work item: {{context.Item.Key}} {{context.Item.Title}}
+              Type: {{context.Item.Type}}
+              Priority: {{context.Item.Priority}}
+              Description:
+              {{context.Description}}
+
+              Approved plan #{{run.SequenceNumber}}:
+              {{run.Plan}}
+
+              Activity context:
+              {{string.Join("\n", context.Comments.Select(comment => $"- {comment.Author} ({comment.Kind}): {comment.Body}"))}}
+
+              Required result:
+              - Update source files in this workspace.
+              - The app must compile with the seeded Vite React TypeScript project.
+              - `src/App.tsx` must contain a real implementation of the requested app, including meaningful state and interactions when the work item asks for a tool or workflow.
+              - The UI copy should follow the language of the work item unless the plan explicitly says otherwise.
+              - Do not add explanatory implementation notes to the rendered UI.
+              - Return only a short implementation summary in your final message; the server reads source files from disk.
+              """;
+    }
+
+    public static class PreviewSourceJobManifestRenderer
+    {
+        public const string Namespace = RepositoryImplementationJobManifestRenderer.Namespace;
+        private const string PartOf = "rosenvall-devops-preview-source";
+
+        public static string JobName(AiRun run, WorkItemDetailDto context) =>
+            SafeName($"preview-source-{context.Item.Key}-{run.Id:N}");
+
+        public static string ResultConfigMapName(AiRun run) =>
+            SafeName($"preview-source-result-{run.Id:N}");
+
+        public static string Render(AiRun run, WorkItemDetailDto context, string model, string? reasoningEffort)
+        {
+            var jobName = JobName(run, context);
+            var resultConfigMap = ResultConfigMapName(run);
+            var seedFiles = SeedFiles(context);
+            var seed = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(seedFiles)));
+            var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(PreviewSourcePromptBuilder.BuildImplementationPrompt(run, context)));
+            return $$"""
+                   apiVersion: batch/v1
+                   kind: Job
+                   metadata:
+                     name: {{jobName}}
+                     namespace: {{Namespace}}
+                     labels:
+                       app.kubernetes.io/part-of: {{PartOf}}
+                       rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
+                       rosenvall.devops/preview-source-run: {{run.Id}}
+                   spec:
+                     backoffLimit: 0
+                     activeDeadlineSeconds: 600
+                     ttlSecondsAfterFinished: 1800
+                     template:
+                       metadata:
+                         labels:
+                           app.kubernetes.io/name: {{jobName}}
+                           app.kubernetes.io/part-of: {{PartOf}}
+                           rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
+                           rosenvall.devops/preview-source-run: {{run.Id}}
+                       spec:
+                         serviceAccountName: rosenvall-devops-runtime
+                         automountServiceAccountToken: true
+                         restartPolicy: Never
+                         securityContext:
+                           fsGroup: 1000
+                           seccompProfile:
+                             type: RuntimeDefault
+                         volumes:
+                           - name: codex-home
+                             emptyDir: {}
+                           - name: runner-home
+                             emptyDir: {}
+                           - name: codex-home-source
+                             persistentVolumeClaim:
+                               claimName: rosenvall-devops-codex-home
+                         initContainers:
+                           - name: prepare-codex-home
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               runAsUser: 0
+                               runAsGroup: 0
+                               allowPrivilegeEscalation: false
+                             volumeMounts:
+                               - name: codex-home
+                                 mountPath: /app/codex-home
+                               - name: runner-home
+                                 mountPath: /home/ubuntu
+                               - name: codex-home-source
+                                 mountPath: /codex-home-source
+                                 readOnly: true
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 mkdir -p /app/codex-home /home/ubuntu
+                                 for file in auth.json config.toml installation_id models_cache.json; do
+                                   if [ -f "/codex-home-source/$file" ]; then
+                                     cp -a "/codex-home-source/$file" "/app/codex-home/$file"
+                                   fi
+                                 done
+                                 mkdir -p /app/codex-home/tmp
+                                 chown -R 1000:1000 /app/codex-home /home/ubuntu
+                                 chmod 700 /app/codex-home/tmp
+                                 if [ -f /app/codex-home/auth.json ]; then chmod 600 /app/codex-home/auth.json; fi
+                                 if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
+                         containers:
+                           - name: runner
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               runAsNonRoot: true
+                               runAsUser: 1000
+                               runAsGroup: 1000
+                               allowPrivilegeEscalation: false
+                               capabilities:
+                                 drop:
+                                   - ALL
+                             volumeMounts:
+                               - name: codex-home
+                                 mountPath: /app/codex-home
+                               - name: runner-home
+                                 mountPath: /home/ubuntu
+                             env:
+                               - name: HOME
+                                 value: /home/ubuntu
+                               - name: USER
+                                 value: ubuntu
+                               - name: SHELL
+                                 value: /bin/bash
+                               - name: CODEX_HOME
+                                 value: /app/codex-home
+                               - name: CODEX_MODEL
+                                 value: "{{Escape(model)}}"
+                               - name: CODEX_REASONING_EFFORT
+                                 value: "{{Escape(CodexCliArguments.NormalizeReasoningEffort(reasoningEffort) ?? "high")}}"
+                               - name: ROSENVALL_PREVIEW_SEED_B64
+                                 value: "{{seed}}"
+                               - name: ROSENVALL_PREVIEW_PROMPT_B64
+                                 value: "{{prompt}}"
+                               - name: ROSENVALL_RESULT_NAMESPACE
+                                 value: "{{Namespace}}"
+                               - name: ROSENVALL_RESULT_CONFIGMAP
+                                 value: "{{resultConfigMap}}"
+                               - name: ROSENVALL_WORK_ITEM_KEY
+                                 value: "{{Escape(context.Item.Key)}}"
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 workspace="/tmp/rosenvall-preview-source"
+                                 mkdir -p "$workspace"
+                                 echo "RDO_STEP=Seeding"
+                                 printf '%s' "$ROSENVALL_PREVIEW_SEED_B64" | base64 -d > "$workspace/seed.json"
+                                 WORKSPACE="$workspace" node <<'NODE'
+                                 const fs = require('fs');
+                                 const path = require('path');
+                                 const workspace = process.env.WORKSPACE;
+                                 const files = JSON.parse(fs.readFileSync(path.join(workspace, 'seed.json'), 'utf8'));
+                                 for (const file of files) {
+                                   const relative = String(file.path ?? file.Path ?? '').replace(/\\/g, '/');
+                                   if (!relative || relative.startsWith('/') || relative.includes('..')) {
+                                     throw new Error(`Unsafe preview seed path: ${relative}`);
+                                   }
+                                   const target = path.join(workspace, relative);
+                                   fs.mkdirSync(path.dirname(target), { recursive: true });
+                                   fs.writeFileSync(target, String(file.content ?? file.Content ?? ''), 'utf8');
+                                 }
+                                 NODE
+                                 printf '%s' "$ROSENVALL_PREVIEW_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
+                                 echo "RDO_STEP=Implementing"
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox workspace-write -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md"
+                                 echo "RDO_STEP=Collecting"
+                                 WORKSPACE="$workspace" node <<'NODE'
+                                 const fs = require('fs');
+                                 const path = require('path');
+                                 const workspace = process.env.WORKSPACE;
+                                 const skipped = new Set(['node_modules', 'dist', '.git', '.codex']);
+                                 const skippedFiles = new Set(['seed.json', 'prompt.md', 'result.json']);
+                                 const files = [];
+                                 function keyFor(relative) {
+                                   return relative.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'source-file';
+                                 }
+                                 function walk(directory) {
+                                   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                                     if (skipped.has(entry.name)) continue;
+                                     const full = path.join(directory, entry.name);
+                                     const relative = path.relative(workspace, full).replace(/\\/g, '/');
+                                     if (entry.isDirectory()) {
+                                       walk(full);
+                                     } else if (!skippedFiles.has(relative)) {
+                                       files.push({ key: keyFor(relative), path: relative, content: fs.readFileSync(full, 'utf8').trimEnd() });
+                                     }
+                                   }
+                                 }
+                                 walk(workspace);
+                                 fs.writeFileSync(path.join(workspace, 'result.json'), JSON.stringify({ files }), 'utf8');
+                                 NODE
+                                 kubectl -n "$ROSENVALL_RESULT_NAMESPACE" delete configmap "$ROSENVALL_RESULT_CONFIGMAP" --ignore-not-found=true
+                                 kubectl -n "$ROSENVALL_RESULT_NAMESPACE" create configmap "$ROSENVALL_RESULT_CONFIGMAP" --from-file=result.json="$workspace/result.json"
+                                 kubectl -n "$ROSENVALL_RESULT_NAMESPACE" label configmap "$ROSENVALL_RESULT_CONFIGMAP" app.kubernetes.io/part-of={{PartOf}} rosenvall.devops/work-item="$ROSENVALL_WORK_ITEM_KEY" rosenvall.devops/preview-source-run={{run.Id}} --overwrite
+                                 echo "RDO_RESULT_CONFIGMAP=$ROSENVALL_RESULT_CONFIGMAP"
+                   """;
+        }
+
+        public static string RenderDelete(AiRun run, WorkItemDetailDto context) =>
+            $$"""
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: {{JobName(run, context)}}
+                namespace: {{Namespace}}
+              ---
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: {{ResultConfigMapName(run)}}
+                namespace: {{Namespace}}
+              """;
+
+        private static IReadOnlyList<PreviewSourceFile> SeedFiles(WorkItemDetailDto context)
+        {
+            var humanComments = context.Comments
+                .Where(comment => !string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(comment => comment.CreatedAt)
+                .Select(comment => comment.Body);
+            return LocalReactPreviewProject.ForWorkItem(context.Item.Key, context.Item.Title, context.Description, humanComments);
+        }
+
+        private static string SafeName(string value)
+        {
+            var chars = value.ToLowerInvariant()
+                .Select(character => char.IsLetterOrDigit(character) ? character : '-')
+                .ToArray();
+            var safe = new string(chars).Trim('-');
+            while (safe.Contains("--", StringComparison.Ordinal))
+            {
+                safe = safe.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return string.IsNullOrWhiteSpace(safe) ? "preview-source" : safe[..Math.Min(safe.Length, 63)].Trim('-');
+        }
+
+        private static string Escape(string? value) =>
+            (value ?? "")
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal)
+                .Replace("\t", "\\t", StringComparison.Ordinal);
+    }
+
+    public sealed class KubernetesPreviewSourceProvider(PipelineJobOrchestrator jobs, IConfiguration configuration, ILogger<KubernetesPreviewSourceProvider> logger) : IPreviewSourceProvider
+    {
+        public async Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, string? reasoningEffort, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
+        {
+            var jobName = PreviewSourceJobManifestRenderer.JobName(run, context);
+            var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:PreviewSourceJobTimeoutSeconds", configuration.GetValue("Ai:Codex:ImplementationTimeoutSeconds", 600)));
+            await ReportTerminalAsync(onTerminalLine, "system", $"Queuing Kubernetes preview source job {jobName}.");
+
+            await jobs.DeleteAsync(PreviewSourceJobManifestRenderer.RenderDelete(run, context), cancellationToken);
+            var apply = await jobs.ApplyAsync(PreviewSourceJobManifestRenderer.Render(run, context, model, reasoningEffort), cancellationToken);
+            if (!apply.Succeeded)
+            {
+                throw new AiPlanProviderUnavailableException($"{KubernetesFailureClassifier.Classify(apply.Message)} No preview was deployed.");
+            }
+
+            var startedAt = DateTimeOffset.UtcNow;
+            var emittedLogLines = 0;
+            while (DateTimeOffset.UtcNow - startedAt < timeout)
+            {
+                var logsResult = await jobs.GetOutputAsync($"logs -n {PreviewSourceJobManifestRenderer.Namespace} job/{jobName} --all-containers --tail=240", cancellationToken);
+                if (logsResult.Succeeded && !string.IsNullOrWhiteSpace(logsResult.Message))
+                {
+                    var lines = logsResult.Message.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var line in lines.Skip(emittedLogLines))
+                    {
+                        await ReportTerminalAsync(onTerminalLine, line.Contains("RDO_", StringComparison.OrdinalIgnoreCase) ? "system" : "agent", line);
+                    }
+
+                    emittedLogLines = lines.Length;
+                }
+
+                var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+                if (jobResult.Succeeded)
+                {
+                    using var document = JsonDocument.Parse(jobResult.Message);
+                    var succeeded = StatusInt(document.RootElement, "succeeded");
+                    var failed = StatusInt(document.RootElement, "failed");
+                    if (succeeded > 0)
+                    {
+                        var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+                        if (!result.Succeeded)
+                        {
+                            throw new AiPlanProviderUnavailableException("Preview source job finished without its result ConfigMap; no preview was deployed.");
+                        }
+
+                        await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
+                        return PreviewSourceJobResultParser.ParseConfigMapJson(result.Message);
+                    }
+
+                    if (failed > 0)
+                    {
+                        var detail = logsResult.Succeeded ? logsResult.Message : jobResult.Message;
+                        var classified = KubernetesFailureClassifier.Classify(detail);
+                        logger.LogWarning("Preview source job {JobName} failed: {Failure}", jobName, classified);
+                        throw new AiPlanProviderUnavailableException($"{classified} No preview was deployed.");
+                    }
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
+
+            throw new AiPlanProviderUnavailableException($"Preview source job {jobName} timed out after {timeout.TotalSeconds:0} seconds; no preview was deployed.");
+        }
+
+        private static int StatusInt(JsonElement root, string property)
+        {
+            if (root.TryGetProperty("status", out var status) &&
+                status.ValueKind == JsonValueKind.Object &&
+                status.TryGetProperty(property, out var value) &&
+                value.TryGetInt32(out var parsed))
+            {
+                return parsed;
+            }
+
+            return 0;
+        }
+
+        private static Task ReportTerminalAsync(Func<PreviewTerminalLineDto, Task>? onTerminalLine, string stream, string message)
+        {
+            var clean = Regex.Replace(message, @"\x1B\[[0-?]*[ -/]*[@-~]", "").TrimEnd();
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                return Task.CompletedTask;
+            }
+
+            return onTerminalLine?.Invoke(new PreviewTerminalLineDto(DateTimeOffset.UtcNow, stream, clean)) ?? Task.CompletedTask;
+        }
+    }
+
     public sealed class CodexCliPreviewSourceProvider(IConfiguration configuration, ILogger<CodexCliPreviewSourceProvider> logger) : IPreviewSourceProvider
     {
         private static readonly string[] SkippedDirectories = ["node_modules", "dist", ".git", ".codex"];
@@ -6702,7 +7170,7 @@ namespace Rosenvall.DevOps.Api
                     throw new AiPlanProviderUnavailableException("Codex preview source provider could not start; preview source was not generated.");
                 }
 
-                await process.StandardInput.WriteAsync(BuildImplementationPrompt(run, context).AsMemory(), cancellationToken);
+                await process.StandardInput.WriteAsync(PreviewSourcePromptBuilder.BuildImplementationPrompt(run, context).AsMemory(), cancellationToken);
                 process.StandardInput.Close();
 
                 var outputBuilder = new StringBuilder();
@@ -6732,26 +7200,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var sourceFiles = await CollectWorkspaceSourceFilesAsync(workspacePath, cancellationToken);
-                if (sourceFiles.All(file => !string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)))
-                {
-                    throw new AiPlanProviderUnavailableException("Codex preview source generation did not produce src/App.tsx; no preview was deployed.");
-                }
-
-                try
-                {
-                    PreviewSourcePolicy.Validate(sourceFiles);
-                }
-                catch (ArgumentException ex)
-                {
-                    throw new AiPlanProviderUnavailableException($"{ex.Message} No preview was deployed.");
-                }
-
-                var appSource = sourceFiles.First(file => string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)).Content;
-                if (LooksLikeSeededPlaceholder(appSource))
-                {
-                    throw new AiPlanProviderUnavailableException("Codex preview source generation left the seeded placeholder app unchanged; no preview was deployed.");
-                }
-
+                PreviewSourceResultValidator.ValidateGeneratedSource(sourceFiles);
                 await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
                 return sourceFiles;
             }
@@ -9732,6 +10181,7 @@ namespace Rosenvall.DevOps.Api
                     documents.Add(previewManifest);
                 }
 
+                documents.AddRange(RenderPreviewSourceRunCleanupDocuments(item, _aiRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.CreatedAt)));
                 documents.AddRange(RenderImplementationRunCleanupDocuments(item, _implementationRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.CreatedAt)));
                 documents.AddRange(RenderRepositoryCleanupRunCleanupDocuments(item, _repositoryCleanupRuns.Where(run => run.WorkItemId == workItemId).OrderBy(run => run.CreatedAt)));
 
@@ -9766,6 +10216,19 @@ namespace Rosenvall.DevOps.Api
                         .OrderBy(run => run.CreatedAt));
                 return documents.Count == 0 ? null : string.Join("\n---\n", documents);
             }
+        }
+
+        private IReadOnlyList<string> RenderPreviewSourceRunCleanupDocuments(WorkItemRecord item, IEnumerable<AiRun> runs)
+        {
+            var documents = new List<string>();
+            var cleanupContext = ToWorkItemDetailForCleanup(item);
+            foreach (var run in runs.Where(run => string.Equals(run.Provider, "codex", StringComparison.OrdinalIgnoreCase)))
+            {
+                documents.Add(RenderDeleteStub("batch/v1", "Job", PreviewSourceJobManifestRenderer.JobName(run, cleanupContext), PreviewSourceJobManifestRenderer.Namespace));
+                documents.Add(RenderDeleteStub("v1", "ConfigMap", PreviewSourceJobManifestRenderer.ResultConfigMapName(run), PreviewSourceJobManifestRenderer.Namespace));
+            }
+
+            return documents;
         }
 
         private IReadOnlyList<string> RenderImplementationRunCleanupDocuments(WorkItemRecord item, IEnumerable<ImplementationRunDto> runs)

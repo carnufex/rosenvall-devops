@@ -2061,7 +2061,12 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           {!activeRepositoryCleanupRun && hasRepositoryPr && <CleanupAdoptionPanel workItemId={detail.item.id} busy={busy} onAdopt={actions.adoptCleanupPullRequest} />}
           {detail.preview && (
             <PreviewPanel preview={detail.preview} busy={busy} onRetry={async () => {
-              await actions.startPreview(detail.item.id);
+              const retryPlan = selectedPlan ?? sortedPlans.find((run) => run.status === 'Approved' || run.status === 'PlanReady');
+              if (detail.preview?.failureReason === 'ImplementationFailed' && retryPlan) {
+                await actions.approvePlan(retryPlan.id, detail.item.id);
+              } else {
+                await actions.startPreview(detail.item.id);
+              }
             }} />
           )}
           <PreviewHistoryPanel detail={detail} aiRuns={sortedPlans} />
@@ -2368,8 +2373,10 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
   const failed = status === 'Failed';
   const waiting = !running && !failed;
   const implementing = status === 'Implementing';
-  const canRetrySetup = failed && ((preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml);
+  const failedDuringSourceGeneration = preview.failureReason === 'ImplementationFailed';
+  const canRetrySetup = failed && (failedDuringSourceGeneration || (preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml);
   const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
+  const retryLabel = failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
   const steps = previewLifecycleSteps(preview);
   return (
     <section className="panel compact-panel preview-panel">
@@ -2394,7 +2401,7 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
-      {failed && canRetrySetup && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />Retry preview setup</button>}
+      {failed && canRetrySetup && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />{retryLabel}</button>}
       {failed && !canRetrySetup && <p className="namespace-note">Source generation did not finish, so there is no Kubernetes preview manifest to retry.</p>}
     </section>
   );

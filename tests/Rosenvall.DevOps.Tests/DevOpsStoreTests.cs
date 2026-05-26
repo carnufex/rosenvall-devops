@@ -1355,6 +1355,27 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Work_item_cleanup_manifest_includes_preview_source_runtime_artifacts()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "gör en hemsida med en klocka", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build a clock preview.")!;
+        run.Approve("crille");
+        var context = store.GetWorkItemDetail(item.Id)!;
+
+        var manifest = store.RenderWorkItemCleanupManifest(item.Id)!;
+
+        Assert.Contains(PreviewSourceJobManifestRenderer.JobName(run, context), manifest);
+        Assert.Contains(PreviewSourceJobManifestRenderer.ResultConfigMapName(run), manifest);
+        Assert.Contains("kind: Job", manifest);
+        Assert.Contains("kind: ConfigMap", manifest);
+        Assert.DoesNotContain("kind: PersistentVolumeClaim", manifest);
+        Assert.DoesNotContain("rosenvall-devops-codex-home", manifest);
+    }
+
+    [Fact]
     public async Task Planning_prompt_includes_board_ai_context_gitops_settings_and_skill_references_only()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -2981,6 +3002,73 @@ public sealed class DevOpsStoreTests
         var error = await Assert.ThrowsAsync<AiPlanProviderUnavailableException>(() => provider.GenerateSourceAsync("gpt-5.4", run, context, null, CancellationToken.None));
 
         Assert.Contains("seeded placeholder app unchanged", error.Message);
+    }
+
+    [Fact]
+    public void Preview_source_job_manifest_uses_isolated_codex_home_and_workspace_sandbox()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+        var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "gör en hemsida med en klocka", "Todo", "Medium", null));
+        var run = fixture.Store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build a clock preview.")!;
+        run.Approve("crille");
+        var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+
+        var manifest = PreviewSourceJobManifestRenderer.Render(run, context, "gpt-5.4", "high");
+
+        Assert.Contains("kind: Job", manifest);
+        Assert.Contains("namespace: rosenvall-devops", manifest);
+        Assert.Contains("serviceAccountName: rosenvall-devops-runtime", manifest);
+        Assert.Contains("app.kubernetes.io/part-of: rosenvall-devops-preview-source", manifest);
+        Assert.Contains("name: prepare-codex-home", manifest);
+        Assert.Contains("name: codex-home-source", manifest);
+        Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
+        Assert.Contains("readOnly: true", manifest);
+        Assert.Contains("emptyDir: {}", manifest);
+        Assert.Contains("mountPath: /app/codex-home", manifest);
+        Assert.Contains("name: CODEX_HOME", manifest);
+        Assert.Contains("value: /app/codex-home", manifest);
+        Assert.Contains("name: HOME", manifest);
+        Assert.Contains("value: /home/ubuntu", manifest);
+        Assert.Contains("codex exec --ephemeral", manifest);
+        Assert.Contains("--sandbox workspace-write", manifest);
+        Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
+        Assert.Contains("ROSENVALL_PREVIEW_SEED_B64", manifest);
+        Assert.Contains("ROSENVALL_RESULT_CONFIGMAP", manifest);
+        Assert.Contains("kubectl -n \"$ROSENVALL_RESULT_NAMESPACE\" create configmap \"$ROSENVALL_RESULT_CONFIGMAP\"", manifest);
+    }
+
+    [Fact]
+    public void Preview_source_job_result_accepts_real_app_and_rejects_placeholder()
+    {
+        var goodResult = """
+            {
+              "data": {
+                "result.json": "{\"files\":[{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"},{\"key\":\"vite-config-ts\",\"path\":\"vite.config.ts\",\"content\":\"export default {};\"}]}"
+              }
+            }
+            """;
+        var placeholderResult = """
+            {
+              "data": {
+                "result.json": "{\"files\":[{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"React, TypeScript and Tailwind are ready for this ticket slice.\"}]}"
+              }
+            }
+            """;
+
+        var files = PreviewSourceJobResultParser.ParseConfigMapJson(goodResult);
+        var error = Assert.Throws<AiPlanProviderUnavailableException>(() => PreviewSourceJobResultParser.ParseConfigMapJson(placeholderResult));
+
+        Assert.Contains(files, file => file.Path == "src/App.tsx" && file.Content.Contains("Klocka", StringComparison.Ordinal));
+        Assert.Contains("seeded placeholder app unchanged", error.Message);
+    }
+
+    [Fact]
+    public void Bubblewrap_preview_source_failure_is_reported_clearly()
+    {
+        var message = KubernetesFailureClassifier.Classify("bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.");
+
+        Assert.Equal("Preview source generation could not start Codex tools because the runner sandbox is unavailable.", message);
     }
 
     [Fact]
