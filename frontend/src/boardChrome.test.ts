@@ -36,7 +36,10 @@ test('github repository creation permission defaults open for old API and blocks
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex' }), true);
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true }), true);
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), false);
+  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: false }), false);
+  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: true }), true);
   assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), 'You do not have permission to create repositories for carnufex. Ask the installation owner to allow your team in Settings.');
+  assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: false }), 'Authorize GitHub user access before creating repositories under carnufex.');
 });
 
 test('api unavailable banner message is persistent and specific for 503 or network loss', () => {

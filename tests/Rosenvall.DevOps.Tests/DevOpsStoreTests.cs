@@ -1962,6 +1962,61 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task GitHub_client_returns_sanitized_repository_creation_error()
+    {
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent("""{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/repos/repos#create-a-repository-for-the-authenticated-user"}""")
+            }))
+        {
+            BaseAddress = new Uri("https://api.github.com")
+        };
+        var github = new GitHubRepositoryClient(httpClient, new ConfigurationBuilder().Build());
+        var integration = new GitHubIntegrationDto(Guid.NewGuid(), 123, "carnufex", "User", "Active", 1, "crille", DateTimeOffset.UtcNow);
+
+        var result = await github.CreateRepositoryResultAsync(integration, new CreateGitHubRepositoryRequest(123, "new-board"), "user-token", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Null(result.Repository);
+        Assert.Equal(HttpStatusCode.Forbidden, result.StatusCode);
+        Assert.Contains("Resource not accessible by integration", result.Message);
+        Assert.DoesNotContain("documentation_url", result.Message);
+    }
+
+    [Fact]
+    public void GitHub_manifest_requests_repository_administration_and_user_authorization_callback()
+    {
+        var github = new GitHubRepositoryClient(new HttpClient(new StaticHttpHandler(HttpStatusCode.OK, "{}")), new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PublicBaseUrl"] = "https://devops.rosenvall.se"
+            })
+            .Build());
+
+        var page = github.RenderManifestStartPage("state-123");
+
+        Assert.Contains("administration", page);
+        Assert.Contains("write", page);
+        Assert.Contains("/integrations/github/user-authorization/callback", page);
+    }
+
+    [Fact]
+    public void GitHub_app_secret_renderer_includes_optional_oauth_client_credentials()
+    {
+        var manifest = GitHubAppSecretRenderer.Render(new GitHubManifestAppDto(
+            123,
+            "rosenvall-devops",
+            "Rosenvall DevOps",
+            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+            "Iv1.client",
+            "client-secret"));
+
+        Assert.Contains("client-id: \"Iv1.client\"", manifest);
+        Assert.Contains("client-secret: \"client-secret\"", manifest);
+    }
+
+    [Fact]
     public async Task GitHub_client_commits_onboarding_guidance_files_in_one_commit()
     {
         var requests = new List<(HttpMethod Method, string Path, string Body)>();

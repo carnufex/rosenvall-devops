@@ -309,6 +309,9 @@ type GitHubIntegrationDto = {
   canCreateRepositories?: boolean;
   repositoryCreatorTeamIds?: string[] | null;
   canManageRepositoryCreationPolicy?: boolean;
+  requiresUserAuthorizationForRepositoryCreation?: boolean;
+  hasUserAuthorization?: boolean;
+  authorizedGitHubLogin?: string | null;
 };
 
 type BoardSecretDto = {
@@ -980,6 +983,18 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
+    authorizeGitHubUser: async (installationId) => {
+      return runAction('Starting GitHub user authorization', async () => {
+        const result = await api.get<{ authorizationUrl: string }>(`/api/integrations/github/user-authorization/start?installationId=${installationId}`);
+        window.location.assign(result.authorizationUrl);
+      });
+    },
+    revokeGitHubUserAuthorization: async (installationId) => {
+      return runAction('Revoking GitHub user authorization', async () => {
+        await api.delete(`/api/integrations/github/${installationId}/user-authorization`);
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
     saveGitHubRepositoryCreationPolicy: async (installationId, allowedTeamIds) => {
       return runAction('Saving GitHub repository creation policy', async () => {
         await api.put<GitHubIntegrationDto>(`/api/integrations/github/${installationId}/repository-creation-policy`, { allowedTeamIds });
@@ -1377,6 +1392,8 @@ type BoardActions = {
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<string | null>;
   addGitHubIntegration(): Promise<boolean>;
   syncGitHubIntegration(): Promise<boolean>;
+  authorizeGitHubUser(installationId: number): Promise<boolean>;
+  revokeGitHubUserAuthorization(installationId: number): Promise<boolean>;
   saveGitHubRepositoryCreationPolicy(installationId: number, allowedTeamIds: string[]): Promise<boolean>;
   syncBoardRepository(boardId: string, request: SyncBoardRepositoryRequest): Promise<boolean>;
   adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<boolean>;
@@ -3026,6 +3043,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
             onPromptChange={setNewRepoPrompt}
             onDraftChange={setOnboardingDraft}
             createPermissionMessage={createPermissionMessage}
+            onAuthorizeGitHubUser={actions.authorizeGitHubUser}
           />
         )}
         {usesGitHub && form.repositoryRemoteUrl && (
@@ -3076,7 +3094,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
   );
 }
 
-function NewRepositoryOnboardingPanel({ form, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, error, createPermissionMessage, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange }: {
+function NewRepositoryOnboardingPanel({ form, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, error, createPermissionMessage, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange, onAuthorizeGitHubUser }: {
   form: CreateBoardForm;
   installationId: number | null;
   integrations: GitHubIntegrationDto[];
@@ -3094,10 +3112,12 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
   onPrivateChange: (value: boolean) => void;
   onPromptChange: (value: string) => void;
   onDraftChange: React.Dispatch<React.SetStateAction<GitHubRepositoryOnboardingDraftDto | null>>;
+  onAuthorizeGitHubUser: (installationId: number) => Promise<boolean>;
 }) {
   const updateFile = (index: number, patch: Partial<GitHubRepositoryOnboardingFileDto>) => {
     onDraftChange((current) => current ? { ...current, files: current.files.map((file, fileIndex) => fileIndex === index ? { ...file, ...patch } : file) } : current);
   };
+  const selectedIntegration = integrations.find((integration) => integration.installationId === selectedInstallationId) ?? null;
 
   return (
     <section className="repository-profile-panel">
@@ -3121,8 +3141,20 @@ function NewRepositoryOnboardingPanel({ form, installationId, integrations, repo
         <label className="full-width">What should this repository be for?<textarea value={prompt} onChange={(event) => onPromptChange(event.target.value)} placeholder="Describe the repo purpose, stack, operating model, and any conventions Codex should encode as guidance." /></label>
       </div>
       {!installationId && <p className="failure-reason">No GitHub App installation is available for creating a repository.</p>}
-      {installationId && <p className="provider-status">GitHub installation: {integrations.find((integration) => integration.installationId === installationId)?.accountLogin ?? installationId}. New repositories are private by default.</p>}
-      {createPermissionMessage && <p className="failure-reason">{createPermissionMessage}</p>}
+      {installationId && <p className="provider-status">GitHub installation: {selectedIntegration?.accountLogin ?? installationId}. New repositories are private by default.</p>}
+      {selectedIntegration?.requiresUserAuthorizationForRepositoryCreation && selectedIntegration.hasUserAuthorization && (
+        <p className="provider-status">GitHub user authorization connected{selectedIntegration.authorizedGitHubLogin ? ` as ${selectedIntegration.authorizedGitHubLogin}` : ''}.</p>
+      )}
+      {createPermissionMessage && (
+        <div className="settings-inline warning-inline">
+          <p className="failure-reason">{createPermissionMessage}</p>
+          {selectedIntegration?.requiresUserAuthorizationForRepositoryCreation && !selectedIntegration.hasUserAuthorization && (
+            <button type="button" className="secondary" onClick={() => void onAuthorizeGitHubUser(selectedIntegration.installationId)}>
+              <Github size={16} />Authorize GitHub user
+            </button>
+          )}
+        </div>
+      )}
       <p className="provider-status">Repository names are normalized to kebab-case, for example <code>date-site</code>.</p>
       {error && <p className="failure-reason">{error}</p>}
       {draft && (
@@ -3730,8 +3762,25 @@ function GitHubRepositoryCreationPolicyEditor({ integration, teams, actions }: {
         <div className="status-badges">
           <span className={integration.status === 'Active' ? 'state-good' : 'state-muted'}>{integration.status}</span>
           <span className={canCreate ? 'state-good' : 'state-muted'}>{canCreate ? 'Can create repos' : 'Link only'}</span>
+          {integration.requiresUserAuthorizationForRepositoryCreation && (
+            <span className={integration.hasUserAuthorization ? 'state-good' : 'state-muted'}>
+              {integration.hasUserAuthorization ? 'User authorized' : 'User auth required'}
+            </span>
+          )}
         </div>
       </div>
+      {integration.requiresUserAuthorizationForRepositoryCreation && (
+        <div className="settings-inline">
+          <p className={integration.hasUserAuthorization ? 'provider-status' : 'failure-reason'}>
+            {integration.hasUserAuthorization
+              ? `Repository creation user authorization is connected${integration.authorizedGitHubLogin ? ` as ${integration.authorizedGitHubLogin}` : ''}.`
+              : `Authorize GitHub user access before creating repositories under ${integration.accountLogin}.`}
+          </p>
+          {integration.hasUserAuthorization
+            ? <button className="secondary compact" type="button" onClick={() => void actions.revokeGitHubUserAuthorization(integration.installationId)}><Trash2 size={14} />Revoke user authorization</button>
+            : <button className="secondary compact" type="button" onClick={() => void actions.authorizeGitHubUser(integration.installationId)}><Github size={14} />Authorize GitHub user</button>}
+        </div>
+      )}
       <fieldset className="team-picker compact-team-picker" disabled={!canManage || teams.length === 0}>
         <legend>Teams allowed to create repositories</legend>
         {teams.length === 0

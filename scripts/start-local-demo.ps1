@@ -30,6 +30,8 @@ $previousGitHubToken = $env:GitHub__Token
 $previousGitHubAppId = $env:GitHub__AppId
 $previousGitHubAppPrivateKey = $env:GitHub__AppPrivateKey
 $previousGitHubAppSlug = $env:GitHub__AppSlug
+$previousGitHubAppClientId = $env:GitHub__AppClientId
+$previousGitHubAppClientSecret = $env:GitHub__AppClientSecret
 $previousGitHubTokenSecretName = $env:GitHub__TokenSecretName
 $previousRepositoriesProvider = $env:Repositories__Provider
 $previousRepositoriesMode = $env:Repositories__Mode
@@ -129,6 +131,8 @@ if (-not $SkipClusterSecrets -and $ApiMode -eq "Local") {
     Set-EnvIfBlank "GitHub__AppId" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "app-id" $kubectlBaseArgs)
     Set-EnvIfBlank "GitHub__AppPrivateKey" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "private-key" $kubectlBaseArgs)
     Set-EnvIfBlank "GitHub__AppSlug" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "app-slug" $kubectlBaseArgs)
+    Set-EnvIfBlank "GitHub__AppClientId" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "client-id" $kubectlBaseArgs)
+    Set-EnvIfBlank "GitHub__AppClientSecret" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "client-secret" $kubectlBaseArgs)
     Set-EnvIfBlank "GitHub__TokenSecretName" "rosenvall-devops-github"
     Set-EnvIfBlank "Repositories__Provider" "GitHub"
     Set-EnvIfBlank "Repositories__Mode" "GitHubApp"
@@ -181,6 +185,8 @@ $env:GitHub__Token = $previousGitHubToken
 $env:GitHub__AppId = $previousGitHubAppId
 $env:GitHub__AppPrivateKey = $previousGitHubAppPrivateKey
 $env:GitHub__AppSlug = $previousGitHubAppSlug
+$env:GitHub__AppClientId = $previousGitHubAppClientId
+$env:GitHub__AppClientSecret = $previousGitHubAppClientSecret
 $env:GitHub__TokenSecretName = $previousGitHubTokenSecretName
 $env:Repositories__Provider = $previousRepositoriesProvider
 $env:Repositories__Mode = $previousRepositoriesMode
