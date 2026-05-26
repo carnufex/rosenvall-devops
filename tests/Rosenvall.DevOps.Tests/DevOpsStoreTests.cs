@@ -2284,7 +2284,7 @@ public sealed class DevOpsStoreTests
             Assert.False(result.UseInClusterAuth);
             Assert.Equal(kubeconfig, result.Path);
             Assert.Null(result.MissingMessage);
-            Assert.Contains(result.CheckedPaths, path => path.EndsWith("Rosenvalls-Homelab\\tofu\\output\\kubeconfig", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(kubeconfig, result.CheckedPaths);
         }
         finally
         {
