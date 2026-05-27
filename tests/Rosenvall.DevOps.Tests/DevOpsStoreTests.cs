@@ -3556,19 +3556,35 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Preview_source_job_result_accepts_real_app_and_rejects_placeholder()
+    public void Preview_source_prompt_forbids_readme_and_documentation_artifacts()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+        var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "clock", "Build a Swedish clock app.", "Todo", "Medium", null));
+        var run = fixture.Store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build a clock preview.")!;
+        run.Approve("crille");
+        var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+
+        var prompt = PreviewSourcePromptBuilder.BuildImplementationPrompt(run, context);
+
+        Assert.Contains("Do not create or update README", prompt);
+        Assert.Contains("runtime Vite/React source", prompt);
+    }
+
+    [Fact]
+    public void Preview_source_job_result_accepts_real_app_ignores_readme_and_rejects_placeholder()
     {
         var goodResult = """
             {
               "data": {
-                "result.json": "{\"files\":[{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"},{\"key\":\"vite-config-ts\",\"path\":\"vite.config.ts\",\"content\":\"export default {};\"}]}"
+                "result.json": "{\"files\":[{\"key\":\"readme-md\",\"path\":\"README.md\",\"content\":\"# Klocka\"},{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"},{\"key\":\"vite-config-ts\",\"path\":\"vite.config.ts\",\"content\":\"export default {};\"}]}"
               }
             }
             """;
         var placeholderResult = """
             {
               "data": {
-                "result.json": "{\"files\":[{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"React, TypeScript and Tailwind are ready for this ticket slice.\"}]}"
+                "result.json": "{\"files\":[{\"key\":\"readme-md\",\"path\":\"README.md\",\"content\":\"# Placeholder\"},{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"React, TypeScript and Tailwind are ready for this ticket slice.\"}]}"
               }
             }
             """;
@@ -3577,7 +3593,24 @@ public sealed class DevOpsStoreTests
         var error = Assert.Throws<AiPlanProviderUnavailableException>(() => PreviewSourceJobResultParser.ParseConfigMapJson(placeholderResult));
 
         Assert.Contains(files, file => file.Path == "src/App.tsx" && file.Content.Contains("Klocka", StringComparison.Ordinal));
+        Assert.DoesNotContain(files, file => file.Path == "README.md");
         Assert.Contains("seeded placeholder app unchanged", error.Message);
+    }
+
+    [Fact]
+    public void Preview_source_job_result_still_rejects_non_documentation_files_outside_allowed_paths()
+    {
+        var result = """
+            {
+              "data": {
+                "result.json": "{\"files\":[{\"key\":\"env\",\"path\":\".env\",\"content\":\"SECRET=1\"},{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"}]}"
+              }
+            }
+            """;
+
+        var error = Assert.Throws<AiPlanProviderUnavailableException>(() => PreviewSourceJobResultParser.ParseConfigMapJson(result));
+
+        Assert.Contains("outside the allowed React preview paths", error.Message);
     }
 
     [Fact]
