@@ -124,6 +124,7 @@ var githubManifestStates = new ConcurrentDictionary<string, DateTimeOffset>(Stri
 var githubManifestStateLifetime = TimeSpan.FromMinutes(20);
 var githubUserAuthorizationStates = new ConcurrentDictionary<string, GitHubUserAuthorizationState>(StringComparer.Ordinal);
 var githubUserAuthorizationStateLifetime = TimeSpan.FromMinutes(20);
+const string GitHubRepositoryCreationDisabledMessage = "GitHub repository creation is disabled. Link an existing repository instead.";
 
 app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github) =>
 {
@@ -297,6 +298,38 @@ api.MapPut("/boards/{boardId:guid}/hosting", (Guid boardId, BoardHostingSettings
     return store.UpdateBoardHostingSettings(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound();
 });
 
+api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var actor = string.IsNullOrWhiteSpace(request.Actor) ? "crille" : request.Actor.Trim();
+    var manifest = store.RenderBoardCleanupManifest(boardId, configuration);
+    if (manifest is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (!string.IsNullOrWhiteSpace(manifest))
+    {
+        var cleanup = await previews.DeleteAsync(manifest, cancellationToken);
+        if (!cleanup.Succeeded)
+        {
+            return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    if (!store.DeleteBoard(boardId, actor))
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("boardDeleted", boardId);
+    return Results.NoContent();
+});
+
 api.MapGet("/boards/{boardId:guid}/timeline", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanViewBoardRequest(store, boardId, user))
@@ -340,63 +373,8 @@ api.MapPost("/repositories/github/onboarding-draft", async (GitHubRepositoryOnbo
     return Results.Ok(await onboarding.CreateDraftAsync(request, cancellationToken));
 });
 
-api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, CancellationToken cancellationToken) =>
-{
-    var actorSubject = AuthenticatedSubjectOrNull(user);
-    var resolvedInstallationId = request.InstallationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
-    if (request.InstallationId is { } requestedInstallationId && !store.CanUseGitHubInstallation(requestedInstallationId, actorSubject))
-    {
-        return RepositoryMutationForbidden();
-    }
-
-    if (resolvedInstallationId is null || !store.CanCreateGitHubRepository(resolvedInstallationId.Value, actorSubject))
-    {
-        return RepositoryMutationForbidden();
-    }
-
-    var integration = store.GetGitHubIntegration(resolvedInstallationId);
-    if (integration is null)
-    {
-        return Results.Problem("No GitHub App installation is available for repository creation.", statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-
-    var files = RepositoryOnboardingDrafts.ValidateGuidanceFiles(request.Files);
-    if (files.Count == 0)
-    {
-        return Results.Problem("New GitHub repositories require at least one editable onboarding guidance file.", statusCode: StatusCodes.Status400BadRequest);
-    }
-
-    var repositoryToken = await ResolveRepositoryCreationTokenAsync(store, github, userTokenStore, integration, EffectiveActorSubject(actorSubject), cancellationToken);
-    if (!repositoryToken.Succeeded)
-    {
-        return Results.Problem(repositoryToken.Message, statusCode: repositoryToken.StatusCode);
-    }
-
-    var creation = await github.CreateRepositoryResultAsync(integration, request, repositoryToken.Token, cancellationToken);
-    if (!creation.Succeeded || creation.Repository is null)
-    {
-        return Results.Problem(creation.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
-    var createdRepository = creation.Repository;
-
-    var committed = await github.CommitRepositoryFilesAsync(createdRepository, files, repositoryToken.Token, "Initialize repository guidance", cancellationToken);
-    if (!committed)
-    {
-        return Results.Problem("GitHub repository was created, but the onboarding guidance commit failed.", statusCode: StatusCodes.Status502BadGateway);
-    }
-
-    var repository = store.CreateRepository(new CreateRepositoryRequest(
-        createdRepository.Provider,
-        createdRepository.Name,
-        createdRepository.RemoteUrl,
-        createdRepository.DefaultBranch,
-        createdRepository.WebUrl,
-        createdRepository.Owner,
-        request.ImplementationProfile ?? createdRepository.ImplementationProfile,
-        request.ImplementationWorkflow ?? createdRepository.ImplementationWorkflow));
-
-    return Results.Created($"/api/repositories/{repository.Id}", new GitHubRepositoryCreateResponse(repository, request.RepositoryProfile, request.AiContext));
-});
+api.MapPost("/repositories/github", () =>
+    Results.Problem(GitHubRepositoryCreationDisabledMessage, statusCode: StatusCodes.Status403Forbidden));
 
 api.MapGet("/me", (ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -486,11 +464,11 @@ api.MapGet("/integrations/github/{installationId:long}/user-authorization", (lon
     var authorization = store.GetGitHubUserAuthorization(installationId, actorSubject);
     return Results.Ok(new GitHubUserAuthorizationStatusDto(
         installationId,
-        IsUserAccount(integration),
+        false,
         authorization is not null,
         authorization?.GitHubLogin,
         authorization?.ExpiresAt,
-        authorization is null ? $"Authorize GitHub user access before creating repositories under {integration.AccountLogin}." : $"Connected as {authorization.GitHubLogin}."));
+        authorization is null ? "GitHub user authorization is disabled because repository creation is disabled." : $"Connected as {authorization.GitHubLogin}."));
 });
 api.MapGet("/integrations/github/user-authorization/start", (long installationId, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github) =>
 {
@@ -634,7 +612,7 @@ api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepos
 
     return store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound();
 });
-api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, SyncGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, CancellationToken cancellationToken) =>
+api.MapPost("/boards/{boardId:guid}/repositories/github", (Guid boardId, SyncGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanMutateBoardRequest(store, boardId, user))
     {
@@ -668,37 +646,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, S
             : Results.NotFound();
     }
 
-    var integration = store.GetGitHubIntegration(request.InstallationId);
-    if (integration is null)
-    {
-        return Results.Problem("No GitHub App installation is available for repository creation.", statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-
-    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
-    var repositoryToken = await ResolveRepositoryCreationTokenAsync(store, github, userTokenStore, integration, actorSubject, cancellationToken);
-    if (!repositoryToken.Succeeded)
-    {
-        return Results.Problem(repositoryToken.Message, statusCode: repositoryToken.StatusCode);
-    }
-
-    var creation = await github.CreateRepositoryResultAsync(integration, request, repositoryToken.Token, cancellationToken);
-    if (!creation.Succeeded || creation.Repository is null)
-    {
-        return Results.Problem(creation.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
-    var createdRepository = creation.Repository;
-
-    var repository = store.CreateRepository(new CreateRepositoryRequest(
-        createdRepository.Provider,
-        createdRepository.Name,
-        createdRepository.RemoteUrl,
-        createdRepository.DefaultBranch,
-        createdRepository.WebUrl,
-        createdRepository.Owner,
-        request.ImplementationProfile ?? createdRepository.ImplementationProfile));
-    return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(repository.Id, true, request.ImplementationProfile ?? repository.ImplementationProfile)) is { } board
-        ? Results.Created($"/api/repositories/{repository.Id}", board)
-        : Results.NotFound();
+    return Results.Problem(GitHubRepositoryCreationDisabledMessage, statusCode: StatusCodes.Status403Forbidden);
 });
 api.MapPut("/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile", (Guid boardId, Guid repositoryId, RepositoryProfileDto request, ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -1881,7 +1829,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardRepositoryDto(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, RepositoryDto Repository, RepositoryProfileDto? Profile = null, string ImplementationWorkflow = "direct-pr");
     public sealed record BoardTeamAccessDto(Guid BoardId, Guid TeamId, string TeamName, string Role);
     public sealed record BoardGitOpsSettingsDto(Guid BoardId, IReadOnlyList<string> AllowedPaths, string ArgoNamespace, string ArgoApplicationSelector);
-    public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain);
+    public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain, string AgentInstructions = "");
     public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, RepositoryProfileDto? RepositoryProfileDraft = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null);
     public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, string RepositorySyncState = "Preview only", IReadOnlyList<string>? ProviderCapabilities = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
@@ -1961,7 +1909,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null, RepositoryProfileDto? RepositoryProfile = null, string? ImplementationWorkflow = null, string? PublicHostname = null);
     public sealed record BoardHostingSettingsRequest(string? PublicHostname, string? ImplementationWorkflow = null);
     public sealed record BoardGitOpsSettingsRequest(IReadOnlyList<string>? AllowedPaths, string? ArgoNamespace, string? ArgoApplicationSelector);
-    public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain);
+    public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain, string? AgentInstructions = null);
     public sealed record LinkBoardRepositoryRequest(Guid RepositoryId, bool IsPrimary, string? ImplementationProfile = null);
     public sealed record SyncGitHubRepositoryRequest(Guid? RepositoryId = null, string? Owner = null, string? Name = null, bool Private = true, string? Description = null, long? InstallationId = null, string? ImplementationProfile = null, bool CreateNew = false, string? RemoteUrl = null, string? WebUrl = null, string? DefaultBranch = null, string? ImplementationWorkflow = null);
     public sealed record UpsertBoardTeamAccessRequest(string Role);
@@ -5297,6 +5245,7 @@ namespace Rosenvall.DevOps.Api
             if (board.AiContext is not null)
             {
                 builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
+                builder.AppendLine($"Board agent instructions: {EmptyAsNone(board.AiContext.AgentInstructions)}");
                 builder.AppendLine($"Enabled board skills: {ListOrNone(board.AiContext.EnabledSkills)}");
                 builder.AppendLine(board.AiContext.AskWhenUncertain
                     ? "Ask blocking questions only when required facts are missing after applying board instructions, GitOps settings, repository profile signals, and enabled repo skill drafts. Do not ask questions that these skills or conventions answer."
@@ -5334,6 +5283,7 @@ namespace Rosenvall.DevOps.Api
             if (board.AiContext is not null)
             {
                 builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
+                builder.AppendLine($"Board agent instructions: {EmptyAsNone(board.AiContext.AgentInstructions)}");
                 builder.AppendLine($"Enabled board skills: {ListOrNone(board.AiContext.EnabledSkills)}");
                 builder.AppendLine("Use these skills when relevant; do not assume unrelated skills are active.");
             }
@@ -9751,6 +9701,43 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public bool DeleteBoard(Guid boardId, string actor = "system")
+        {
+            lock (_lock)
+            {
+                var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+                if (board is null)
+                {
+                    return false;
+                }
+
+                var itemIds = _items.Where(item => item.BoardId == boardId).Select(item => item.Id).ToHashSet();
+                _boards.Remove(board);
+                _items.RemoveAll(item => item.BoardId == boardId);
+                _comments.RemoveAll(comment => itemIds.Contains(comment.WorkItemId));
+                _aiRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _aiSessions.RemoveAll(session => itemIds.Contains(session.WorkItemId));
+                _previews.RemoveAll(preview => itemIds.Contains(preview.WorkItemId));
+                _development.RemoveAll(development => itemIds.Contains(development.WorkItemId));
+                _implementationRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _repositoryCleanupRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _pipelineRuns.RemoveAll(run => run.BoardId == boardId || run.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
+                _previewEvents.RemoveAll(entry => entry.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
+                _timelineEvents.RemoveAll(entry =>
+                    entry.BoardId == boardId ||
+                    entry.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
+                _boardAccess.RemoveAll(access => access.BoardId == boardId);
+                _boardTeamAccess.RemoveAll(access => access.BoardId == boardId);
+                _boardRepositoryLinks.RemoveAll(link => link.BoardId == boardId);
+                _boardRepositoryProfiles.RemoveAll(profile => profile.BoardId == boardId);
+                _boardSecrets.RemoveAll(secret => secret.BoardId == boardId);
+                _boardGitOpsSettings.RemoveAll(settings => settings.BoardId == boardId);
+                _boardAiContexts.RemoveAll(context => context.BoardId == boardId);
+                Persist();
+                return true;
+            }
+        }
+
         public WorkItemDetailDto? GetWorkItemDetail(Guid workItemId)
         {
             lock (_lock)
@@ -11387,7 +11374,7 @@ namespace Rosenvall.DevOps.Api
                     githubAppConfigured ? "GitHub" : configuration["Repositories:Provider"] ?? "Forgejo",
                     githubAppConfigured ? "GitHubApp" : configuration["Repositories:Mode"] ?? "LinkExistingFirst",
                     githubAppConfigured ? "https://api.github.com" : configuration["Repositories:Forgejo:ApiBaseUrl"] ?? "https://git.rosenvall.se/api/v1",
-                    githubAppConfigured || configuration.GetValue("Repositories:Forgejo:CanCreateRepositories", false)),
+                    false),
                 new AuthentikSettingsDto(
                     !string.IsNullOrWhiteSpace(configuration["Authentik:Authority"]) || !string.IsNullOrWhiteSpace(configuration["Authentik:UsersEndpoint"]),
                     configuration["Authentik:Authority"] ?? configuration["Authentication:Authority"] ?? "https://authentik.rosenvall.se",
@@ -11506,6 +11493,43 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 return documents.Count == 0 ? null : string.Join("\n---\n", documents);
+            }
+        }
+
+        public string? RenderBoardCleanupManifest(Guid boardId, IConfiguration configuration)
+        {
+            lock (_lock)
+            {
+                if (_boards.All(board => board.Id != boardId))
+                {
+                    return null;
+                }
+
+                var documents = new List<string>();
+                foreach (var item in _items.Where(item => item.BoardId == boardId).OrderBy(item => item.SortOrder))
+                {
+                    var manifest = RenderWorkItemCleanupManifest(item.Id);
+                    if (!string.IsNullOrWhiteSpace(manifest))
+                    {
+                        documents.Add(manifest);
+                    }
+                }
+
+                foreach (var run in _pipelineRuns.Where(run => run.BoardId == boardId && run.WorkItemId is null).OrderBy(run => run.StartedAt))
+                {
+                    var repository = _repositories.SingleOrDefault(repository => repository.Id == run.RepositoryId);
+                    if (repository is not null)
+                    {
+                        documents.Add(RenderDeleteStub("batch/v1", "Job", PipelineJobManifestRenderer.JobName(run, repository), PipelineJobManifestRenderer.Namespace));
+                    }
+                }
+
+                foreach (var secret in _boardSecrets.Where(secret => secret.BoardId == boardId).OrderBy(secret => secret.Key))
+                {
+                    documents.Add(RenderDeleteStub("v1", "Secret", BoardSecretManifestRenderer.SecretName(secret), BoardSecretManifestRenderer.Namespace(configuration)));
+                }
+
+                return documents.Count == 0 ? "" : string.Join("\n---\n", documents);
             }
         }
 
@@ -12243,10 +12267,10 @@ namespace Rosenvall.DevOps.Api
             var authorization = GitHubUserAuthorizationForWithoutLock(integration.InstallationId, actorSubject);
             return integration with
             {
-                CanCreateRepositories = CanCreateGitHubRepositoryWithoutLock(integration, actorSubject),
+                CanCreateRepositories = false,
                 RepositoryCreatorTeamIds = policy.AllowedTeamIds,
                 CanManageRepositoryCreationPolicy = CanManageGitHubRepositoryCreationPolicyWithoutLock(integration, actorSubject),
-                RequiresUserAuthorizationForRepositoryCreation = integration.AccountType.Equals("User", StringComparison.OrdinalIgnoreCase),
+                RequiresUserAuthorizationForRepositoryCreation = false,
                 HasUserAuthorization = authorization is not null,
                 AuthorizedGitHubLogin = authorization?.GitHubLogin
             };
@@ -12288,6 +12312,11 @@ namespace Rosenvall.DevOps.Api
                 authorization.GitHubLogin.Equals(integration.AccountLogin, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
+            }
+
+            if (integration.AccountType.Equals("User", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
             }
 
             var policy = RepositoryCreationPolicyForWithoutLock(integration.InstallationId);
@@ -12533,7 +12562,7 @@ namespace Rosenvall.DevOps.Api
             paths.Zip(LegacyDefaultGitOpsAllowedPaths).All(pair => string.Equals(pair.First, pair.Second, StringComparison.OrdinalIgnoreCase));
 
         private static BoardAiContextDto DefaultAiContext(Guid boardId) =>
-            new(boardId, "", [], true);
+            new(boardId, "", [], true, "");
 
         private static BoardGitOpsSettingsDto CreateGitOpsSettings(Guid boardId, BoardGitOpsSettingsRequest? request)
         {
@@ -12551,7 +12580,8 @@ namespace Rosenvall.DevOps.Api
                 boardId,
                 string.IsNullOrWhiteSpace(request?.Instructions) ? "" : request.Instructions.Trim(),
                 NormalizeSkills(request?.EnabledSkills),
-                request?.AskWhenUncertain ?? defaultAskWhenUncertain);
+                request?.AskWhenUncertain ?? defaultAskWhenUncertain,
+                string.IsNullOrWhiteSpace(request?.AgentInstructions) ? "" : request.AgentInstructions.Trim());
 
         private static IReadOnlyList<string> NormalizePaths(IEnumerable<string>? paths) =>
             (paths ?? [])
