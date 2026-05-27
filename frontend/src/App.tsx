@@ -1,8 +1,8 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
-import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { implementationActionState, isImplementationRunPendingStatus, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
   Activity,
@@ -13,6 +13,7 @@ import {
   GitPullRequest,
   Github,
   History,
+  KeyRound,
   LayoutDashboard,
   Maximize2,
   PanelLeft,
@@ -48,7 +49,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-type View = 'dashboard' | 'board' | 'timeline' | 'gitops' | 'configuration' | 'teams' | 'settings';
+type View = 'dashboard' | 'board' | 'timeline' | 'gitops' | 'ai' | 'environment' | 'configuration' | 'teams' | 'settings';
 
 type LoadShellOptions = {
   silentBusy?: boolean;
@@ -77,6 +78,8 @@ type Board = {
   aiContext?: BoardAiContextDto | null;
   repositorySyncState?: string | null;
   providerCapabilities?: string[] | null;
+  implementationWorkflow?: ImplementationWorkflow | string | null;
+  publicHostname?: string | null;
 };
 
 type BoardGitOpsSettingsDto = {
@@ -91,6 +94,7 @@ type BoardAiContextDto = {
   instructions: string;
   enabledSkills: string[];
   askWhenUncertain: boolean;
+  agentInstructions?: string | null;
 };
 
 type RepositoryDto = {
@@ -103,6 +107,7 @@ type RepositoryDto = {
   createdAt: string;
   owner?: string | null;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
+  implementationWorkflow?: ImplementationWorkflow | string | null;
 };
 
 type BoardRepositoryDto = {
@@ -112,6 +117,7 @@ type BoardRepositoryDto = {
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
   repository: RepositoryDto;
   profile?: RepositoryProfileDto | null;
+  implementationWorkflow?: ImplementationWorkflow | string | null;
 };
 
 type BoardTeamAccessDto = {
@@ -157,6 +163,8 @@ type WorkItemDetail = {
     repositoryProfile: string;
     gitOpsSettings?: BoardGitOpsSettingsDto | null;
     aiContext?: BoardAiContextDto | null;
+    implementationWorkflow?: ImplementationWorkflow | string | null;
+    publicHostname?: string | null;
   } | null;
 };
 
@@ -482,52 +490,25 @@ type AssigneeDto = {
 type CreateBoardForm = {
   name: string;
   repositoryProvider: 'GitHub' | 'GenericGit' | string;
-  providerMode: 'NoRepository' | 'GitHub' | 'GitHubNew' | 'CustomUrl';
+  providerMode: 'NoRepository' | 'GitHub' | 'CustomUrl';
   repositoryId?: string | null;
   repositoryOwner: string;
   repositoryRemoteUrl: string;
   repositoryWebUrl: string;
   repositoryDefaultBranch: string;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | 'gitops-homelab';
+  implementationWorkflow: ImplementationWorkflow;
+  publicHostname: string;
   teamIds: string[];
   gitOpsAllowedPaths: string;
   argoNamespace: string;
   argoApplicationSelector: string;
   aiInstructions: string;
+  agentInstructions: string;
   enabledSkills: string;
   capabilityTags: string;
   skillDrafts: RepositorySkillDraftDto[];
   askWhenUncertain: boolean;
-};
-
-type GitHubRepositoryOnboardingFileDto = {
-  path: string;
-  content: string;
-};
-
-type GitHubRepositoryOnboardingDraftDto = {
-  name: string;
-  description: string;
-  prompt: string;
-  repositoryProfile: RepositoryProfileDto;
-  aiContext: {
-    instructions?: string | null;
-    enabledSkills?: string[] | null;
-    askWhenUncertain?: boolean | null;
-  };
-  files: GitHubRepositoryOnboardingFileDto[];
-  source: string;
-  model?: string | null;
-};
-
-type GitHubRepositoryCreateResponse = {
-  repository: RepositoryDto;
-  repositoryProfile?: RepositoryProfileDto | null;
-  aiContext?: {
-    instructions?: string | null;
-    enabledSkills?: string[] | null;
-    askWhenUncertain?: boolean | null;
-  } | null;
 };
 
 type GitHubRepositoryPickerDto = {
@@ -583,11 +564,14 @@ const emptyBoardForm: CreateBoardForm = {
   repositoryWebUrl: '',
   repositoryDefaultBranch: 'main',
   implementationProfile: 'code-repo',
+  implementationWorkflow: 'direct-pr',
+  publicHostname: '',
   teamIds: [],
   gitOpsAllowedPaths: 'apps/\nclusters/\ninfrastructure/\nkubernetes/\ntofu/',
   argoNamespace: 'argocd',
   argoApplicationSelector: '',
   aiInstructions: '',
+  agentInstructions: '',
   enabledSkills: 'kubernetes\nargocd\ngitops-homelab',
   capabilityTags: 'kubernetes\nargocd',
   skillDrafts: [],
@@ -874,19 +858,22 @@ function App() {
           repositoryDefaultBranch: hasRepository ? form.repositoryDefaultBranch || 'main' : null,
           repositoryOwner: hasRepository ? form.repositoryOwner || repositoryOwnerFromRemote(form.repositoryRemoteUrl) : null,
           implementationProfile: form.implementationProfile,
+          implementationWorkflow: hasRepository ? form.implementationWorkflow : 'preview-only',
+          publicHostname: hasRepository ? form.publicHostname || null : null,
           providerMode: form.providerMode,
           customRepositoryUrl: form.providerMode === 'CustomUrl' ? form.repositoryRemoteUrl : null,
-          gitHubRepositoryId: form.providerMode === 'GitHub' || form.providerMode === 'GitHubNew' ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : null,
+          gitHubRepositoryId: form.providerMode === 'GitHub' ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : null,
           teamIds: form.teamIds,
           gitOpsSettings: form.implementationProfile === 'gitops-homelab' ? {
             allowedPaths: linesFromTextarea(form.gitOpsAllowedPaths),
             argoNamespace: form.argoNamespace,
             argoApplicationSelector: form.argoApplicationSelector
           } : null,
-          aiContext: form.implementationProfile === 'gitops-homelab' || form.aiInstructions.trim() || form.enabledSkills.trim() ? {
+          aiContext: form.implementationProfile === 'gitops-homelab' || form.aiInstructions.trim() || form.agentInstructions.trim() || form.enabledSkills.trim() ? {
             instructions: form.aiInstructions,
             enabledSkills: linesFromTextarea(form.enabledSkills),
-            askWhenUncertain: form.askWhenUncertain
+            askWhenUncertain: form.askWhenUncertain,
+            agentInstructions: form.agentInstructions
           } : null,
           repositoryProfile: repositoryProfileFromForm(form)
         });
@@ -940,6 +927,14 @@ function App() {
         }
 
         await refreshAfterChange(id);
+      });
+    },
+    deleteBoard: async (boardId) => {
+      return runAction('Deleting board and cleaning runtime resources', async () => {
+        await api.post<unknown>(`/api/boards/${boardId}/delete-and-clean-up`, { actor });
+        setSelected({ status: 'closed' });
+        setSelectedBoardId(null);
+        await loadShell();
       });
     },
     startAiPlan: async (id) => {
@@ -998,24 +993,6 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
-    authorizeGitHubUser: async (installationId) => {
-      return runAction('Starting GitHub user authorization', async () => {
-        const result = await api.get<{ authorizationUrl: string }>(`/api/integrations/github/user-authorization/start?installationId=${installationId}`);
-        window.location.assign(result.authorizationUrl);
-      });
-    },
-    revokeGitHubUserAuthorization: async (installationId) => {
-      return runAction('Revoking GitHub user authorization', async () => {
-        await api.delete(`/api/integrations/github/${installationId}/user-authorization`);
-        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
-      });
-    },
-    saveGitHubRepositoryCreationPolicy: async (installationId, allowedTeamIds) => {
-      return runAction('Saving GitHub repository creation policy', async () => {
-        await api.put<GitHubIntegrationDto>(`/api/integrations/github/${installationId}/repository-creation-policy`, { allowedTeamIds });
-        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
-      });
-    },
     syncBoardRepository: async (boardId, request) => {
       return runAction('Syncing board to GitHub', async () => {
         const board = await api.post<Board>(`/api/boards/${boardId}/repositories/github`, request);
@@ -1054,6 +1031,12 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
+    updateBoardHosting: async (boardId, settings) => {
+      return runAction('Saving board hosting', async () => {
+        await api.put<Board>(`/api/boards/${boardId}/hosting`, settings);
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
     updateBoardRepositoryProfile: async (boardId, repositoryId, profile) => {
       return runAction('Saving repository profile', async () => {
         await api.put<Board>(`/api/boards/${boardId}/repositories/${repositoryId}/profile`, profile);
@@ -1070,6 +1053,13 @@ function App() {
       return runAction('Approving PR and stopping preview', async () => {
         await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
+      });
+    },
+    approvePreviewForPr: async (workItemId) => {
+      return runAction('Creating PR from approved preview', async () => {
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/preview/approve-for-pr`, { actor });
+        await refreshAfterChange(workItemId);
+        addToast('info', 'Pull request creation started from the approved preview.');
       });
     },
     startPreview: async (workItemId) => {
@@ -1192,7 +1182,9 @@ function App() {
             {activeView === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
             {activeView === 'board' && <BoardView board={board} actions={actions} onSyncBoard={() => setSyncBoardOpen(true)} />}
             {activeView === 'timeline' && <TimelineView board={shell.board} timeline={shell.timeline} />}
-            {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} onBack={() => setView('board')} />}
+            {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} actions={actions} onBack={() => setView('board')} />}
+            {activeView === 'ai' && <SettingsView scope="ai" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'environment' && <SettingsView scope="environment" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
             {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
             {activeView === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
             {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
@@ -1402,23 +1394,23 @@ type BoardActions = {
   createCard(form: WorkItemForm): Promise<boolean>;
   updateCard(id: string, form: WorkItemForm): Promise<boolean>;
   deleteCard(id: string): Promise<boolean>;
+  deleteBoard(boardId: string): Promise<boolean>;
   startAiPlan(id: string): Promise<boolean>;
   approvePlan(runId: string, workItemId: string): Promise<void>;
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<string | null>;
   addGitHubIntegration(): Promise<boolean>;
   syncGitHubIntegration(): Promise<boolean>;
-  authorizeGitHubUser(installationId: number): Promise<boolean>;
-  revokeGitHubUserAuthorization(installationId: number): Promise<boolean>;
-  saveGitHubRepositoryCreationPolicy(installationId: number, allowedTeamIds: string[]): Promise<boolean>;
   syncBoardRepository(boardId: string, request: SyncBoardRepositoryRequest): Promise<boolean>;
   adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<boolean>;
   createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<boolean>;
   deleteBoardSecret(boardId: string, secretId: string): Promise<boolean>;
   updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<boolean>;
   updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<boolean>;
+  updateBoardHosting(boardId: string, settings: { publicHostname?: string | null; implementationWorkflow?: string | null }): Promise<boolean>;
   updateBoardRepositoryProfile(boardId: string, repositoryId: string, profile: RepositoryProfileDto): Promise<boolean>;
   discardPlan(runId: string, workItemId: string): Promise<boolean>;
   approvePullRequest(workItemId: string): Promise<boolean>;
+  approvePreviewForPr(workItemId: string): Promise<boolean>;
   startPreview(workItemId: string): Promise<boolean>;
   stopPreview(workItemId: string): Promise<boolean>;
   addComment(id: string, body: string): Promise<boolean>;
@@ -1449,7 +1441,7 @@ type SyncBoardRepositoryRequest = {
 function useStateFromHash(): [View, (view: View) => void] {
   const readHash = () => {
     const next = (window.location.hash.replace('#', '') as View) || 'board';
-    return ['dashboard', 'board', 'timeline', 'gitops', 'configuration', 'teams', 'settings'].includes(next) ? next : 'board';
+    return ['dashboard', 'board', 'timeline', 'gitops', 'ai', 'environment', 'configuration', 'teams', 'settings'].includes(next) ? next : 'board';
   };
   const [view, setViewState] = React.useState<View>(readHash);
   React.useEffect(() => {
@@ -1494,6 +1486,8 @@ function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSel
         <NavButton active={view === 'board'} icon={<PanelLeft size={20} />} label="Board" onClick={() => onChange('board')} />
         <NavButton active={view === 'timeline'} icon={<History size={20} />} label="Timeline" onClick={() => onChange('timeline')} />
         {showGitOps && <NavButton active={view === 'gitops'} icon={<Boxes size={20} />} label="GitOps" onClick={() => onChange('gitops')} />}
+        <NavButton active={view === 'ai'} icon={<Bot size={20} />} label="AI" onClick={() => onChange('ai')} />
+        <NavButton active={view === 'environment'} icon={<KeyRound size={20} />} label="Environment" onClick={() => onChange('environment')} />
         <NavButton active={view === 'configuration'} icon={<Settings size={20} />} label="Configuration" onClick={() => onChange('configuration')} />
       </nav>
       <nav className="side-nav global-nav" aria-label="Global navigation">
@@ -1895,9 +1889,10 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
   );
 }
 
-function GitOpsView({ board, gitOpsApplications, onBack }: {
+function GitOpsView({ board, gitOpsApplications, actions, onBack }: {
   board: Board;
   gitOpsApplications: GitOpsApplicationsResponseDto;
+  actions: BoardActions;
   onBack: () => void;
 }) {
   return (
@@ -1906,6 +1901,10 @@ function GitOpsView({ board, gitOpsApplications, onBack }: {
         <button className="secondary" onClick={onBack}>Back to board</button>
       </BoardHeader>
       <div className="gitops-content">
+        <SectionTitle icon={<Settings size={22} />} title="GitOps settings" />
+        <section className="panel form-panel">
+          <GitOpsSettingsForm board={board} actions={actions} />
+        </section>
         <SectionTitle icon={<Boxes size={22} />} title="Applications" />
         <section className="panel form-panel">
           <GitOpsApplicationsPanel response={gitOpsApplications} />
@@ -1989,8 +1988,10 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const defaultPlan = [...sortedPlans].reverse().find((run) => run.status === 'PlanReady') ?? sortedPlans[sortedPlans.length - 1];
   const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(() => defaultPlan?.id ?? null);
   const selectedPlan = sortedPlans.find((run) => run.id === selectedPlanId) ?? defaultPlan;
-  const targetRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const targetRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
   const [targetRepositoryId, setTargetRepositoryId] = React.useState<string | null>(() => targetRepositories.find((entry) => entry.isPrimary)?.repositoryId ?? targetRepositories[0]?.repositoryId ?? null);
+  const selectedTargetRepository = targetRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? targetRepositories.find((entry) => entry.isPrimary) ?? targetRepositories[0];
+  const selectedWorkflow = workflowForRepositoryProfile(selectedTargetRepository?.implementationProfile ?? board?.repository?.implementationProfile, selectedTargetRepository?.implementationWorkflow ?? board?.implementationWorkflow ?? board?.repository?.implementationWorkflow ?? null);
 
   React.useEffect(() => {
     setForm(formFromDetail(detail));
@@ -2010,6 +2011,11 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const cleanupPending = isImplementationRunPendingStatus(activeRepositoryCleanupRun?.status);
   const cleanupReady = activeRepositoryCleanupRun?.status === 'PullRequestReady' || activeRepositoryCleanupRun?.status === 'Merged';
   const hasRepositoryPr = !!detail.item.pullRequestUrl || (detail.implementationRuns ?? []).some((run) => !!run.pullRequestUrl);
+  const canApprovePreviewForPr = selectedWorkflow === 'preview-then-pr' &&
+    detail.preview?.status === 'Running' &&
+    (detail.preview.sourceFiles?.length ?? 0) > 0 &&
+    !detail.development?.pullRequestUrl &&
+    !isImplementationRunPendingStatus(activeImplementationRun?.status);
   const cleanupActionLabel = cleanupPending
     ? 'Repository cleanup running'
     : cleanupReady
@@ -2100,7 +2106,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
               } else {
                 await actions.startPreview(detail.item.id);
               }
-            }} />
+            }} canApproveForPr={canApprovePreviewForPr} onApproveForPr={() => actions.approvePreviewForPr(detail.item.id)} />
           )}
           <PreviewHistoryPanel detail={detail} aiRuns={sortedPlans} />
         </aside>
@@ -2123,10 +2129,11 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   aiModel: string | null;
   actions: BoardActions;
 }) {
-  const boardRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const boardRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
   const targetRepository = boardRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? boardRepositories.find((entry) => entry.isPrimary) ?? boardRepositories[0];
   const repositoryProfile = targetRepository?.implementationProfile ?? board?.repository?.implementationProfile ?? 'react-preview';
-  const isRepositoryImplementation = repositoryProfile !== 'react-preview';
+  const implementationWorkflow = workflowForRepositoryProfile(repositoryProfile, targetRepository?.implementationWorkflow ?? board?.implementationWorkflow ?? board?.repository?.implementationWorkflow ?? null);
+  const isRepositoryImplementation = implementationWorkflow === 'direct-pr';
   const repositoryCanRunImplementation = !isRepositoryImplementation || targetRepository?.repository.provider === 'GitHub';
   const gitOpsSettingsReady = repositoryProfile !== 'gitops-homelab' || !!board?.gitOpsSettings;
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
@@ -2138,6 +2145,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const implementationRunsForAction = relevantImplementationRuns.length > 0 ? relevantImplementationRuns : detail.implementationRuns;
   const latestRunForAction = latestImplementationRun(implementationRunsForAction);
   const implementationAction = implementationActionState({
+    workflow: implementationWorkflow,
     isRepositoryImplementation,
     repositoryProfile,
     repositoryCanRunImplementation,
@@ -2195,7 +2203,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
               <p>Provider: {selectedPlan.provider} / {selectedPlan.model}. Status: {selectedPlan.status}.</p>
               {selectedPlan.status === 'NeedsInput' && <p className="needs-input-note">Questions need answers before implementation can start.</p>}
               {detail.aiSession && <p className="session-line">Session: {detail.aiSession.provider} / {detail.aiSession.model} - {detail.aiSession.providerSessionId ? 'Codex resume ready' : 'No provider session id yet'}.</p>}
-              {isRepositoryImplementation && boardRepositories.length > 0 && (
+              {implementationWorkflow !== 'preview-only' && boardRepositories.length > 0 && (
                 <label className="target-repo-select">Target repo<select value={targetRepository?.repositoryId ?? ''} onChange={(event) => onTargetRepositoryChange(event.target.value || null)}>
                   {boardRepositories.map((entry) => <option key={entry.repositoryId} value={entry.repositoryId}>{repositoryLabel(entry.repository)} {entry.isPrimary ? '(primary)' : ''} - {profileLabel(entry.implementationProfile)}</option>)}
                 </select></label>
@@ -2400,16 +2408,17 @@ function CleanupAdoptionPanel({ workItemId, busy, onAdopt, compact = false }: { 
   );
 }
 
-function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: boolean; onRetry: () => Promise<void> }) {
+function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onApproveForPr }: { preview: PreviewDto; busy: boolean; onRetry: () => Promise<void>; canApproveForPr?: boolean; onApproveForPr?: () => Promise<boolean> }) {
   const status = preview.status;
   const running = status === 'Running';
   const failed = status === 'Failed';
   const waiting = !running && !failed;
   const implementing = status === 'Implementing';
+  const stopped = status === 'Stopped';
   const failedDuringSourceGeneration = preview.failureReason === 'ImplementationFailed';
   const canRetrySetup = failed && (failedDuringSourceGeneration || (preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml);
-  const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
-  const retryLabel = failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
+  const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : stopped ? 'Preview stopped' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
+  const retryLabel = stopped ? 'Recreate preview' : failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
   const steps = previewLifecycleSteps(preview);
   return (
     <section className="panel compact-panel preview-panel">
@@ -2418,6 +2427,9 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       {running
         ? <SafeExternalLink className="demo-link" href={preview.url}>Open demo environment <ExternalLink size={16} /></SafeExternalLink>
         : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
+      {running && canApproveForPr && onApproveForPr && (
+        <button className="primary-action side-action" disabled={busy} onClick={() => void onApproveForPr()}><GitPullRequest size={16} />Approve preview and create PR</button>
+      )}
       <ol className="preview-stepper" aria-label="Preview lifecycle">
         {steps.map((step, index) => (
           <li className={`stepper-item ${step.state}`} key={step.key}>
@@ -2434,7 +2446,7 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
-      {failed && canRetrySetup && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />{retryLabel}</button>}
+      {(failed && canRetrySetup || stopped && ((preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml)) && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />{retryLabel}</button>}
       {failed && !canRetrySetup && <p className="namespace-note">Source generation did not finish, so there is no Kubernetes preview manifest to retry.</p>}
     </section>
   );
@@ -2771,29 +2783,16 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
   const [profileStatus, setProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [aiProfileStatus, setAiProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [profileError, setProfileError] = React.useState<string | null>(null);
-  const [newRepoName, setNewRepoName] = React.useState('');
-  const [newRepoDescription, setNewRepoDescription] = React.useState('');
-  const [newRepoPrivate, setNewRepoPrivate] = React.useState(true);
-  const [newRepoPrompt, setNewRepoPrompt] = React.useState('');
-  const [newRepoInstallationId, setNewRepoInstallationId] = React.useState<number | null>(null);
-  const [onboardingDraft, setOnboardingDraft] = React.useState<GitHubRepositoryOnboardingDraftDto | null>(null);
-  const [onboardingStatus, setOnboardingStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
-  const [onboardingError, setOnboardingError] = React.useState<string | null>(null);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const profileRequestRef = React.useRef(0);
   const normalizedName = form.name.trim();
   const usesGitHub = form.providerMode === 'GitHub';
-  const usesGitHubNew = form.providerMode === 'GitHubNew';
   const usesCustomUrl = form.providerMode === 'CustomUrl';
   const usesNoRepository = form.providerMode === 'NoRepository';
-  const selectedInstallationId = newRepoInstallationId ?? githubInstallationId ?? githubIntegrations[0]?.installationId ?? null;
-  const selectedNewRepoIntegration = githubIntegrations.find((integration) => integration.installationId === selectedInstallationId) ?? null;
-  const createPermissionMessage = usesGitHubNew ? repositoryCreatePermissionMessage(selectedNewRepoIntegration) : null;
   const canCreate = normalizedName.length > 0 && profileStatus !== 'loading' && (
     usesNoRepository ||
     (usesGitHub ? form.repositoryRemoteUrl.trim().length > 0 : false) ||
-    (usesGitHubNew ? normalizeRepositoryNameInput(newRepoName).length > 0 && !!onboardingDraft && !!selectedInstallationId && canCreateRepositoryInInstallation(selectedNewRepoIntegration) : false) ||
     (usesCustomUrl ? isPublicGitUrl(form.repositoryRemoteUrl) : false)
   );
 
@@ -2830,84 +2829,13 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
     setForm((current) => ({
       ...current,
       implementationProfile,
+      implementationWorkflow: workflowForRepositoryProfile(implementationProfile, null),
       enabledSkills: (profile.enabledSkills ?? []).join('\n'),
       capabilityTags: (profile.capabilityTags ?? []).join('\n'),
       aiInstructions: profile.instructions,
       skillDrafts: profile.skillDrafts ?? [],
       askWhenUncertain: implementationProfile === 'gitops-homelab' ? true : current.askWhenUncertain
     }));
-  }
-
-  function applyOnboardingDraft(draft: GitHubRepositoryOnboardingDraftDto) {
-    setOnboardingDraft(draft);
-    setNewRepoName(draft.name);
-    setNewRepoDescription(draft.description);
-    setNewRepoPrompt(draft.prompt);
-    applyRepositoryProfile(draft.repositoryProfile);
-    setForm((current) => ({
-      ...current,
-      name: current.name || draft.name,
-      aiInstructions: draft.aiContext.instructions ?? draft.repositoryProfile.instructions,
-      enabledSkills: (draft.aiContext.enabledSkills ?? draft.repositoryProfile.enabledSkills ?? []).join('\n'),
-      askWhenUncertain: draft.aiContext.askWhenUncertain ?? current.askWhenUncertain
-    }));
-  }
-
-  async function generateOnboardingDraft() {
-    setOnboardingStatus('loading');
-    setOnboardingError(null);
-    setSubmitError(null);
-    try {
-      const draft = await api.post<GitHubRepositoryOnboardingDraftDto>('/api/repositories/github/onboarding-draft', {
-        name: normalizeRepositoryNameInput(newRepoName || form.name),
-        description: newRepoDescription,
-        prompt: newRepoPrompt,
-        implementationProfile: form.implementationProfile
-      }, { timeoutMs: 60000 });
-      applyOnboardingDraft(draft);
-      setOnboardingStatus('loaded');
-    } catch (error) {
-      setOnboardingStatus('error');
-      setOnboardingError(error instanceof Error ? error.message : 'Could not generate onboarding draft');
-    }
-  }
-
-  async function createNewGitHubRepositoryFromDraft() {
-    if (!onboardingDraft || !selectedInstallationId) {
-      throw new Error('Generate an onboarding draft and select a GitHub installation before creating the board.');
-    }
-    if (!canCreateRepositoryInInstallation(selectedNewRepoIntegration)) {
-      throw new Error(createPermissionMessage ?? 'You do not have permission to create repositories for this GitHub installation.');
-    }
-
-    const response = await api.post<GitHubRepositoryCreateResponse>('/api/repositories/github', {
-      installationId: selectedInstallationId,
-      name: normalizeRepositoryNameInput(newRepoName),
-      private: newRepoPrivate,
-      description: newRepoDescription,
-      implementationProfile: form.implementationProfile,
-      onboardingPrompt: newRepoPrompt,
-      files: onboardingDraft.files,
-      repositoryProfile: repositoryProfileFromForm(form, onboardingDraft.repositoryProfile),
-      aiContext: {
-        instructions: form.aiInstructions,
-        enabledSkills: linesFromTextarea(form.enabledSkills),
-        askWhenUncertain: form.askWhenUncertain
-      }
-    }, { timeoutMs: 60000 });
-
-    const repository = response.repository;
-    return {
-      ...form,
-      repositoryId: repository.id,
-      providerMode: 'GitHubNew' as const,
-      repositoryProvider: 'GitHub',
-      repositoryOwner: repository.owner ?? '',
-      repositoryRemoteUrl: repository.remoteUrl,
-      repositoryWebUrl: repository.webUrl ?? '',
-      repositoryDefaultBranch: repository.defaultBranch || 'main',
-      implementationProfile: normalizeImplementationProfile(repository.implementationProfile)
-    };
   }
 
   const loadRepositoryProfile = React.useCallback(async (repository: RepositoryDto) => {
@@ -2978,9 +2906,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
         if (!canCreate || submitting) return;
         setSubmitting(true);
         setSubmitError(null);
-        const submitForm = usesGitHubNew
-          ? createNewGitHubRepositoryFromDraft().then((repoForm) => ({ ...repoForm, name: normalizedName }))
-          : Promise.resolve({ ...form, name: normalizedName });
+        const submitForm = Promise.resolve({ ...form, name: normalizedName });
         void submitForm
           .then((nextForm) => onCreate(nextForm))
           .then((saved) => {
@@ -2988,8 +2914,6 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
           })
           .catch((error) => {
             const message = error instanceof Error ? error.message : 'Could not create GitHub repository';
-            setOnboardingStatus('error');
-            setOnboardingError(message);
             setSubmitError(message);
             onNotify('error', message);
           })
@@ -3002,26 +2926,21 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
             setForm({
               ...form,
               providerMode,
-              repositoryProvider: providerMode === 'GitHub' || providerMode === 'GitHubNew' ? 'GitHub' : providerMode === 'NoRepository' ? '' : 'GenericGit',
+              repositoryProvider: providerMode === 'GitHub' ? 'GitHub' : providerMode === 'NoRepository' ? '' : 'GenericGit',
               repositoryId: null,
               repositoryRemoteUrl: '',
               repositoryWebUrl: '',
               repositoryOwner: '',
-              implementationProfile: providerMode === 'GitHub' || providerMode === 'GitHubNew' ? 'code-repo' : form.implementationProfile
+              implementationProfile: providerMode === 'GitHub' ? 'code-repo' : form.implementationProfile
             });
             setRepositoryProfile(null);
             setProfileStatus('idle');
             setAiProfileStatus('idle');
             setProfileError(null);
-            setOnboardingDraft(null);
-            setOnboardingStatus('idle');
-            setOnboardingError(null);
             if (providerMode === 'GitHub') setGithubStatus('idle');
-            if (providerMode === 'GitHubNew') setNewRepoName(normalizeRepositoryNameInput(form.name));
           }}>
             <option value="NoRepository">No repository</option>
             <option value="GitHub">GitHub existing repository</option>
-            <option value="GitHubNew">GitHub new repository</option>
             <option value="CustomUrl">Custom URL</option>
           </select></label>
           {usesGitHub && (
@@ -3039,28 +2958,6 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
           )}
         </div>
         {usesNoRepository && <p className="provider-status">This board starts preview-only. You can sync it to GitHub later from the board header.</p>}
-        {usesGitHubNew && (
-          <NewRepositoryOnboardingPanel
-            form={form}
-            installationId={selectedInstallationId}
-            integrations={githubIntegrations}
-            repoName={newRepoName || normalizeRepositoryNameInput(form.name)}
-            selectedInstallationId={selectedInstallationId}
-            description={newRepoDescription}
-            isPrivate={newRepoPrivate}
-            prompt={newRepoPrompt}
-            draft={onboardingDraft}
-            error={onboardingError}
-            onInstallationChange={setNewRepoInstallationId}
-            onRepoNameChange={setNewRepoName}
-            onDescriptionChange={setNewRepoDescription}
-            onPrivateChange={setNewRepoPrivate}
-            onPromptChange={setNewRepoPrompt}
-            onDraftChange={setOnboardingDraft}
-            createPermissionMessage={createPermissionMessage}
-            onAuthorizeGitHubUser={actions.authorizeGitHubUser}
-          />
-        )}
         {usesGitHub && form.repositoryRemoteUrl && (
           <RepositoryProfileEditor
             form={form}
@@ -3094,101 +2991,12 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
         )}
         {usesCustomUrl && form.repositoryRemoteUrl && !isPublicGitUrl(form.repositoryRemoteUrl) && <p className="provider-status">Custom URL supports public HTTP(S) clone URLs only in v1.</p>}
         {submitError && <p className="failure-reason submit-error">{submitError}</p>}
-        {createPermissionMessage && <p className="failure-reason submit-error">{createPermissionMessage}</p>}
         <div className="modal-actions">
-          {usesGitHubNew && (
-            <button type="button" className="secondary" disabled={onboardingStatus === 'loading' || normalizeRepositoryNameInput(newRepoName || form.name).length === 0} onClick={() => void generateOnboardingDraft()}>
-              <Sparkles size={16} />{onboardingStatus === 'loading' ? 'Generating draft...' : onboardingDraft ? 'Regenerate draft' : 'Generate draft'}
-            </button>
-          )}
           <button className="primary-action" disabled={!canCreate || submitting}><Plus size={16} />Create board</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
     </ModalFrame>
-  );
-}
-
-function NewRepositoryOnboardingPanel({ form, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, error, createPermissionMessage, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange, onAuthorizeGitHubUser }: {
-  form: CreateBoardForm;
-  installationId: number | null;
-  integrations: GitHubIntegrationDto[];
-  repoName: string;
-  selectedInstallationId: number | null;
-  description: string;
-  isPrivate: boolean;
-  prompt: string;
-  draft: GitHubRepositoryOnboardingDraftDto | null;
-  error: string | null;
-  createPermissionMessage: string | null;
-  onInstallationChange: (value: number | null) => void;
-  onRepoNameChange: (value: string) => void;
-  onDescriptionChange: (value: string) => void;
-  onPrivateChange: (value: boolean) => void;
-  onPromptChange: (value: string) => void;
-  onDraftChange: React.Dispatch<React.SetStateAction<GitHubRepositoryOnboardingDraftDto | null>>;
-  onAuthorizeGitHubUser: (installationId: number) => Promise<boolean>;
-}) {
-  const updateFile = (index: number, patch: Partial<GitHubRepositoryOnboardingFileDto>) => {
-    onDraftChange((current) => current ? { ...current, files: current.files.map((file, fileIndex) => fileIndex === index ? { ...file, ...patch } : file) } : current);
-  };
-  const selectedIntegration = integrations.find((integration) => integration.installationId === selectedInstallationId) ?? null;
-
-  return (
-    <section className="repository-profile-panel">
-      <div className="panel-heading-row">
-        <div>
-          <h3>New repository onboarding</h3>
-          <p>Codex drafts editable guidance files only. App code and deployment manifests start from later cards.</p>
-        </div>
-      </div>
-      <div className="form-grid two">
-        <label>Repository name<input value={repoName} onChange={(event) => onRepoNameChange(event.target.value)} onBlur={(event) => onRepoNameChange(normalizeRepositoryNameInput(event.target.value))} placeholder={normalizeRepositoryNameInput(form.name) || 'new-repository'} /></label>
-        <label>Visibility<select value={isPrivate ? 'private' : 'public'} onChange={(event) => onPrivateChange(event.target.value === 'private')}>
-          <option value="private">Private</option>
-          <option value="public">Public</option>
-        </select></label>
-        <label className="full-width">GitHub installation<select value={selectedInstallationId ?? ''} onChange={(event) => onInstallationChange(event.target.value ? Number(event.target.value) : null)}>
-          <option value="">Select installation...</option>
-          {integrations.map((integration) => <option key={integration.installationId} value={integration.installationId}>{integration.accountLogin} ({integration.accountType})</option>)}
-        </select></label>
-        <label className="full-width">Description<input value={description} onChange={(event) => onDescriptionChange(event.target.value)} placeholder={`Repository for ${form.name || 'this board'}.`} /></label>
-        <label className="full-width">What should this repository be for?<textarea value={prompt} onChange={(event) => onPromptChange(event.target.value)} placeholder="Describe the repo purpose, stack, operating model, and any conventions Codex should encode as guidance." /></label>
-      </div>
-      {!installationId && <p className="failure-reason">No GitHub App installation is available for creating a repository.</p>}
-      {installationId && <p className="provider-status">GitHub installation: {selectedIntegration?.accountLogin ?? installationId}. New repositories are private by default.</p>}
-      {selectedIntegration?.requiresUserAuthorizationForRepositoryCreation && selectedIntegration.hasUserAuthorization && (
-        <p className="provider-status">GitHub user authorization connected{selectedIntegration.authorizedGitHubLogin ? ` as ${selectedIntegration.authorizedGitHubLogin}` : ''}.</p>
-      )}
-      {createPermissionMessage && (
-        <div className="settings-inline warning-inline">
-          <p className="failure-reason">{createPermissionMessage}</p>
-          {selectedIntegration?.requiresUserAuthorizationForRepositoryCreation && !selectedIntegration.hasUserAuthorization && (
-            <button type="button" className="secondary" onClick={() => void onAuthorizeGitHubUser(selectedIntegration.installationId)}>
-              <Github size={16} />Authorize GitHub user
-            </button>
-          )}
-        </div>
-      )}
-      <p className="provider-status">Repository names are normalized to kebab-case, for example <code>date-site</code>.</p>
-      {error && <p className="failure-reason">{error}</p>}
-      {draft && (
-        <div className="settings-list skill-drafts-list">
-          <div className="settings-row">
-            <div>
-              <strong>Draft source</strong>
-              <p>{draft.source}{draft.model ? ` / ${draft.model}` : ''} - {draft.repositoryProfile.displayName}</p>
-            </div>
-          </div>
-          {draft.files.map((file, index) => (
-            <div className="settings-row vertical" key={`${file.path}-${index}`}>
-              <label>Path<input value={file.path} onChange={(event) => updateFile(index, { path: event.target.value })} /></label>
-              <label>Content<textarea value={file.content} onChange={(event) => updateFile(index, { content: event.target.value })} /></label>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
   );
 }
 
@@ -3200,17 +3008,12 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
   onSync: (request: SyncBoardRepositoryRequest) => Promise<boolean>;
   onClose: () => void;
 }) {
-  const [mode, setMode] = React.useState<'existing' | 'create'>('existing');
   const [availableRepos, setAvailableRepos] = React.useState<RepositoryDto[]>(repositories.filter((repository) => repository.provider === 'GitHub'));
   const [pickerStatus, setPickerStatus] = React.useState<'idle' | 'loading' | 'error'>('idle');
   const [pickerMessage, setPickerMessage] = React.useState<string | null>(null);
   const [selectedRepoKey, setSelectedRepoKey] = React.useState('');
-  const [newRepoName, setNewRepoName] = React.useState(slugFromText(board.name));
-  const [description, setDescription] = React.useState(`Repository for ${board.name}.`);
-  const [isPrivate, setIsPrivate] = React.useState(true);
   const [implementationProfile, setImplementationProfile] = React.useState('code-repo');
   const [submitting, setSubmitting] = React.useState(false);
-  const installationId = githubIntegrations[0]?.installationId ?? null;
 
   React.useEffect(() => {
     let cancelled = false;
@@ -3242,28 +3045,13 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
   }, [repositories, settings.gitHub.appConfigured, settings.gitHub.connected]);
 
   const selectedRepo = availableRepos.find((repository) => repositoryKey(repository) === selectedRepoKey) ?? null;
-  const canSync = mode === 'create'
-    ? newRepoName.trim().length > 0 && settings.repositories.canCreateRepositories
-    : !!selectedRepo;
+  const canSync = !!selectedRepo;
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!canSync || submitting) return;
     setSubmitting(true);
     try {
-      if (mode === 'create') {
-        const saved = await onSync({
-          createNew: true,
-          name: newRepoName.trim(),
-          description,
-          private: isPrivate,
-          installationId,
-          implementationProfile
-        });
-        if (saved) onClose();
-        return;
-      }
-
       const saved = await onSync({
         createNew: false,
         repositoryId: selectedRepo?.id && selectedRepo.id !== '00000000-0000-0000-0000-000000000000' ? selectedRepo.id : null,
@@ -3283,41 +3071,20 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
   return (
     <ModalFrame title="Sync board to GitHub" onClose={onClose}>
       <form className="create-form" onSubmit={(event) => void submit(event)}>
-        <div className="sync-mode-tabs" role="tablist" aria-label="Repository sync mode">
-          <button type="button" className={mode === 'existing' ? 'secondary active-filter' : 'secondary'} onClick={() => setMode('existing')}><Github size={16} />Link existing</button>
-          <button type="button" className={mode === 'create' ? 'secondary active-filter' : 'secondary'} onClick={() => setMode('create')}><Plus size={16} />Create private repo</button>
+        <div className="provider-status">Link an existing GitHub repository. Creating new repositories from Rosenvall DevOps is disabled for now.</div>
+        <div className="form-grid two">
+          <label className="full-width">GitHub repository<select value={selectedRepoKey} onChange={(event) => setSelectedRepoKey(event.target.value)}>
+            <option value="">{pickerStatus === 'loading' ? 'Loading repositories...' : 'Select repository...'}</option>
+            {availableRepos.map((repository) => <option key={repositoryKey(repository)} value={repositoryKey(repository)}>{repositoryLabel(repository)} - {repository.defaultBranch}</option>)}
+          </select></label>
+          <label>Implementation profile<select value={implementationProfile} onChange={(event) => setImplementationProfile(event.target.value)}>
+            <option value="code-repo">Code repo</option>
+            <option value="gitops-homelab">GitOps homelab</option>
+            <option value="unity">Unity</option>
+            <option value="react-preview">React preview</option>
+          </select></label>
         </div>
-        {mode === 'existing' ? (
-          <div className="form-grid two">
-            <label className="full-width">GitHub repository<select value={selectedRepoKey} onChange={(event) => setSelectedRepoKey(event.target.value)}>
-              <option value="">{pickerStatus === 'loading' ? 'Loading repositories...' : 'Select repository...'}</option>
-              {availableRepos.map((repository) => <option key={repositoryKey(repository)} value={repositoryKey(repository)}>{repositoryLabel(repository)} - {repository.defaultBranch}</option>)}
-            </select></label>
-            <label>Implementation profile<select value={implementationProfile} onChange={(event) => setImplementationProfile(event.target.value)}>
-              <option value="code-repo">Code repo</option>
-              <option value="gitops-homelab">GitOps homelab</option>
-              <option value="unity">Unity</option>
-              <option value="react-preview">React preview</option>
-            </select></label>
-          </div>
-        ) : (
-          <div className="form-grid two">
-            <label>Name<input value={newRepoName} onChange={(event) => setNewRepoName(slugFromText(event.target.value))} /></label>
-            <label>Visibility<select value={isPrivate ? 'private' : 'public'} onChange={(event) => setIsPrivate(event.target.value === 'private')}>
-              <option value="private">Private</option>
-              <option value="public">Public</option>
-            </select></label>
-            <label className="full-width">Description<input value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-            <label>Implementation profile<select value={implementationProfile} onChange={(event) => setImplementationProfile(event.target.value)}>
-              <option value="code-repo">Code repo</option>
-              <option value="gitops-homelab">GitOps homelab</option>
-              <option value="unity">Unity</option>
-              <option value="react-preview">React preview</option>
-            </select></label>
-          </div>
-        )}
         {pickerMessage && <p className={pickerStatus === 'error' ? 'failure-reason' : 'provider-status'}>{pickerMessage}</p>}
-        {mode === 'create' && !settings.repositories.canCreateRepositories && <p className="failure-reason">GitHub repository creation is not enabled for the current installation.</p>}
         <div className="modal-actions">
           <button className="primary-action" disabled={!canSync || submitting}><Github size={16} />Sync to GitHub</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
@@ -3372,7 +3139,10 @@ function RepositoryProfileEditor({ form, profile, profileStatus, aiProfileStatus
       {profileError && <p className="provider-status">{profileError}</p>}
       {profile?.signals?.length ? <p className="profile-signals">Signals: {profile.signals.join(', ')}</p> : null}
       <div className="form-grid two">
-        <label>Profile<select value={form.implementationProfile} onChange={(event) => onChange((current) => ({ ...current, implementationProfile: normalizeImplementationProfile(event.target.value) }))}>
+        <label>Profile<select value={form.implementationProfile} onChange={(event) => onChange((current) => {
+          const nextProfile = normalizeImplementationProfile(event.target.value);
+          return { ...current, implementationProfile: nextProfile, implementationWorkflow: workflowForRepositoryProfile(nextProfile, null) };
+        })}>
           <option value="code-repo">Code repo</option>
           <option value="gitops-homelab">GitOps homelab</option>
           <option value="unity">Unity</option>
@@ -3390,7 +3160,8 @@ function RepositoryProfileEditor({ form, profile, profileStatus, aiProfileStatus
         <div className="form-grid two">
           <label className="full-width">GitOps paths<textarea value={form.gitOpsAllowedPaths} onChange={(event) => onChange((current) => ({ ...current, gitOpsAllowedPaths: event.target.value }))} /></label>
           <label>ArgoCD namespace<input value={form.argoNamespace} onChange={(event) => onChange((current) => ({ ...current, argoNamespace: event.target.value }))} /></label>
-          <label>Application selector<input value={form.argoApplicationSelector} onChange={(event) => onChange((current) => ({ ...current, argoApplicationSelector: event.target.value }))} /></label>
+          <label>ArgoCD application label selector<input value={form.argoApplicationSelector} onChange={(event) => onChange((current) => ({ ...current, argoApplicationSelector: event.target.value }))} placeholder="app.kubernetes.io/part-of=homelab" /></label>
+          <p className="provider-status full-width">Optional Kubernetes label selector used when listing ArgoCD Application resources in the configured namespace. Leave blank to list all apps.</p>
         </div>
       )}
       <div className="skill-drafts">
@@ -3553,7 +3324,7 @@ function TeamsView({ teams, boards, me, actions }: {
 }
 
 function SettingsView({ scope, settings, board, me, teams, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
-  scope: 'global' | 'board';
+  scope: 'global' | 'board' | 'ai' | 'environment';
   settings: SettingsDto;
   board: Board;
   me: UserDto;
@@ -3579,7 +3350,7 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
   const [secretKey, setSecretKey] = React.useState('');
   const [secretValue, setSecretValue] = React.useState('');
   const [secretRepositoryId, setSecretRepositoryId] = React.useState('');
-  const boardRepositories = board.repositories?.length ? board.repositories : board.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const boardRepositories = board.repositories?.length ? board.repositories : board.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
   const canSaveSecret = secretKey.trim().length > 0 && secretValue.length > 0;
   const latestGitHubIntegration = githubIntegrations[0];
   const gitHubConnected = settings.gitHub.connected || githubIntegrations.length > 0;
@@ -3598,9 +3369,9 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
 
   return (
     <section className="page settings-page">
-      {scope === 'board'
+      {scope !== 'global'
         ? (
-          <BoardHeader board={board} onSyncBoard={onSyncBoard} subtitle="Board-specific repository, GitOps, skills and secrets.">
+          <BoardHeader board={board} onSyncBoard={onSyncBoard} subtitle={boardSettingsSubtitle(scope)}>
             <button className="secondary" onClick={onBack}>Back to board</button>
           </BoardHeader>
         )
@@ -3639,10 +3410,8 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
             : (
               <div className="settings-list">
                 {githubIntegrations.map((integration) => (
-                  <GitHubRepositoryCreationPolicyEditor
+                  <GitHubIntegrationStatus
                     integration={integration}
-                    teams={teams}
-                    actions={actions}
                     key={integration.id}
                   />
                 ))}
@@ -3660,9 +3429,17 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
         </section>
         </>}
         {scope === 'board' && <>
-        <SectionTitle icon={<Boxes size={22} />} title="GitOps" />
+        <SectionTitle icon={<ExternalLink size={22} />} title="Hosting workflow" />
         <section className="panel form-panel">
-          <GitOpsSettingsForm board={board} actions={actions} />
+          <BoardHostingForm board={board} actions={actions} />
+        </section>
+        <SectionTitle icon={<GitPullRequest size={22} />} title="Board repositories" />
+        <section className="panel form-panel">
+          <BoardRepositorySummary repositories={boardRepositories} onSyncBoard={onSyncBoard} />
+        </section>
+        <SectionTitle icon={<Trash2 size={22} />} title="Danger zone" />
+        <section className="panel form-panel">
+          <BoardDangerZone board={board} actions={actions} />
         </section>
         </>}
         {scope === 'global' && <>
@@ -3672,8 +3449,8 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
           <p className="provider-status">Team membership and board assignment now live in the Teams view.</p>
         </section>
         </>}
-        {scope === 'board' && <>
-        <SectionTitle icon={<Save size={22} />} title="Board secrets" />
+        {scope === 'environment' && <>
+        <SectionTitle icon={<KeyRound size={22} />} title="Environment" />
         <section className="panel form-panel">
           <div className="settings-inline">
             <div>
@@ -3709,7 +3486,13 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
               </div>
             )}
         </section>
-        <SectionTitle icon={<GitPullRequest size={22} />} title="Board repositories" />
+        </>}
+        {scope === 'ai' && <>
+        <SectionTitle icon={<Bot size={22} />} title="Board AI" amber />
+        <section className="panel form-panel">
+          <BoardAiSettingsForm board={board} actions={actions} />
+        </section>
+        <SectionTitle icon={<Sparkles size={22} />} title="Repository profiles and skill drafts" />
         <section className="panel form-panel">
           <div className="settings-list">
             {boardRepositories.length === 0
@@ -3743,83 +3526,146 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
   );
 }
 
-function GitHubRepositoryCreationPolicyEditor({ integration, teams, actions }: {
-  integration: GitHubIntegrationDto;
-  teams: TeamDto[];
-  actions: BoardActions;
-}) {
-  const [allowedTeamIds, setAllowedTeamIds] = React.useState<string[]>(integration.repositoryCreatorTeamIds ?? []);
-  const [saving, setSaving] = React.useState(false);
-  const canManage = integration.canManageRepositoryCreationPolicy === true;
-  const canCreate = integration.canCreateRepositories === true;
+function BoardHostingForm({ board, actions }: { board: Board; actions: BoardActions }) {
+  const [publicHostname, setPublicHostname] = React.useState(board.publicHostname ?? '');
+  const [workflow, setWorkflow] = React.useState(board.implementationWorkflow ?? workflowForRepositoryProfile(board.repository?.implementationProfile, board.repository?.implementationWorkflow));
 
   React.useEffect(() => {
-    setAllowedTeamIds(integration.repositoryCreatorTeamIds ?? []);
-  }, [integration.installationId, integration.repositoryCreatorTeamIds]);
-
-  async function savePolicy() {
-    if (!canManage || saving) return;
-    setSaving(true);
-    try {
-      await actions.saveGitHubRepositoryCreationPolicy(integration.installationId, allowedTeamIds);
-    } finally {
-      setSaving(false);
-    }
-  }
+    setPublicHostname(board.publicHostname ?? '');
+    setWorkflow(board.implementationWorkflow ?? workflowForRepositoryProfile(board.repository?.implementationProfile, board.repository?.implementationWorkflow));
+  }, [board.id, board.publicHostname, board.implementationWorkflow, board.repository?.implementationProfile, board.repository?.implementationWorkflow]);
 
   return (
-    <div className="settings-row vertical">
-      <div className="settings-inline">
-        <div>
-          <strong>{integration.accountLogin}</strong>
-          <p>{integration.accountType} - {integration.repositoriesCount} repositories - installed by {integration.installedBy}</p>
-        </div>
-        <div className="status-badges">
-          <span className={integration.status === 'Active' ? 'state-good' : 'state-muted'}>{integration.status}</span>
-          <span className={canCreate ? 'state-good' : 'state-muted'}>{canCreate ? 'Can create repos' : 'Link only'}</span>
-          {integration.requiresUserAuthorizationForRepositoryCreation && (
-            <span className={integration.hasUserAuthorization ? 'state-good' : 'state-muted'}>
-              {integration.hasUserAuthorization ? 'User authorized' : 'User auth required'}
-            </span>
-          )}
-        </div>
+    <form className="form-grid two" onSubmit={(event) => {
+      event.preventDefault();
+      void actions.updateBoardHosting(board.id, { publicHostname: publicHostname.trim() || null, implementationWorkflow: workflow });
+    }}>
+      <label>Implementation workflow<select value={workflow ?? 'preview-only'} onChange={(event) => setWorkflow(event.target.value)}>
+        <option value="preview-only">Preview only</option>
+        <option value="preview-then-pr">Preview, then PR</option>
+        <option value="direct-pr">Direct PR</option>
+      </select></label>
+      <label>Public hostname<input value={publicHostname} onChange={(event) => setPublicHostname(event.target.value)} placeholder={board.repository ? `${slugFromText(board.repository.name)}.rosenvall.se` : 'app.rosenvall.se'} /></label>
+      <p className="provider-status">Preview URLs stay temporary per card. Public hostname is production intent for website repository PRs.</p>
+      <div className="form-actions-row"><button className="secondary" type="submit"><Save size={16} />Save hosting</button></div>
+    </form>
+  );
+}
+
+function GitHubIntegrationStatus({ integration }: { integration: GitHubIntegrationDto }) {
+  return (
+    <div className="settings-row">
+      <div>
+        <strong>{integration.accountLogin}</strong>
+        <p>{integration.accountType} - {integration.repositoriesCount} repositories - installed by {integration.installedBy}</p>
       </div>
-      {integration.requiresUserAuthorizationForRepositoryCreation && (
-        <div className="settings-inline">
-          <p className={integration.hasUserAuthorization ? 'provider-status' : 'failure-reason'}>
-            {integration.hasUserAuthorization
-              ? `Repository creation user authorization is connected${integration.authorizedGitHubLogin ? ` as ${integration.authorizedGitHubLogin}` : ''}.`
-              : `Authorize GitHub user access before creating repositories under ${integration.accountLogin}.`}
-          </p>
-          {integration.hasUserAuthorization
-            ? <button className="secondary compact" type="button" onClick={() => void actions.revokeGitHubUserAuthorization(integration.installationId)}><Trash2 size={14} />Revoke user authorization</button>
-            : <button className="secondary compact" type="button" onClick={() => void actions.authorizeGitHubUser(integration.installationId)}><Github size={14} />Authorize GitHub user</button>}
-        </div>
-      )}
-      <fieldset className="team-picker compact-team-picker" disabled={!canManage || teams.length === 0}>
-        <legend>Teams allowed to create repositories</legend>
-        {teams.length === 0
-          ? <p className="provider-status">Create a team before delegating repository creation.</p>
-          : teams.map((team) => (
-            <label className="checkbox-row" key={`${integration.installationId}-${team.id}`}>
-              <input
-                type="checkbox"
-                checked={allowedTeamIds.includes(team.id)}
-                onChange={(event) => setAllowedTeamIds((current) => event.target.checked ? [...new Set([...current, team.id])] : current.filter((id) => id !== team.id))}
-              />
-              <span>{team.name}</span>
-            </label>
-          ))}
-      </fieldset>
-      <div className="settings-inline">
-        <p className="provider-status">
-          {canManage
-            ? 'Owners and selected team members can create private repositories during Add board.'
-            : 'Only the installation owner or bootstrap team admins can change this policy.'}
-        </p>
-        {canManage && <button className="secondary compact" type="button" disabled={saving} onClick={() => void savePolicy()}><Save size={14} />Save repository policy</button>}
+      <div className="status-badges">
+        <span className={integration.status === 'Active' ? 'state-good' : 'state-muted'}>{integration.status}</span>
+        <span className="state-muted">Existing repos only</span>
       </div>
     </div>
+  );
+}
+
+function BoardRepositorySummary({ repositories, onSyncBoard }: { repositories: BoardRepositoryDto[]; onSyncBoard: () => void }) {
+  return (
+    <div className="settings-list">
+      {repositories.length === 0
+        ? <p className="provider-status">No repositories are linked to this board.</p>
+        : repositories.map((entry) => (
+          <div className="settings-row" key={entry.repositoryId}>
+            <div>
+              <strong>{repositoryLabel(entry.repository)}</strong>
+              <p>{entry.repository.provider} - {entry.repository.defaultBranch} - {profileLabel(entry.implementationProfile)} - {workflowLabel(entry.implementationWorkflow ?? entry.repository.implementationWorkflow)}</p>
+            </div>
+            <span className={entry.isPrimary ? 'state-good' : 'state-muted'}>{entry.isPrimary ? 'Primary' : 'Linked'}</span>
+          </div>
+        ))}
+      <div className="settings-inline">
+        <p className="provider-status">Use AI to edit profiles and skill drafts. Use Environment for board secrets.</p>
+        <button className="secondary compact" type="button" onClick={onSyncBoard}><Github size={14} />Link GitHub repo</button>
+      </div>
+    </div>
+  );
+}
+
+function BoardDangerZone({ board, actions }: { board: Board; actions: BoardActions }) {
+  const [confirmText, setConfirmText] = React.useState('');
+  const expected = board.name;
+  const canDelete = confirmText === expected;
+  return (
+    <div className="settings-list">
+      <div className="settings-row vertical">
+        <div>
+          <strong>Delete board and clean up</strong>
+          <p>Kubernetes preview namespaces, runner jobs, per-run token secrets, pipeline jobs and board-owned environment secrets are deleted. GitHub repositories, branches, pull requests and shared platform credentials are not deleted automatically.</p>
+        </div>
+        <label>Type board name to confirm<input value={confirmText} onChange={(event) => setConfirmText(event.target.value)} placeholder={expected} /></label>
+        <button className="danger-button" type="button" disabled={!canDelete} onClick={() => canDelete && confirm(`Delete ${board.name} and clean Kubernetes runtime resources? GitHub repositories and PRs will remain.`) && void actions.deleteBoard(board.id)}><Trash2 size={16} />Delete board and clean up</button>
+      </div>
+    </div>
+  );
+}
+
+function BoardAiSettingsForm({ board, actions }: { board: Board; actions: BoardActions }) {
+  const initial = board.aiContext ?? defaultAiContext(board.id);
+  const [instructions, setInstructions] = React.useState(initial.instructions);
+  const [agentInstructions, setAgentInstructions] = React.useState(initial.agentInstructions ?? '');
+  const [askWhenUncertain, setAskWhenUncertain] = React.useState(initial.askWhenUncertain);
+  const [skills, setSkills] = React.useState<string[]>(initial.enabledSkills);
+  const [newSkill, setNewSkill] = React.useState('');
+
+  React.useEffect(() => {
+    const next = board.aiContext ?? defaultAiContext(board.id);
+    setInstructions(next.instructions);
+    setAgentInstructions(next.agentInstructions ?? '');
+    setAskWhenUncertain(next.askWhenUncertain);
+    setSkills(next.enabledSkills);
+    setNewSkill('');
+  }, [board.id, board.aiContext]);
+
+  const addSkill = () => {
+    const normalized = newSkill.trim();
+    if (!normalized || skills.some((skill) => skill.toLowerCase() === normalized.toLowerCase())) return;
+    setSkills([...skills, normalized]);
+    setNewSkill('');
+  };
+
+  return (
+    <form className="settings-stack" onSubmit={(event) => {
+      event.preventDefault();
+      void actions.updateBoardAiContext(board.id, {
+        boardId: board.id,
+        instructions,
+        enabledSkills: skills,
+        askWhenUncertain,
+        agentInstructions
+      });
+    }}>
+      <div className="form-grid two">
+        <label>Board instructions<textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Operating rules and board-specific conventions." /></label>
+        <label>Agent instructions<textarea value={agentInstructions} onChange={(event) => setAgentInstructions(event.target.value)} placeholder="AGENTS-style guidance used in planning and implementation context." /></label>
+        <label className="checkbox-row"><input type="checkbox" checked={askWhenUncertain} onChange={(event) => setAskWhenUncertain(event.target.checked)} /><span>Ask when uncertain</span></label>
+      </div>
+      <div className="skill-editor">
+        <div className="settings-inline">
+          <div>
+            <strong>Enabled skills</strong>
+            <p>Board-local skill names that are included in AI context. Repo-specific draft contents are edited below.</p>
+          </div>
+          <div className="button-row">
+            <input value={newSkill} onChange={(event) => setNewSkill(event.target.value)} placeholder="skill-name" />
+            <button type="button" className="secondary compact" onClick={addSkill}><Plus size={14} />Add skill</button>
+          </div>
+        </div>
+        {skills.length === 0
+          ? <p className="provider-status">No board skills enabled.</p>
+          : <div className="tag-list">{skills.map((skill) => (
+            <span className="tag-pill" key={skill}>{skill}<button type="button" onClick={() => setSkills(skills.filter((entry) => entry !== skill))} aria-label={`Remove ${skill}`}><X size={12} /></button></span>
+          ))}</div>}
+      </div>
+      <div className="form-actions-row"><button className="primary-action" type="submit"><Save size={16} />Save AI</button></div>
+    </form>
   );
 }
 
@@ -3898,24 +3744,16 @@ function RepositorySettingsProfileEditor({ board, entry, actions }: { board: Boa
 
 function GitOpsSettingsForm({ board, actions }: { board: Board; actions: BoardActions }) {
   const initialGitOps = board.gitOpsSettings ?? defaultGitOpsSettings(board.id);
-  const initialAi = board.aiContext ?? defaultAiContext(board.id);
   const [allowedPaths, setAllowedPaths] = React.useState(initialGitOps.allowedPaths.join('\n'));
   const [argoNamespace, setArgoNamespace] = React.useState(initialGitOps.argoNamespace);
   const [argoApplicationSelector, setArgoApplicationSelector] = React.useState(initialGitOps.argoApplicationSelector);
-  const [instructions, setInstructions] = React.useState(initialAi.instructions);
-  const [enabledSkills, setEnabledSkills] = React.useState(initialAi.enabledSkills.join('\n'));
-  const [askWhenUncertain, setAskWhenUncertain] = React.useState(initialAi.askWhenUncertain);
 
   React.useEffect(() => {
     const gitops = board.gitOpsSettings ?? defaultGitOpsSettings(board.id);
-    const ai = board.aiContext ?? defaultAiContext(board.id);
     setAllowedPaths(gitops.allowedPaths.join('\n'));
     setArgoNamespace(gitops.argoNamespace);
     setArgoApplicationSelector(gitops.argoApplicationSelector);
-    setInstructions(ai.instructions);
-    setEnabledSkills(ai.enabledSkills.join('\n'));
-    setAskWhenUncertain(ai.askWhenUncertain);
-  }, [board.id, board.gitOpsSettings, board.aiContext]);
+  }, [board.id, board.gitOpsSettings]);
 
   return (
     <div className="settings-stack">
@@ -3930,22 +3768,9 @@ function GitOpsSettingsForm({ board, actions }: { board: Board; actions: BoardAc
       }}>
         <label>Allowed paths<textarea value={allowedPaths} onChange={(event) => setAllowedPaths(event.target.value)} /></label>
         <label>ArgoCD namespace<input value={argoNamespace} onChange={(event) => setArgoNamespace(event.target.value)} /></label>
-        <label>Application selector<input value={argoApplicationSelector} onChange={(event) => setArgoApplicationSelector(event.target.value)} /></label>
+        <label>ArgoCD application label selector<input value={argoApplicationSelector} onChange={(event) => setArgoApplicationSelector(event.target.value)} placeholder="app.kubernetes.io/part-of=homelab" /></label>
+        <p className="provider-status full-width">Optional Kubernetes label selector used when listing ArgoCD Application resources in the configured namespace. Leave blank to list all apps.</p>
         <div className="form-actions-row"><button className="secondary" type="submit"><Save size={16} />Save GitOps</button></div>
-      </form>
-      <form className="form-grid two" onSubmit={(event) => {
-        event.preventDefault();
-        void actions.updateBoardAiContext(board.id, {
-          boardId: board.id,
-          instructions,
-          enabledSkills: linesFromTextarea(enabledSkills),
-          askWhenUncertain
-        });
-      }}>
-        <label>Board instructions<textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
-        <label>Enabled skills<textarea value={enabledSkills} onChange={(event) => setEnabledSkills(event.target.value)} /></label>
-        <label className="checkbox-row"><input type="checkbox" checked={askWhenUncertain} onChange={(event) => setAskWhenUncertain(event.target.checked)} /><span>Ask when uncertain</span></label>
-        <div className="form-actions-row"><button className="secondary" type="submit"><Save size={16} />Save AI context</button></div>
       </form>
     </div>
   );
@@ -4456,14 +4281,8 @@ function slugFromText(value: string) {
   return slug || 'new-board';
 }
 
-function normalizeRepositoryNameInput(value: string) {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/--+/g, '-');
-  return normalized || 'new-repository';
+function looksLikeWebsiteText(value: string) {
+  return /website|hemsida|frontend|react|vite|webapp|landing|site|clock|klock/i.test(value);
 }
 
 function boardRepositorySummary(board: Board) {
@@ -4520,10 +4339,13 @@ function createBoardFormFromRepositoryProfile(board: Board, entry: BoardReposito
     repositoryWebUrl: entry.repository.webUrl ?? '',
     repositoryDefaultBranch: entry.repository.defaultBranch,
     implementationProfile: normalizeImplementationProfile(profile?.implementationProfile ?? entry.implementationProfile),
+    implementationWorkflow: workflowForRepositoryProfile(profile?.implementationProfile ?? entry.implementationProfile, entry.implementationWorkflow ?? entry.repository.implementationWorkflow),
+    publicHostname: board.publicHostname ?? '',
     gitOpsAllowedPaths: gitOps.allowedPaths.join('\n'),
     argoNamespace: gitOps.argoNamespace,
     argoApplicationSelector: gitOps.argoApplicationSelector,
     aiInstructions: profile?.instructions ?? ai.instructions,
+    agentInstructions: ai.agentInstructions ?? '',
     enabledSkills: (profile?.enabledSkills ?? ai.enabledSkills).join('\n'),
     capabilityTags: (profile?.capabilityTags ?? []).join('\n'),
     skillDrafts: profile?.skillDrafts ?? [],
@@ -4545,8 +4367,15 @@ function defaultAiContext(boardId: string): BoardAiContextDto {
     boardId,
     instructions: '',
     enabledSkills: [],
-    askWhenUncertain: true
+    askWhenUncertain: true,
+    agentInstructions: ''
   };
+}
+
+function boardSettingsSubtitle(scope: 'board' | 'ai' | 'environment'): string {
+  if (scope === 'ai') return 'Board AI instructions, enabled skills, repository profiles and skill drafts.';
+  if (scope === 'environment') return 'Board-owned environment variables and Kubernetes secret metadata.';
+  return 'Board repository linkage, hosting workflow and lifecycle actions.';
 }
 
 function isGitOpsBoard(board: Board): boolean {
@@ -4586,6 +4415,13 @@ function displayUserName(userId: string, me: UserDto) {
 
 function latestImplementationRun(runs?: ImplementationRunDto[] | null) {
   return [...(runs ?? [])].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+}
+
+function workflowLabel(workflow?: string | null) {
+  if (workflow === 'preview-only') return 'Preview only';
+  if (workflow === 'preview-then-pr') return 'Preview, then PR';
+  if (workflow === 'direct-pr') return 'Direct PR';
+  return workflow || 'Default workflow';
 }
 
 function latestRepositoryCleanupRun(runs?: RepositoryCleanupRunDto[] | null) {

@@ -144,6 +144,48 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Website_board_uses_preview_then_pr_workflow_and_public_hostname()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+
+        Assert.Equal("preview-then-pr", board.ImplementationWorkflow);
+        Assert.Equal("clock-app.rosenvall.se", board.PublicHostname);
+        Assert.Contains("preview", board.ProviderCapabilities ?? []);
+    }
+
+    [Fact]
+    public void Approving_preview_for_pr_creates_preview_promotion_run_without_codex()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("index", "index.html", "<div id=\"root\"></div>"),
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder().Build(), "github-token")!;
+
+        Assert.Equal("preview-promotion", run.RunKind);
+        Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
+        Assert.Contains("RDO_PULL_REQUEST_URL", manifest);
+        Assert.DoesNotContain("codex exec", manifest);
+        Assert.Equal("Running", store.GetWorkItemDetail(item.Id)!.Preview!.Status);
+    }
+
+    [Fact]
     public void Board_can_be_created_for_provider_neutral_repository()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -403,7 +445,7 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal("Forgejo", settings.Repositories.Provider);
         Assert.Equal("LinkExistingFirst", settings.Repositories.Mode);
-        Assert.True(settings.Repositories.CanCreateRepositories);
+        Assert.False(settings.Repositories.CanCreateRepositories);
         Assert.Equal("https://git.rosenvall.se/api/v1", settings.Repositories.ApiBaseUrl);
         Assert.True(settings.Authentik.Enabled);
         Assert.Equal("https://authentik.rosenvall.se/api/v3/core/users/", settings.Authentik.UsersEndpoint);
@@ -1095,7 +1137,7 @@ public sealed class DevOpsStoreTests
         var guest = store.GetOrCreateUser(new UserIdentityRequest("authentik|guest", "Guest", "guest@example.com"));
         var team = store.CreateTeam(new CreateTeamRequest("Repo creators"), owner.Subject);
         store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
-        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(1234, "carnufex", "User", owner.Subject));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(1234, "rosenvall-corp", "Organization", owner.Subject));
 
         Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
         Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
@@ -1107,7 +1149,7 @@ public sealed class DevOpsStoreTests
         Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
         Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
         Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, guest.Subject));
-        Assert.Contains(store.GetGitHubIntegrations(member.Subject), entry => entry.InstallationId == integration.InstallationId && entry.CanCreateRepositories);
+        Assert.Contains(store.GetGitHubIntegrations(member.Subject), entry => entry.InstallationId == integration.InstallationId && !entry.CanCreateRepositories);
         Assert.Contains(store.GetGitHubIntegrations(owner.Subject), entry => entry.InstallationId == integration.InstallationId && entry.CanManageRepositoryCreationPolicy);
     }
 
@@ -1126,9 +1168,27 @@ public sealed class DevOpsStoreTests
         Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, user.Subject));
         Assert.Contains(store.GetGitHubIntegrations(user.Subject), entry =>
             entry.InstallationId == integration.InstallationId &&
-            entry.RequiresUserAuthorizationForRepositoryCreation &&
             entry.HasUserAuthorization &&
-            entry.CanCreateRepositories);
+            !entry.RequiresUserAuthorizationForRepositoryCreation &&
+            !entry.CanCreateRepositories);
+    }
+
+    [Fact]
+    public void GitHub_personal_repository_creation_policy_does_not_delegate_to_team_members()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var member = store.GetOrCreateUser(new UserIdentityRequest("authentik|member", "Member", "member@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("Repo creators"), owner.Subject);
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(4321, "carnufex", "User", owner.Subject));
+
+        var saved = store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), owner.Subject);
+
+        Assert.NotNull(saved);
+        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
     }
 
     [Fact]
@@ -1140,7 +1200,7 @@ public sealed class DevOpsStoreTests
         var member = store.GetOrCreateUser(new UserIdentityRequest("authentik|member", "Member", "member@example.com"));
         var team = store.CreateTeam(new CreateTeamRequest("Repo creators"), owner.Subject);
         store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
-        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(5678, "carnufex", "User", owner.Subject));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(5678, "rosenvall-corp", "Organization", owner.Subject));
         store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), owner.Subject);
 
         var reopened = fixture.Reopen();
@@ -1162,7 +1222,7 @@ public sealed class DevOpsStoreTests
         var team = store.CreateTeam(new CreateTeamRequest("Platform"), admin.Subject);
         store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(admin.Id, "Admin"));
         store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
-        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(9012, "carnufex", "User", "github-app"));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(9012, "rosenvall-corp", "Organization", "github-app"));
 
         Assert.True(store.CanManageGitHubRepositoryCreationPolicy(integration.InstallationId, admin.Subject));
         Assert.False(store.CanManageGitHubRepositoryCreationPolicy(integration.InstallationId, member.Subject));
@@ -1295,6 +1355,81 @@ public sealed class DevOpsStoreTests
         Assert.Contains("UNITY_LICENSE", runnerManifest);
         Assert.Contains("secretKeyRef:", runnerManifest);
         Assert.DoesNotContain("super-secret-license", runnerManifest);
+    }
+
+    [Fact]
+    public void Board_ai_context_persists_agent_instructions_and_includes_them_in_planning_context()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Plan with agents", "Use board guidance.", "Todo", "Medium", null));
+
+        var context = store.UpsertBoardAiContext(board.Id, new BoardAiContextRequest(
+            "Use the board conventions.",
+            ["clock-skill"],
+            true,
+            "Prefer AGENTS.md style acceptance criteria."));
+        var detail = store.GetWorkItemDetail(item.Id)!;
+        var rendered = PromptContextRenderer.RenderPlanningContext(detail);
+
+        Assert.NotNull(context);
+        Assert.Equal("Prefer AGENTS.md style acceptance criteria.", context.AgentInstructions);
+        Assert.Contains("Board agent instructions: Prefer AGENTS.md style acceptance criteria.", rendered);
+        Assert.Equal("Prefer AGENTS.md style acceptance criteria.", fixture.Reopen().GetBoardAiContext(board.Id)!.AgentInstructions);
+    }
+
+    [Fact]
+    public void Board_cleanup_manifest_includes_work_item_runtime_and_board_secret_but_not_shared_credentials()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Gatebound cleanup", repository.Id, null, null, null, null, null))!;
+        var secret = store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("UNITY_LICENSE", "super-secret-license", repository.Id))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Cleanup runtime", "Create runtime artifacts.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Plan")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Secrets:Namespace"] = "rosenvall-devops"
+            })
+            .Build();
+
+        var manifest = store.RenderBoardCleanupManifest(board.Id, configuration)!;
+
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.JobName(implementationRun, store.GetWorkItemDetail(item.Id)!), manifest);
+        Assert.Contains(RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(implementationRun), manifest);
+        Assert.Contains(BoardSecretManifestRenderer.SecretName(secret), manifest);
+        Assert.DoesNotContain("rosenvall-devops-codex-home", manifest);
+        Assert.DoesNotContain("rosenvall-devops-github-app", manifest);
+        Assert.DoesNotContain("github-user-token-", manifest);
+    }
+
+    [Fact]
+    public void Delete_board_removes_board_scoped_records_but_keeps_repositories_and_user_authorizations()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Delete board", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Remove me", "Delete board data.", "Todo", "Medium", null));
+        var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(7777, "carnufex", "User", "github-app"));
+        store.UpsertGitHubUserAuthorization(new GitHubUserAuthorizationDto(Guid.NewGuid(), "authentik|crille", integration.InstallationId, integration.AccountLogin, "carnufex", "Connected", "github-user-token-keep", DateTimeOffset.UtcNow));
+        store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("TOKEN", "value"));
+        store.UpsertBoardAiContext(board.Id, new BoardAiContextRequest("Instruction", ["skill"], true, "Agent"));
+
+        Assert.True(store.DeleteBoard(board.Id, "crille"));
+
+        Assert.Null(store.GetBoard(board.Id));
+        Assert.Null(store.GetWorkItemDetail(item.Id));
+        Assert.Empty(store.GetBoardSecrets(board.Id));
+        Assert.Null(store.GetBoardAiContext(board.Id));
+        Assert.Contains(store.GetRepositories(), entry => entry.Id == repository.Id);
+        Assert.NotNull(store.GetGitHubUserAuthorization(integration.InstallationId, "authentik|crille"));
     }
 
     [Fact]

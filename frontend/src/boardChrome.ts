@@ -60,19 +60,11 @@ export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {
 }
 
 export function canCreateRepositoryInInstallation(integration: GitHubRepositoryCreationIntegration | null | undefined): boolean {
-  if (!integration) return true;
-  if (integration.requiresUserAuthorizationForRepositoryCreation && !integration.hasUserAuthorization) return false;
-  return integration.canCreateRepositories !== false;
+  return false;
 }
 
 export function repositoryCreatePermissionMessage(integration: GitHubRepositoryCreationIntegration | null | undefined): string | null {
-  if (!integration || canCreateRepositoryInInstallation(integration)) return null;
-  const account = integration.accountLogin?.trim() || `installation ${integration.installationId}`;
-  if (integration.requiresUserAuthorizationForRepositoryCreation && !integration.hasUserAuthorization) {
-    return `Authorize GitHub user access before creating repositories under ${account}.`;
-  }
-
-  return `You do not have permission to create repositories for ${account}. Ask the installation owner to allow your team in Settings.`;
+  return 'GitHub repository creation is disabled. Link an existing repository instead.';
 }
 
 export type GitHubUserAuthorizationResult = {

@@ -124,6 +124,7 @@ var githubManifestStates = new ConcurrentDictionary<string, DateTimeOffset>(Stri
 var githubManifestStateLifetime = TimeSpan.FromMinutes(20);
 var githubUserAuthorizationStates = new ConcurrentDictionary<string, GitHubUserAuthorizationState>(StringComparer.Ordinal);
 var githubUserAuthorizationStateLifetime = TimeSpan.FromMinutes(20);
+const string GitHubRepositoryCreationDisabledMessage = "GitHub repository creation is disabled. Link an existing repository instead.";
 
 app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github) =>
 {
@@ -287,6 +288,48 @@ api.MapPut("/boards/{boardId:guid}/ai-context", (Guid boardId, BoardAiContextReq
     return store.UpsertBoardAiContext(boardId, request) is { } context ? Results.Ok(context) : Results.NotFound();
 });
 
+api.MapPut("/boards/{boardId:guid}/hosting", (Guid boardId, BoardHostingSettingsRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.UpdateBoardHostingSettings(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound();
+});
+
+api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateBoardRequest(store, boardId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var actor = string.IsNullOrWhiteSpace(request.Actor) ? "crille" : request.Actor.Trim();
+    var manifest = store.RenderBoardCleanupManifest(boardId, configuration);
+    if (manifest is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (!string.IsNullOrWhiteSpace(manifest))
+    {
+        var cleanup = await previews.DeleteAsync(manifest, cancellationToken);
+        if (!cleanup.Succeeded)
+        {
+            return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    if (!store.DeleteBoard(boardId, actor))
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("boardDeleted", boardId);
+    return Results.NoContent();
+});
+
 api.MapGet("/boards/{boardId:guid}/timeline", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanViewBoardRequest(store, boardId, user))
@@ -330,62 +373,8 @@ api.MapPost("/repositories/github/onboarding-draft", async (GitHubRepositoryOnbo
     return Results.Ok(await onboarding.CreateDraftAsync(request, cancellationToken));
 });
 
-api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, CancellationToken cancellationToken) =>
-{
-    var actorSubject = AuthenticatedSubjectOrNull(user);
-    var resolvedInstallationId = request.InstallationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
-    if (request.InstallationId is { } requestedInstallationId && !store.CanUseGitHubInstallation(requestedInstallationId, actorSubject))
-    {
-        return RepositoryMutationForbidden();
-    }
-
-    if (resolvedInstallationId is null || !store.CanCreateGitHubRepository(resolvedInstallationId.Value, actorSubject))
-    {
-        return RepositoryMutationForbidden();
-    }
-
-    var integration = store.GetGitHubIntegration(resolvedInstallationId);
-    if (integration is null)
-    {
-        return Results.Problem("No GitHub App installation is available for repository creation.", statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-
-    var files = RepositoryOnboardingDrafts.ValidateGuidanceFiles(request.Files);
-    if (files.Count == 0)
-    {
-        return Results.Problem("New GitHub repositories require at least one editable onboarding guidance file.", statusCode: StatusCodes.Status400BadRequest);
-    }
-
-    var repositoryToken = await ResolveRepositoryCreationTokenAsync(store, github, userTokenStore, integration, EffectiveActorSubject(actorSubject), cancellationToken);
-    if (!repositoryToken.Succeeded)
-    {
-        return Results.Problem(repositoryToken.Message, statusCode: repositoryToken.StatusCode);
-    }
-
-    var creation = await github.CreateRepositoryResultAsync(integration, request, repositoryToken.Token, cancellationToken);
-    if (!creation.Succeeded || creation.Repository is null)
-    {
-        return Results.Problem(creation.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
-    var createdRepository = creation.Repository;
-
-    var committed = await github.CommitRepositoryFilesAsync(createdRepository, files, repositoryToken.Token, "Initialize repository guidance", cancellationToken);
-    if (!committed)
-    {
-        return Results.Problem("GitHub repository was created, but the onboarding guidance commit failed.", statusCode: StatusCodes.Status502BadGateway);
-    }
-
-    var repository = store.CreateRepository(new CreateRepositoryRequest(
-        createdRepository.Provider,
-        createdRepository.Name,
-        createdRepository.RemoteUrl,
-        createdRepository.DefaultBranch,
-        createdRepository.WebUrl,
-        createdRepository.Owner,
-        request.ImplementationProfile ?? createdRepository.ImplementationProfile));
-
-    return Results.Created($"/api/repositories/{repository.Id}", new GitHubRepositoryCreateResponse(repository, request.RepositoryProfile, request.AiContext));
-});
+api.MapPost("/repositories/github", () =>
+    Results.Problem(GitHubRepositoryCreationDisabledMessage, statusCode: StatusCodes.Status403Forbidden));
 
 api.MapGet("/me", (ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -475,11 +464,11 @@ api.MapGet("/integrations/github/{installationId:long}/user-authorization", (lon
     var authorization = store.GetGitHubUserAuthorization(installationId, actorSubject);
     return Results.Ok(new GitHubUserAuthorizationStatusDto(
         installationId,
-        IsUserAccount(integration),
+        false,
         authorization is not null,
         authorization?.GitHubLogin,
         authorization?.ExpiresAt,
-        authorization is null ? $"Authorize GitHub user access before creating repositories under {integration.AccountLogin}." : $"Connected as {authorization.GitHubLogin}."));
+        authorization is null ? "GitHub user authorization is disabled because repository creation is disabled." : $"Connected as {authorization.GitHubLogin}."));
 });
 api.MapGet("/integrations/github/user-authorization/start", (long installationId, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github) =>
 {
@@ -623,7 +612,7 @@ api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepos
 
     return store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound();
 });
-api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, SyncGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, CancellationToken cancellationToken) =>
+api.MapPost("/boards/{boardId:guid}/repositories/github", (Guid boardId, SyncGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanMutateBoardRequest(store, boardId, user))
     {
@@ -657,37 +646,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/github", async (Guid boardId, S
             : Results.NotFound();
     }
 
-    var integration = store.GetGitHubIntegration(request.InstallationId);
-    if (integration is null)
-    {
-        return Results.Problem("No GitHub App installation is available for repository creation.", statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-
-    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
-    var repositoryToken = await ResolveRepositoryCreationTokenAsync(store, github, userTokenStore, integration, actorSubject, cancellationToken);
-    if (!repositoryToken.Succeeded)
-    {
-        return Results.Problem(repositoryToken.Message, statusCode: repositoryToken.StatusCode);
-    }
-
-    var creation = await github.CreateRepositoryResultAsync(integration, request, repositoryToken.Token, cancellationToken);
-    if (!creation.Succeeded || creation.Repository is null)
-    {
-        return Results.Problem(creation.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
-    var createdRepository = creation.Repository;
-
-    var repository = store.CreateRepository(new CreateRepositoryRequest(
-        createdRepository.Provider,
-        createdRepository.Name,
-        createdRepository.RemoteUrl,
-        createdRepository.DefaultBranch,
-        createdRepository.WebUrl,
-        createdRepository.Owner,
-        request.ImplementationProfile ?? createdRepository.ImplementationProfile));
-    return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(repository.Id, true, request.ImplementationProfile ?? repository.ImplementationProfile)) is { } board
-        ? Results.Created($"/api/repositories/{repository.Id}", board)
-        : Results.NotFound();
+    return Results.Problem(GitHubRepositoryCreationDisabledMessage, statusCode: StatusCodes.Status403Forbidden);
 });
 api.MapPut("/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile", (Guid boardId, Guid repositoryId, RepositoryProfileDto request, ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -1404,6 +1363,81 @@ api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId
     return detail is null ? Results.NotFound() : Results.Ok(detail);
 });
 
+api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    if (store.GetPendingImplementationRun(workItemId) is { } pendingRun)
+    {
+        return Results.Problem(
+            $"Pull request creation cannot start because {pendingRun.WorkItemKey} already has a pending implementation run on branch {pendingRun.Branch}.",
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
+    ImplementationRunDto? run;
+    try
+    {
+        run = store.StartPreviewPromotionRun(workItemId, request.Actor);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+    }
+
+    if (run is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("implementationRunChanged", run);
+    var githubSecretName = configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github";
+    var repository = store.GetImplementationRunRepository(run.Id);
+    var integration = repository is null ? null : store.GetGitHubIntegrationForRepository(repository);
+    if (integration is not null)
+    {
+        var token = await github.CreateInstallationTokenAsync(integration.InstallationId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: $"Could not mint GitHub App installation token for {integration.AccountLogin}.");
+            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            return Results.Problem(failed?.FailureReason ?? "Could not mint GitHub App installation token.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        githubSecretName = RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(run);
+        var tokenSecretApply = await jobs.ApplyAsync(RepositoryImplementationJobManifestRenderer.RenderGitHubTokenSecret(run, token), cancellationToken);
+        if (!tokenSecretApply.Succeeded)
+        {
+            var failure = KubernetesFailureClassifier.Classify(tokenSecretApply.Message);
+            var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretApply.Message, failure);
+            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    var manifest = store.RenderImplementationRunManifest(run.Id, configuration, githubSecretName);
+    if (manifest is null)
+    {
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Preview promotion manifest could not be rendered.");
+        return Results.Problem(failed?.FailureReason ?? "Preview promotion manifest could not be rendered.", statusCode: StatusCodes.Status409Conflict);
+    }
+
+    var apply = await jobs.ApplyAsync(manifest, cancellationToken);
+    if (!apply.Succeeded)
+    {
+        var failure = KubernetesFailureClassifier.Classify(apply.Message);
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
+        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
+    await hub.Clients.All.SendAsync("implementationRunChanged", updated);
+    return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
+});
+
 api.MapGet("/preview-environments", (ClaimsPrincipal user, DevOpsStore store) => store.GetPreviewEnvironments(AuthenticatedSubjectOrNull(user)));
 api.MapGet("/preview-events", (ClaimsPrincipal user, DevOpsStore store) => store.GetPreviewEvents(AuthenticatedSubjectOrNull(user)));
 api.MapGet("/pipelines", (ClaimsPrincipal user, DevOpsStore store) => store.GetPipelineStatuses(AuthenticatedSubjectOrNull(user)));
@@ -1791,13 +1825,13 @@ namespace Rosenvall.DevOps.Api
     public sealed record UserDto(Guid Id, string DisplayName, string Email, string Subject, string? AvatarUrl = null);
     public sealed record TeamMemberDto(Guid UserId, string Role, string? DisplayName = null, string? Email = null, string? Status = null);
     public sealed record TeamDto(Guid Id, string Name, IReadOnlyList<TeamMemberDto> Members, DateTimeOffset CreatedAt);
-    public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt, string? Owner = null, string ImplementationProfile = "react-preview");
-    public sealed record BoardRepositoryDto(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, RepositoryDto Repository, RepositoryProfileDto? Profile = null);
+    public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt, string? Owner = null, string ImplementationProfile = "react-preview", string ImplementationWorkflow = "preview-then-pr");
+    public sealed record BoardRepositoryDto(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, RepositoryDto Repository, RepositoryProfileDto? Profile = null, string ImplementationWorkflow = "direct-pr");
     public sealed record BoardTeamAccessDto(Guid BoardId, Guid TeamId, string TeamName, string Role);
     public sealed record BoardGitOpsSettingsDto(Guid BoardId, IReadOnlyList<string> AllowedPaths, string ArgoNamespace, string ArgoApplicationSelector);
-    public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain);
-    public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, RepositoryProfileDto? RepositoryProfileDraft = null);
-    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, string RepositorySyncState = "Preview only", IReadOnlyList<string>? ProviderCapabilities = null);
+    public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain, string AgentInstructions = "");
+    public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, RepositoryProfileDto? RepositoryProfileDraft = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null);
+    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, string RepositorySyncState = "Preview only", IReadOnlyList<string>? ProviderCapabilities = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
     public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null, BoardPlanningContextDto? BoardContext = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null);
@@ -1808,7 +1842,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record PreviewTerminalLineDto(DateTimeOffset CreatedAt, string Stream, string Message);
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
-    public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null);
+    public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, string RunKind = "codex", Guid? SourcePreviewId = null);
     public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, bool Adopted = false, DateTimeOffset? MergedAt = null, DateTimeOffset? VerifiedAt = null, string? VerificationFailure = null);
     public sealed record ApiStatusDto(ApiResourceDiagnosticsDto Resources);
     public sealed record ApiResourceDiagnosticsDto(long? ProcessRssBytes, long? MemoryCurrentBytes, long? MemoryLimitBytes, long? MemoryAvailableBytes, bool IsMemoryPressured, string Status, string? Message, long? SnapshotJsonBytes = null);
@@ -1852,11 +1886,11 @@ namespace Rosenvall.DevOps.Api
     public sealed record UpsertTeamMemberRequest(Guid UserId, string Role);
     public sealed record InviteTeamMemberRequest(string Email, string Role);
     public sealed record CreateWorkspaceRequest(string Name, string EnvironmentName, string Region);
-    public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null, string? Owner = null, string? ImplementationProfile = null);
+    public sealed record CreateRepositoryRequest(string Provider, string Name, string RemoteUrl, string DefaultBranch, string? WebUrl = null, string? Owner = null, string? ImplementationProfile = null, string? ImplementationWorkflow = null);
     public sealed record GitHubRepositoryOnboardingFileDto(string Path, string Content);
     public sealed record GitHubRepositoryOnboardingDraftRequest(string Name, string? Description = null, string? Prompt = null, string? ImplementationProfile = null);
     public sealed record GitHubRepositoryOnboardingDraftDto(string Name, string Description, string Prompt, RepositoryProfileDto RepositoryProfile, BoardAiContextRequest AiContext, IReadOnlyList<GitHubRepositoryOnboardingFileDto> Files, string Source = "fallback", string? Model = null);
-    public sealed record CreateGitHubRepositoryRequest(long? InstallationId, string Name, bool Private = true, string? Description = null, string? Owner = null, string? ImplementationProfile = null, string? OnboardingPrompt = null, IReadOnlyList<GitHubRepositoryOnboardingFileDto>? Files = null, RepositoryProfileDto? RepositoryProfile = null, BoardAiContextRequest? AiContext = null);
+    public sealed record CreateGitHubRepositoryRequest(long? InstallationId, string Name, bool Private = true, string? Description = null, string? Owner = null, string? ImplementationProfile = null, string? OnboardingPrompt = null, IReadOnlyList<GitHubRepositoryOnboardingFileDto>? Files = null, RepositoryProfileDto? RepositoryProfile = null, BoardAiContextRequest? AiContext = null, string? ImplementationWorkflow = null);
     public sealed record GitHubRepositoryCreateResponse(RepositoryDto Repository, RepositoryProfileDto? RepositoryProfile = null, BoardAiContextRequest? AiContext = null);
     public sealed record GitHubRepositoryCreationResult(bool Succeeded, RepositoryDto? Repository, string Message, HttpStatusCode? StatusCode = null);
     public sealed record GitHubRepositoryCreationPolicyDto(long InstallationId, IReadOnlyList<Guid> AllowedTeamIds);
@@ -1872,11 +1906,12 @@ namespace Rosenvall.DevOps.Api
         public static RepositoryCreationTokenResult Ok(string token) => new(true, token, "", StatusCodes.Status200OK);
         public static RepositoryCreationTokenResult Fail(string message, int statusCode) => new(false, "", message, statusCode);
     }
-    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null, RepositoryProfileDto? RepositoryProfile = null);
+    public sealed record CreateBoardRequest(string Name, Guid? RepositoryId, string? RepositoryProvider, string? RepositoryName, string? RepositoryRemoteUrl, string? RepositoryWebUrl, string? RepositoryDefaultBranch, string? RepositoryOwner = null, string? ImplementationProfile = null, string? ProviderMode = null, string? GitHubRepositoryId = null, string? CustomRepositoryUrl = null, IReadOnlyList<Guid>? TeamIds = null, BoardGitOpsSettingsRequest? GitOpsSettings = null, BoardAiContextRequest? AiContext = null, RepositoryProfileDto? RepositoryProfile = null, string? ImplementationWorkflow = null, string? PublicHostname = null);
+    public sealed record BoardHostingSettingsRequest(string? PublicHostname, string? ImplementationWorkflow = null);
     public sealed record BoardGitOpsSettingsRequest(IReadOnlyList<string>? AllowedPaths, string? ArgoNamespace, string? ArgoApplicationSelector);
-    public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain);
+    public sealed record BoardAiContextRequest(string? Instructions, IReadOnlyList<string>? EnabledSkills, bool? AskWhenUncertain, string? AgentInstructions = null);
     public sealed record LinkBoardRepositoryRequest(Guid RepositoryId, bool IsPrimary, string? ImplementationProfile = null);
-    public sealed record SyncGitHubRepositoryRequest(Guid? RepositoryId = null, string? Owner = null, string? Name = null, bool Private = true, string? Description = null, long? InstallationId = null, string? ImplementationProfile = null, bool CreateNew = false, string? RemoteUrl = null, string? WebUrl = null, string? DefaultBranch = null);
+    public sealed record SyncGitHubRepositoryRequest(Guid? RepositoryId = null, string? Owner = null, string? Name = null, bool Private = true, string? Description = null, long? InstallationId = null, string? ImplementationProfile = null, bool CreateNew = false, string? RemoteUrl = null, string? WebUrl = null, string? DefaultBranch = null, string? ImplementationWorkflow = null);
     public sealed record UpsertBoardTeamAccessRequest(string Role);
     public sealed record CreateBoardSecretRequest(string Key, string Value, Guid? RepositoryId = null);
     public sealed record CreateWorkItemRequest(Guid BoardId, string Type, string Title, string Description, string Status, string Priority, string? Assignee);
@@ -2463,6 +2498,175 @@ namespace Rosenvall.DevOps.Api
 
             return string.IsNullOrWhiteSpace(normalized) ? "implementation-run" : normalized[..Math.Min(normalized.Length, 63)].Trim('-');
         }
+
+        private static string Escape(string? value) =>
+            (value ?? "")
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal)
+                .Replace("\t", "\\t", StringComparison.Ordinal);
+    }
+
+    public static class RepositoryPreviewPromotionJobManifestRenderer
+    {
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, WorkItemDetailDto context, IReadOnlyList<PreviewSourceFile> sourceFiles, string githubSecretName)
+        {
+            var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, context);
+            var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
+            return $$"""
+                   apiVersion: batch/v1
+                   kind: Job
+                   metadata:
+                     name: {{jobName}}
+                     namespace: {{RepositoryImplementationJobManifestRenderer.Namespace}}
+                     labels:
+                       app.kubernetes.io/part-of: rosenvall-devops-implementation
+                       rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
+                   spec:
+                     backoffLimit: 0
+                     activeDeadlineSeconds: 1800
+                     template:
+                       metadata:
+                         labels:
+                           app.kubernetes.io/name: {{jobName}}
+                       spec:
+                         automountServiceAccountToken: false
+                         restartPolicy: Never
+                         securityContext:
+                           fsGroup: 1000
+                           seccompProfile:
+                             type: RuntimeDefault
+                         containers:
+                           - name: runner
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               runAsNonRoot: true
+                               runAsUser: 1000
+                               runAsGroup: 1000
+                               allowPrivilegeEscalation: false
+                               capabilities:
+                                 drop:
+                                   - ALL
+                             env:
+                               - name: GITHUB_TOKEN
+                                 valueFrom:
+                                   secretKeyRef:
+                                     name: {{githubSecretName}}
+                                     key: token
+                               - name: ROSENVALL_REPOSITORY_URL
+                                 value: "{{Escape(repository.RemoteUrl)}}"
+                               - name: ROSENVALL_REPOSITORY
+                                 value: "{{Escape(ownerRepo)}}"
+                               - name: ROSENVALL_DEFAULT_BRANCH
+                                 value: "{{Escape(repository.DefaultBranch)}}"
+                               - name: ROSENVALL_BRANCH
+                                 value: "{{Escape(run.Branch)}}"
+                               - name: ROSENVALL_WORK_ITEM_KEY
+                                 value: "{{Escape(context.Item.Key)}}"
+                               - name: ROSENVALL_WORK_ITEM_TITLE
+                                 value: "{{Escape(context.Item.Title)}}"
+                               - name: ROSENVALL_PREVIEW_URL
+                                 value: "{{Escape(context.Preview?.Url)}}"
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 workspace="/tmp/rosenvall-preview-pr-workspace"
+                                 mkdir -p "$workspace"
+                                 json_escape() { printf '%s' "$1" | tr '\r\n' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+                                 echo "RDO_STEP=Cloning"
+                                 auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${GITHUB_TOKEN}@github.com/#")"
+                                 git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 cd "$workspace/repo"
+                                 git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
+                                 git config user.name "Rosenvall DevOps"
+                                 git config user.email "devops@rosenvall.se"
+                                 git switch -c "$ROSENVALL_BRANCH"
+                                 echo "RDO_STEP=Implementing"
+                   {{Indent(RenderSourceWrites(sourceFiles), 14)}}
+                                 if [ -f package.json ]; then
+                                   echo "RDO_STEP=Testing"
+                                   if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
+                                     npm test || { echo "RDO_FAILURE=npm test failed"; exit 23; }
+                                   elif node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
+                                     npm run build || { echo "RDO_FAILURE=npm build failed"; exit 24; }
+                                   else
+                                     echo "No npm test or build script found; skipping npm checks."
+                                   fi
+                                 fi
+                                 echo "RDO_STEP=Validating"
+                                 git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/changed-files.txt"
+                                 if [ ! -s "$workspace/changed-files.txt" ]; then echo "RDO_FAILURE=No changes produced"; exit 20; fi
+                                 git add -A
+                                 commit_title="$(printf 'Implement %s %s from approved preview' "$ROSENVALL_WORK_ITEM_KEY" "$ROSENVALL_WORK_ITEM_TITLE" | tr '\r\n' '  ')"
+                                 git commit -m "$commit_title"
+                                 commit="$(git rev-parse HEAD)"
+                                 echo "RDO_COMMIT=$commit"
+                                 echo "RDO_STEP=Pushing"
+                                 git remote set-url origin "$auth_remote"
+                                 git push --set-upstream origin "$ROSENVALL_BRANCH"
+                                 repo_owner="${ROSENVALL_REPOSITORY%%/*}"
+                                 existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                                 if [ -n "$existing_pr_url" ]; then
+                                   pr_url="$existing_pr_url"
+                                 else
+                                   pr_title="$(json_escape "$commit_title")"
+                                   pr_head="$(json_escape "$ROSENVALL_BRANCH")"
+                                   pr_base="$(json_escape "$ROSENVALL_DEFAULT_BRANCH")"
+                                   preview_url="$(json_escape "$ROSENVALL_PREVIEW_URL")"
+                                   pr_payload="{\"title\":\"$pr_title\",\"head\":\"$pr_head\",\"base\":\"$pr_base\",\"body\":\"Generated by Rosenvall DevOps from an approved preview. Preview: $preview_url\"}"
+                                   pr_url="$(curl -fsS -X POST "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$pr_payload" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                                 fi
+                                 if [ -z "$pr_url" ]; then echo "RDO_FAILURE=Pull request was created or requested, but no PR URL was returned"; exit 21; fi
+                                 echo "RDO_STEP=PullRequestReady"
+                                 echo "RDO_PULL_REQUEST_URL=$pr_url"
+                   """;
+        }
+
+        private static string RenderSourceWrites(IReadOnlyList<PreviewSourceFile> sourceFiles)
+        {
+            var builder = new StringBuilder();
+            var index = 0;
+            foreach (var sourceFile in sourceFiles.OrderBy(file => file.Path, StringComparer.OrdinalIgnoreCase))
+            {
+                var path = sourceFile.Path.Replace("\\", "/", StringComparison.Ordinal);
+                var slash = path.LastIndexOf('/');
+                if (slash > 0)
+                {
+                    builder.AppendLine($"mkdir -p '{EscapeSingle(path[..slash])}'");
+                }
+
+                builder.AppendLine($"base64 -d > '{EscapeSingle(path)}' <<'RDO_FILE_{index}'");
+                builder.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(sourceFile.Content ?? "")));
+                builder.AppendLine($"RDO_FILE_{index}");
+                index++;
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private static string Indent(string value, int spaces)
+        {
+            var prefix = new string(' ', spaces);
+            return string.Join("\n", value.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n').Select(line => prefix + line));
+        }
+
+        private static string SafeName(string value)
+        {
+            var chars = value.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : '-').ToArray();
+            var normalized = new string(chars).Trim('-');
+            while (normalized.Contains("--", StringComparison.Ordinal))
+            {
+                normalized = normalized.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return string.IsNullOrWhiteSpace(normalized) ? "preview-promotion" : normalized[..Math.Min(normalized.Length, 63)].Trim('-');
+        }
+
+        private static string EscapeSingle(string value) => value.Replace("'", "'\\''", StringComparison.Ordinal);
 
         private static string Escape(string? value) =>
             (value ?? "")
@@ -5032,10 +5236,16 @@ namespace Rosenvall.DevOps.Api
 
             var builder = new StringBuilder();
             builder.AppendLine($"Repository profile: {board.RepositoryProfile}");
+            builder.AppendLine($"Implementation workflow: {board.ImplementationWorkflow}");
+            if (!string.IsNullOrWhiteSpace(board.PublicHostname))
+            {
+                builder.AppendLine($"Public production hostname: {board.PublicHostname}");
+            }
             AppendRepositoryProfileDraft(builder, board.RepositoryProfileDraft);
             if (board.AiContext is not null)
             {
                 builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
+                builder.AppendLine($"Board agent instructions: {EmptyAsNone(board.AiContext.AgentInstructions)}");
                 builder.AppendLine($"Enabled board skills: {ListOrNone(board.AiContext.EnabledSkills)}");
                 builder.AppendLine(board.AiContext.AskWhenUncertain
                     ? "Ask blocking questions only when required facts are missing after applying board instructions, GitOps settings, repository profile signals, and enabled repo skill drafts. Do not ask questions that these skills or conventions answer."
@@ -5064,10 +5274,16 @@ namespace Rosenvall.DevOps.Api
 
             var builder = new StringBuilder();
             builder.AppendLine($"Implementation profile: {board.RepositoryProfile}");
+            builder.AppendLine($"Implementation workflow: {board.ImplementationWorkflow}");
+            if (!string.IsNullOrWhiteSpace(board.PublicHostname))
+            {
+                builder.AppendLine($"Public production hostname: {board.PublicHostname}");
+            }
             AppendRepositoryProfileDraft(builder, board.RepositoryProfileDraft);
             if (board.AiContext is not null)
             {
                 builder.AppendLine($"Board instructions: {EmptyAsNone(board.AiContext.Instructions)}");
+                builder.AppendLine($"Board agent instructions: {EmptyAsNone(board.AiContext.AgentInstructions)}");
                 builder.AppendLine($"Enabled board skills: {ListOrNone(board.AiContext.EnabledSkills)}");
                 builder.AppendLine("Use these skills when relevant; do not assume unrelated skills are active.");
             }
@@ -5681,7 +5897,17 @@ namespace Rosenvall.DevOps.Api
                 return "unity";
             }
 
-            if (text.Contains("react", StringComparison.Ordinal) || text.Contains("vite", StringComparison.Ordinal) || text.Contains("preview", StringComparison.Ordinal))
+            if (text.Contains("react", StringComparison.Ordinal) ||
+                text.Contains("vite", StringComparison.Ordinal) ||
+                text.Contains("preview", StringComparison.Ordinal) ||
+                text.Contains("website", StringComparison.Ordinal) ||
+                text.Contains("hemsida", StringComparison.Ordinal) ||
+                text.Contains("frontend", StringComparison.Ordinal) ||
+                text.Contains("webapp", StringComparison.Ordinal) ||
+                text.Contains("landing", StringComparison.Ordinal) ||
+                text.Contains("site", StringComparison.Ordinal) ||
+                text.Contains("clock", StringComparison.Ordinal) ||
+                text.Contains("klock", StringComparison.Ordinal))
             {
                 return "react-preview";
             }
@@ -6480,6 +6706,8 @@ namespace Rosenvall.DevOps.Api
                 createRequest.Description,
                 createRequest.Private,
                 createRequest.ImplementationProfile,
+                createRequest.ImplementationWorkflow,
+                $"{createRequest.Name} {createRequest.Description}",
                 token,
                 cancellationToken);
             return result.Repository;
@@ -6493,6 +6721,8 @@ namespace Rosenvall.DevOps.Api
                 createRequest.Description,
                 createRequest.Private,
                 createRequest.ImplementationProfile,
+                createRequest.ImplementationWorkflow,
+                $"{createRequest.Name} {createRequest.Description}",
                 token,
                 cancellationToken);
 
@@ -6510,10 +6740,12 @@ namespace Rosenvall.DevOps.Api
                 createRequest.Description,
                 createRequest.Private,
                 createRequest.ImplementationProfile,
+                createRequest.ImplementationWorkflow,
+                $"{createRequest.Name} {createRequest.Description} {createRequest.OnboardingPrompt} {createRequest.RepositoryProfile?.Instructions}",
                 token,
                 cancellationToken);
 
-        private async Task<GitHubRepositoryCreationResult> CreateRepositoryResultAsync(GitHubIntegrationDto integration, string? requestedName, string? requestedOwner, string? requestedDescription, bool privateRepository, string? implementationProfile, string token, CancellationToken cancellationToken)
+        private async Task<GitHubRepositoryCreationResult> CreateRepositoryResultAsync(GitHubIntegrationDto integration, string? requestedName, string? requestedOwner, string? requestedDescription, bool privateRepository, string? implementationProfile, string? implementationWorkflow, string? workflowHint, string token, CancellationToken cancellationToken)
         {
             var name = NormalizeRepositoryName(requestedName);
             if (string.IsNullOrWhiteSpace(name))
@@ -6551,10 +6783,44 @@ namespace Rosenvall.DevOps.Api
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             var repository = NormalizeRepositories(JsonSerializer.SerializeToElement(new[] { document.RootElement })).FirstOrDefault();
+            var normalizedProfile = NormalizeTextValue(implementationProfile, "code-repo");
+            var normalizedWorkflow = NormalizeRepositoryWorkflowValue(implementationWorkflow, normalizedProfile, $"{requestedName} {requestedDescription} {workflowHint}");
             return repository is null
                 ? new GitHubRepositoryCreationResult(false, null, "GitHub repository creation response did not contain a repository.")
-                : new GitHubRepositoryCreationResult(true, repository with { ImplementationProfile = NormalizeTextValue(implementationProfile, "code-repo") }, "Repository created.", response.StatusCode);
+                : new GitHubRepositoryCreationResult(true, repository with
+                {
+                    ImplementationProfile = normalizedProfile,
+                    ImplementationWorkflow = normalizedWorkflow
+                }, "Repository created.", response.StatusCode);
         }
+
+        private static string NormalizeRepositoryWorkflowValue(string? value, string implementationProfile, string? textHint)
+        {
+            var normalized = NormalizeTextValue(value, "").ToLowerInvariant();
+            if (normalized is "direct-pr" or "preview-then-pr" or "preview-only")
+            {
+                return normalized;
+            }
+
+            return implementationProfile switch
+            {
+                "gitops-homelab" or "unity" => "direct-pr",
+                "react-preview" => "preview-then-pr",
+                _ => LooksLikeWebsiteHint(textHint ?? "") ? "preview-then-pr" : "direct-pr"
+            };
+        }
+
+        private static bool LooksLikeWebsiteHint(string value) =>
+            value.Contains("website", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("hemsida", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("frontend", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("react", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("vite", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("webapp", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("landing", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("site", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("clock", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("klock", StringComparison.OrdinalIgnoreCase);
 
         public async Task<bool> CommitRepositoryFilesAsync(RepositoryDto repository, IReadOnlyList<GitHubRepositoryOnboardingFileDto> files, string token, string message, CancellationToken cancellationToken)
         {
@@ -8695,6 +8961,7 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
+                var profile = NormalizeImplementationProfile(request.ImplementationProfile);
                 var repository = new RepositoryDto(
                     Guid.NewGuid(),
                     NormalizeText(request.Provider, "Forgejo"),
@@ -8704,7 +8971,8 @@ namespace Rosenvall.DevOps.Api
                     NormalizeText(request.DefaultBranch, "main"),
                     DateTimeOffset.UtcNow,
                     string.IsNullOrWhiteSpace(request.Owner) ? OwnerFromRepositoryName(request.Name) : request.Owner.Trim(),
-                    NormalizeImplementationProfile(request.ImplementationProfile));
+                    profile,
+                    NormalizeRepositoryWorkflow(request.ImplementationWorkflow, profile, request.Name));
                 _repositories.Add(repository);
                 Persist();
                 return repository;
@@ -8721,16 +8989,19 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var repository = ResolveBoardRepository(request);
+                var implementationProfile = NormalizeImplementationProfile(request.RepositoryProfile?.ImplementationProfile ?? request.ImplementationProfile ?? repository?.ImplementationProfile);
+                var implementationWorkflow = NormalizeImplementationWorkflow(request.ImplementationWorkflow, implementationProfile, repository, request.Name, request.AiContext?.Instructions);
                 var board = new BoardRecord(
                     Guid.NewGuid(),
                     workspaceId,
                     NormalizeText(request.Name, repository?.Name ?? "Delivery Board"),
                     ["Todo", "In Progress", "AI Planning", "Review", "Done"],
-                    repository?.Id);
+                    repository?.Id,
+                    NormalizePublicHostname(request.PublicHostname, repository?.Name ?? request.Name, implementationWorkflow),
+                    implementationWorkflow);
                 _boards.Add(board);
                 if (repository is not null)
                 {
-                    var implementationProfile = NormalizeImplementationProfile(request.RepositoryProfile?.ImplementationProfile ?? request.ImplementationProfile ?? repository.ImplementationProfile);
                     UpsertBoardRepositoryLinkWithoutLock(board.Id, repository.Id, true, implementationProfile);
                     if (request.RepositoryProfile is not null)
                     {
@@ -8772,6 +9043,27 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public BoardDto? UpdateBoardHostingSettings(Guid boardId, BoardHostingSettingsRequest request)
+        {
+            lock (_lock)
+            {
+                var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+                if (board is null)
+                {
+                    return null;
+                }
+
+                var profile = BoardImplementationProfile(boardId);
+                var repository = RepositoryIdForBoard(boardId) is { } repositoryId
+                    ? _repositories.SingleOrDefault(entry => entry.Id == repositoryId)
+                    : null;
+                board.ImplementationWorkflow = NormalizeImplementationWorkflow(request.ImplementationWorkflow, profile, repository, board.Name, AiContextFor(boardId)?.Instructions);
+                board.PublicHostname = NormalizePublicHostname(request.PublicHostname, repository?.Name ?? board.Name, board.ImplementationWorkflow);
+                Persist();
+                return ToBoardDto(board);
+            }
+        }
+
         public BoardDto? LinkRepositoryToBoard(Guid boardId, LinkBoardRepositoryRequest request)
         {
             lock (_lock)
@@ -8787,6 +9079,8 @@ namespace Rosenvall.DevOps.Api
                 if (request.IsPrimary)
                 {
                     board.RepositoryId = repository.Id;
+                    board.ImplementationWorkflow = NormalizeImplementationWorkflow(board.ImplementationWorkflow, request.ImplementationProfile ?? repository.ImplementationProfile, repository, board.Name);
+                    board.PublicHostname = NormalizePublicHostname(board.PublicHostname, repository.Name, board.ImplementationWorkflow);
                 }
 
                 AddTimelineEvent(board.Id, repository.Id, null, "RepositoryLinked", repository.Name, $"Linked {repository.Name} to board {board.Name}.", "system", repository.WebUrl);
@@ -8810,6 +9104,8 @@ namespace Rosenvall.DevOps.Api
                 var normalized = RepositoryProfileAiParser.NormalizeRepositoryProfile(profile);
                 UpsertBoardRepositoryLinkWithoutLock(boardId, repositoryId, link.IsPrimary, normalized.ImplementationProfile);
                 UpsertBoardRepositoryProfileWithoutLock(boardId, repositoryId, normalized);
+                board.ImplementationWorkflow = NormalizeImplementationWorkflow(board.ImplementationWorkflow, normalized.ImplementationProfile, repository, board.Name, normalized.Instructions);
+                board.PublicHostname = NormalizePublicHostname(board.PublicHostname, repository.Name, board.ImplementationWorkflow);
                 _boardAiContexts.RemoveAll(existing => existing.BoardId == boardId);
                 _boardAiContexts.Add(CreateAiContext(boardId, new BoardAiContextRequest(normalized.Instructions, normalized.EnabledSkills, true), defaultAskWhenUncertain: string.Equals(normalized.ImplementationProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase)));
                 if (string.Equals(normalized.ImplementationProfile, "gitops-homelab", StringComparison.OrdinalIgnoreCase) && _boardGitOpsSettings.All(settings => settings.BoardId != boardId))
@@ -9405,6 +9701,43 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public bool DeleteBoard(Guid boardId, string actor = "system")
+        {
+            lock (_lock)
+            {
+                var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+                if (board is null)
+                {
+                    return false;
+                }
+
+                var itemIds = _items.Where(item => item.BoardId == boardId).Select(item => item.Id).ToHashSet();
+                _boards.Remove(board);
+                _items.RemoveAll(item => item.BoardId == boardId);
+                _comments.RemoveAll(comment => itemIds.Contains(comment.WorkItemId));
+                _aiRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _aiSessions.RemoveAll(session => itemIds.Contains(session.WorkItemId));
+                _previews.RemoveAll(preview => itemIds.Contains(preview.WorkItemId));
+                _development.RemoveAll(development => itemIds.Contains(development.WorkItemId));
+                _implementationRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _repositoryCleanupRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _pipelineRuns.RemoveAll(run => run.BoardId == boardId || run.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
+                _previewEvents.RemoveAll(entry => entry.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
+                _timelineEvents.RemoveAll(entry =>
+                    entry.BoardId == boardId ||
+                    entry.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
+                _boardAccess.RemoveAll(access => access.BoardId == boardId);
+                _boardTeamAccess.RemoveAll(access => access.BoardId == boardId);
+                _boardRepositoryLinks.RemoveAll(link => link.BoardId == boardId);
+                _boardRepositoryProfiles.RemoveAll(profile => profile.BoardId == boardId);
+                _boardSecrets.RemoveAll(secret => secret.BoardId == boardId);
+                _boardGitOpsSettings.RemoveAll(settings => settings.BoardId == boardId);
+                _boardAiContexts.RemoveAll(context => context.BoardId == boardId);
+                Persist();
+                return true;
+            }
+        }
+
         public WorkItemDetailDto? GetWorkItemDetail(Guid workItemId)
         {
             lock (_lock)
@@ -9425,7 +9758,7 @@ namespace Rosenvall.DevOps.Api
                     _aiSessions.SingleOrDefault(session => session.WorkItemId == item.Id),
                     _previewEvents.Where(entry => entry.WorkItemId == item.Id).OrderBy(entry => entry.CreatedAt).ToArray(),
                     PreviewImplementationRunsAwaitingRecoveryForWorkItem(item.Id),
-                    new BoardPlanningContextDto(item.BoardId, BoardImplementationProfile(item.BoardId), GitOpsSettingsFor(item.BoardId), AiContextFor(item.BoardId), PrimaryRepositoryProfileFor(item.BoardId)),
+                    new BoardPlanningContextDto(item.BoardId, BoardImplementationProfile(item.BoardId), GitOpsSettingsFor(item.BoardId), AiContextFor(item.BoardId), PrimaryRepositoryProfileFor(item.BoardId), BoardImplementationWorkflow(item.BoardId), _boards.Single(board => board.Id == item.BoardId).PublicHostname),
                     _repositoryCleanupRuns.Where(run => run.WorkItemId == item.Id).OrderByDescending(run => run.CreatedAt).ToArray());
             }
         }
@@ -9562,7 +9895,7 @@ namespace Rosenvall.DevOps.Api
                 var repository = repositoryId is null ? null : _repositories.SingleOrDefault(entry => entry.Id == repositoryId.Value);
                 if (repository is null ||
                     !BoardRepositoriesFor(item.BoardId).Any(link => link.RepositoryId == repository.Id) ||
-                    string.Equals(repository.ImplementationProfile, "react-preview", StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(BoardImplementationWorkflow(item.BoardId), "direct-pr", StringComparison.OrdinalIgnoreCase) ||
                     !repository.Provider.Equals("GitHub", StringComparison.OrdinalIgnoreCase))
                 {
                     return null;
@@ -9824,6 +10157,82 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public ImplementationRunDto? StartPreviewPromotionRun(Guid workItemId, string actor, Guid? repositoryId = null)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                var preview = _previews.SingleOrDefault(entry => entry.WorkItemId == workItemId);
+                if (preview is null ||
+                    !string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase) ||
+                    preview.SourceFiles is not { Count: > 0 })
+                {
+                    throw new InvalidOperationException("A running preview with generated source is required before creating a pull request.");
+                }
+
+                if (!string.Equals(BoardImplementationWorkflow(item.BoardId), "preview-then-pr", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("This board is not configured for preview approval before pull request creation.");
+                }
+
+                var resolvedRepositoryId = repositoryId ?? RepositoryIdForBoard(item.BoardId);
+                var repository = resolvedRepositoryId is null ? null : _repositories.SingleOrDefault(entry => entry.Id == resolvedRepositoryId.Value);
+                if (repository is null ||
+                    !BoardRepositoriesFor(item.BoardId).Any(link => link.RepositoryId == repository.Id) ||
+                    !repository.Provider.Equals("GitHub", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
+                var aiRun = _aiRuns
+                    .Where(run => run.WorkItemId == workItemId && run.Status == AiRunStatus.Approved)
+                    .OrderByDescending(run => run.SequenceNumber)
+                    .ThenByDescending(run => run.CreatedAt)
+                    .FirstOrDefault();
+                if (aiRun is null)
+                {
+                    throw new InvalidOperationException("An approved AI plan is required before creating a pull request from preview.");
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var attemptNumber = _implementationRuns.Count(run => run.WorkItemId == item.Id && run.RepositoryId == repository.Id && run.AiRunId == aiRun.Id && run.RunKind == "preview-promotion") + 1;
+                var branchBase = $"rdo/{item.Key.ToLowerInvariant()}-{SlugifyRepositoryName(item.Title)}";
+                var branch = attemptNumber == 1 ? branchBase : $"{branchBase}-preview-retry-{attemptNumber}";
+                var runDto = new ImplementationRunDto(
+                    Guid.NewGuid(),
+                    repository.Id,
+                    item.Id,
+                    aiRun.Id,
+                    item.Key,
+                    item.Title,
+                    "Queued",
+                    branch,
+                    null,
+                    null,
+                    null,
+                    now,
+                    now,
+                    [
+                        new PreviewTerminalLineDto(now, "system", $"Queued preview approval pull request for {item.Key}."),
+                        new PreviewTerminalLineDto(now, "system", $"Repository: {repository.Provider} / {repository.Owner}/{repository.Name}."),
+                        new PreviewTerminalLineDto(now, "system", $"Preview: {preview.Url}.")
+                    ],
+                    RunKind: "preview-promotion",
+                    SourcePreviewId: preview.Id);
+                _implementationRuns.Add(runDto);
+                item.AiStatus = "ImplementationRunning";
+                item.Status = "Review";
+                AddTimelineForItem(item, "ImplementationRunQueued", item.Key, $"Preview approval PR queued for {repository.Name}.", actor, preview.Url);
+                Persist();
+                return runDto;
+            }
+        }
+
         public RepositoryCleanupRunDto? AdoptRepositoryCleanupPullRequest(Guid workItemId, Guid sourceImplementationRunId, string actor, string cleanupPullRequestUrl, string? branch, string? state, bool merged)
         {
             lock (_lock)
@@ -10074,6 +10483,15 @@ namespace Rosenvall.DevOps.Api
                 if (secretsChanged)
                 {
                     Persist();
+                }
+
+                if (string.Equals(run.RunKind, "preview-promotion", StringComparison.OrdinalIgnoreCase))
+                {
+                    var preview = _previews.SingleOrDefault(entry => entry.Id == run.SourcePreviewId && entry.WorkItemId == run.WorkItemId) ??
+                        _previews.SingleOrDefault(entry => entry.WorkItemId == run.WorkItemId);
+                    return preview?.SourceFiles is { Count: > 0 } sourceFiles
+                        ? RepositoryPreviewPromotionJobManifestRenderer.Render(run, repository, context, sourceFiles, secret)
+                        : null;
                 }
 
                 return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, reasoningEffort, secret, aiSession, boardSecrets, CodexKubernetesRunner.SandboxMode(configuration));
@@ -10956,7 +11374,7 @@ namespace Rosenvall.DevOps.Api
                     githubAppConfigured ? "GitHub" : configuration["Repositories:Provider"] ?? "Forgejo",
                     githubAppConfigured ? "GitHubApp" : configuration["Repositories:Mode"] ?? "LinkExistingFirst",
                     githubAppConfigured ? "https://api.github.com" : configuration["Repositories:Forgejo:ApiBaseUrl"] ?? "https://git.rosenvall.se/api/v1",
-                    githubAppConfigured || configuration.GetValue("Repositories:Forgejo:CanCreateRepositories", false)),
+                    false),
                 new AuthentikSettingsDto(
                     !string.IsNullOrWhiteSpace(configuration["Authentik:Authority"]) || !string.IsNullOrWhiteSpace(configuration["Authentik:UsersEndpoint"]),
                     configuration["Authentik:Authority"] ?? configuration["Authentication:Authority"] ?? "https://authentik.rosenvall.se",
@@ -11078,6 +11496,43 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public string? RenderBoardCleanupManifest(Guid boardId, IConfiguration configuration)
+        {
+            lock (_lock)
+            {
+                if (_boards.All(board => board.Id != boardId))
+                {
+                    return null;
+                }
+
+                var documents = new List<string>();
+                foreach (var item in _items.Where(item => item.BoardId == boardId).OrderBy(item => item.SortOrder))
+                {
+                    var manifest = RenderWorkItemCleanupManifest(item.Id);
+                    if (!string.IsNullOrWhiteSpace(manifest))
+                    {
+                        documents.Add(manifest);
+                    }
+                }
+
+                foreach (var run in _pipelineRuns.Where(run => run.BoardId == boardId && run.WorkItemId is null).OrderBy(run => run.StartedAt))
+                {
+                    var repository = _repositories.SingleOrDefault(repository => repository.Id == run.RepositoryId);
+                    if (repository is not null)
+                    {
+                        documents.Add(RenderDeleteStub("batch/v1", "Job", PipelineJobManifestRenderer.JobName(run, repository), PipelineJobManifestRenderer.Namespace));
+                    }
+                }
+
+                foreach (var secret in _boardSecrets.Where(secret => secret.BoardId == boardId).OrderBy(secret => secret.Key))
+                {
+                    documents.Add(RenderDeleteStub("v1", "Secret", BoardSecretManifestRenderer.SecretName(secret), BoardSecretManifestRenderer.Namespace(configuration)));
+                }
+
+                return documents.Count == 0 ? "" : string.Join("\n---\n", documents);
+            }
+        }
+
         public string? RenderPreviousImplementationRunCleanupManifest(Guid workItemId, Guid currentImplementationRunId)
         {
             lock (_lock)
@@ -11189,7 +11644,9 @@ namespace Rosenvall.DevOps.Api
                 GitOpsSettingsFor(board.Id),
                 AiContextFor(board.Id),
                 BoardRepositorySyncState(board.Id),
-                BoardProviderCapabilities(board.Id));
+                BoardProviderCapabilities(board.Id),
+                BoardImplementationWorkflow(board.Id),
+                board.PublicHostname);
 
         private string BoardRepositorySyncState(Guid boardId)
         {
@@ -11215,7 +11672,12 @@ namespace Rosenvall.DevOps.Api
 
         private IReadOnlyList<string> BoardProviderCapabilities(Guid boardId)
         {
-            var capabilities = new List<string> { "preview" };
+            var workflow = BoardImplementationWorkflow(boardId);
+            var capabilities = new List<string>();
+            if (workflow is "preview-only" or "preview-then-pr")
+            {
+                capabilities.Add("preview");
+            }
             if (RepositoryIdForBoard(boardId) is null)
             {
                 capabilities.Add("sync-github");
@@ -11225,11 +11687,13 @@ namespace Rosenvall.DevOps.Api
             var repository = _repositories.SingleOrDefault(entry => entry.Id == RepositoryIdForBoard(boardId));
             if (repository?.Provider.Equals("Sample", StringComparison.OrdinalIgnoreCase) == true)
             {
+                capabilities.Add("preview");
                 capabilities.Add("demo");
                 return capabilities;
             }
 
             capabilities.Add("repository-implementation");
+            capabilities.Add(workflow);
             if (string.Equals(BoardImplementationProfile(boardId), "gitops-homelab", StringComparison.OrdinalIgnoreCase))
             {
                 capabilities.Add("gitops");
@@ -11308,6 +11772,7 @@ namespace Rosenvall.DevOps.Api
                 return existing;
             }
 
+            var profile = NormalizeImplementationProfile(request.ImplementationProfile);
             var repository = new RepositoryDto(
                 Guid.NewGuid(),
                 provider,
@@ -11317,7 +11782,8 @@ namespace Rosenvall.DevOps.Api
                 NormalizeText(request.RepositoryDefaultBranch, "main"),
                 DateTimeOffset.UtcNow,
                 owner,
-                NormalizeImplementationProfile(request.ImplementationProfile));
+                profile,
+                NormalizeRepositoryWorkflow(request.ImplementationWorkflow, profile, $"{request.Name} {request.RepositoryName}"));
             _repositories.Add(repository);
             return repository;
         }
@@ -11377,7 +11843,8 @@ namespace Rosenvall.DevOps.Api
                     entry.link.IsPrimary,
                     entry.link.ImplementationProfile,
                     entry.repository!,
-                    _boardRepositoryProfiles.SingleOrDefault(profile => profile.BoardId == entry.link.BoardId && profile.RepositoryId == entry.link.RepositoryId)?.Profile))
+                    _boardRepositoryProfiles.SingleOrDefault(profile => profile.BoardId == entry.link.BoardId && profile.RepositoryId == entry.link.RepositoryId)?.Profile,
+                    BoardImplementationWorkflow(entry.link.BoardId, entry.repository!, entry.link.ImplementationProfile)))
                 .OrderByDescending(entry => entry.IsPrimary)
                 .ThenBy(entry => entry.Repository.Name)
                 .ToArray();
@@ -11545,6 +12012,84 @@ namespace Rosenvall.DevOps.Api
         {
             var normalized = NormalizeText(value, "react-preview").ToLowerInvariant();
             return normalized is "code-repo" or "unity" or "react-preview" or "gitops-homelab" ? normalized : "react-preview";
+        }
+
+        private static string NormalizeImplementationWorkflow(string? value, string? implementationProfile, RepositoryDto? repository = null, string? boardName = null, string? textHint = null)
+        {
+            if (repository is null)
+            {
+                return "preview-only";
+            }
+
+            var normalized = NormalizeText(value, "").ToLowerInvariant();
+            if (normalized is "direct-pr" or "preview-then-pr" or "preview-only")
+            {
+                return normalized;
+            }
+
+            var profile = NormalizeImplementationProfile(implementationProfile ?? repository.ImplementationProfile);
+            if (profile is "gitops-homelab" or "unity")
+            {
+                return "direct-pr";
+            }
+
+            if (profile == "react-preview")
+            {
+                return "preview-then-pr";
+            }
+
+            var hint = $"{repository.Name} {boardName} {textHint}".ToLowerInvariant();
+            return LooksLikeWebsiteRepository(hint) ? "preview-then-pr" : "direct-pr";
+        }
+
+        private static string DefaultRepositoryWorkflow(string? implementationProfile, string? textHint)
+        {
+            var profile = NormalizeImplementationProfile(implementationProfile);
+            return profile switch
+            {
+                "gitops-homelab" or "unity" => "direct-pr",
+                "react-preview" => "preview-then-pr",
+                _ => LooksLikeWebsiteRepository(textHint ?? "") ? "preview-then-pr" : "direct-pr"
+            };
+        }
+
+        private static string NormalizeRepositoryWorkflow(string? value, string? implementationProfile, string? textHint)
+        {
+            var normalized = NormalizeText(value, "").ToLowerInvariant();
+            return normalized is "direct-pr" or "preview-then-pr" or "preview-only"
+                ? normalized
+                : DefaultRepositoryWorkflow(implementationProfile, textHint);
+        }
+
+        private static bool LooksLikeWebsiteRepository(string value) =>
+            value.Contains("website", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("hemsida", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("frontend", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("react", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("vite", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("webapp", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("landing", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("site", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("clock", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("klock", StringComparison.OrdinalIgnoreCase);
+
+        private static string? NormalizePublicHostname(string? value, string fallbackSlug, string implementationWorkflow)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                var hostname = value.Trim().ToLowerInvariant();
+                return hostname.EndsWith(".rosenvall.se", StringComparison.OrdinalIgnoreCase) && hostname.All(character => char.IsLetterOrDigit(character) || character is '-' or '.')
+                    ? hostname
+                    : null;
+            }
+
+            if (implementationWorkflow != "preview-then-pr")
+            {
+                return null;
+            }
+
+            var slug = SlugifyRepositoryName(fallbackSlug);
+            return string.IsNullOrWhiteSpace(slug) ? null : $"{slug}.rosenvall.se";
         }
 
         private static string NormalizeRole(string? value)
@@ -11722,10 +12267,10 @@ namespace Rosenvall.DevOps.Api
             var authorization = GitHubUserAuthorizationForWithoutLock(integration.InstallationId, actorSubject);
             return integration with
             {
-                CanCreateRepositories = CanCreateGitHubRepositoryWithoutLock(integration, actorSubject),
+                CanCreateRepositories = false,
                 RepositoryCreatorTeamIds = policy.AllowedTeamIds,
                 CanManageRepositoryCreationPolicy = CanManageGitHubRepositoryCreationPolicyWithoutLock(integration, actorSubject),
-                RequiresUserAuthorizationForRepositoryCreation = integration.AccountType.Equals("User", StringComparison.OrdinalIgnoreCase),
+                RequiresUserAuthorizationForRepositoryCreation = false,
                 HasUserAuthorization = authorization is not null,
                 AuthorizedGitHubLogin = authorization?.GitHubLogin
             };
@@ -11767,6 +12312,11 @@ namespace Rosenvall.DevOps.Api
                 authorization.GitHubLogin.Equals(integration.AccountLogin, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
+            }
+
+            if (integration.AccountType.Equals("User", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
             }
 
             var policy = RepositoryCreationPolicyForWithoutLock(integration.InstallationId);
@@ -11949,6 +12499,29 @@ namespace Rosenvall.DevOps.Api
                 : null) ??
             "react-preview";
 
+        private string BoardImplementationWorkflow(Guid boardId)
+        {
+            var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+            var repository = RepositoryIdForBoard(boardId) is { } repositoryId
+                ? _repositories.SingleOrDefault(entry => entry.Id == repositoryId)
+                : null;
+            var profileDraft = PrimaryRepositoryProfileFor(boardId);
+            var hint = string.Join(" ", new[]
+            {
+                AiContextFor(boardId)?.Instructions,
+                profileDraft?.Instructions,
+                profileDraft is null ? null : string.Join(" ", profileDraft.EnabledSkills),
+                profileDraft is null ? null : string.Join(" ", profileDraft.CapabilityTags ?? [])
+            }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            return NormalizeImplementationWorkflow(board?.ImplementationWorkflow, BoardImplementationProfile(boardId), repository, board?.Name, hint);
+        }
+
+        private string BoardImplementationWorkflow(Guid boardId, RepositoryDto repository, string implementationProfile)
+        {
+            var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+            return NormalizeImplementationWorkflow(board?.ImplementationWorkflow, implementationProfile, repository, board?.Name);
+        }
+
         private BoardGitOpsSettingsDto? GitOpsSettingsFor(Guid boardId)
         {
             var configured = _boardGitOpsSettings.SingleOrDefault(settings => settings.BoardId == boardId);
@@ -11989,7 +12562,7 @@ namespace Rosenvall.DevOps.Api
             paths.Zip(LegacyDefaultGitOpsAllowedPaths).All(pair => string.Equals(pair.First, pair.Second, StringComparison.OrdinalIgnoreCase));
 
         private static BoardAiContextDto DefaultAiContext(Guid boardId) =>
-            new(boardId, "", [], true);
+            new(boardId, "", [], true, "");
 
         private static BoardGitOpsSettingsDto CreateGitOpsSettings(Guid boardId, BoardGitOpsSettingsRequest? request)
         {
@@ -12007,7 +12580,8 @@ namespace Rosenvall.DevOps.Api
                 boardId,
                 string.IsNullOrWhiteSpace(request?.Instructions) ? "" : request.Instructions.Trim(),
                 NormalizeSkills(request?.EnabledSkills),
-                request?.AskWhenUncertain ?? defaultAskWhenUncertain);
+                request?.AskWhenUncertain ?? defaultAskWhenUncertain,
+                string.IsNullOrWhiteSpace(request?.AgentInstructions) ? "" : request.AgentInstructions.Trim());
 
         private static IReadOnlyList<string> NormalizePaths(IEnumerable<string>? paths) =>
             (paths ?? [])
@@ -12274,7 +12848,7 @@ namespace Rosenvall.DevOps.Api
 
             _workspaces.AddRange(snapshot.Workspaces);
             _repositories.AddRange(snapshot.Repositories ?? []);
-            _boards.AddRange(snapshot.Boards.Select(board => new BoardRecord(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId)));
+            _boards.AddRange(snapshot.Boards.Select(board => new BoardRecord(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId, board.PublicHostname, board.ImplementationWorkflow)));
             _items.AddRange(snapshot.Items.Select(item => new WorkItemRecord(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.SortOrder)
             {
                 AiStatus = item.AiStatus,
@@ -12341,7 +12915,7 @@ namespace Rosenvall.DevOps.Api
             if (boardIndex >= 0)
             {
                 var board = _boards[boardIndex];
-                _boards[boardIndex] = new BoardRecord(board.Id, board.WorkspaceId, "Demo Sprint 42", board.Columns, board.RepositoryId);
+                _boards[boardIndex] = new BoardRecord(board.Id, board.WorkspaceId, "Demo Sprint 42", board.Columns, board.RepositoryId, board.PublicHostname, board.ImplementationWorkflow);
                 changed = true;
             }
 
@@ -12380,7 +12954,7 @@ namespace Rosenvall.DevOps.Api
         {
             var snapshot = new DevOpsSnapshot(
                 _workspaces.ToArray(),
-                _boards.Select(board => new BoardSnapshot(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId)).ToArray(),
+                _boards.Select(board => new BoardSnapshot(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId, board.PublicHostname, board.ImplementationWorkflow)).ToArray(),
                 _items.Select(item => new WorkItemSnapshot(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.AiStatus, item.PullRequestUrl, item.SortOrder)).ToArray(),
                 _comments.ToArray(),
                 _aiRuns.Select(run => new AiRunSnapshot(run.Id, run.WorkItemId, run.Provider, run.Model, run.Status, run.Plan, run.ApprovedBy, run.SequenceNumber, run.CreatedAt, run.ReasoningEffort)).ToArray(),
@@ -12425,13 +12999,15 @@ namespace Rosenvall.DevOps.Api
         }
     }
 
-    internal sealed class BoardRecord(Guid id, Guid workspaceId, string name, IReadOnlyList<string> columns, Guid? repositoryId = null)
+    internal sealed class BoardRecord(Guid id, Guid workspaceId, string name, IReadOnlyList<string> columns, Guid? repositoryId = null, string? publicHostname = null, string implementationWorkflow = "")
     {
         public Guid Id { get; } = id;
         public Guid WorkspaceId { get; } = workspaceId;
         public string Name { get; } = name;
         public IReadOnlyList<string> Columns { get; } = columns;
         public Guid? RepositoryId { get; set; } = repositoryId;
+        public string? PublicHostname { get; set; } = publicHostname;
+        public string ImplementationWorkflow { get; set; } = implementationWorkflow;
     }
     internal sealed class ConfiguredAuthentikUser
     {
@@ -12464,7 +13040,7 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile);
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
     internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null);
-    internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null);
+    internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null, string? PublicHostname = null, string ImplementationWorkflow = "");
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);
     internal sealed record DevelopmentSnapshot(Guid WorkItemId, DevelopmentDto Development);
