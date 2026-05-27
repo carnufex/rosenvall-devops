@@ -12,14 +12,11 @@ RUN dotnet publish src/Rosenvall.DevOps.Api/Rosenvall.DevOps.Api.csproj -c Relea
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 ENV ASPNETCORE_URLS=http://+:8080
-COPY preview-base/package.json /opt/rosenvall-preview/package.json
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git nodejs npm \
     && curl -fsSLo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.31.1/bin/linux/amd64/kubectl \
     && chmod 0755 /usr/local/bin/kubectl \
     && npm install -g @openai/codex \
-    && cd /opt/rosenvall-preview \
-    && npm install --no-audit --no-fund \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/publish .

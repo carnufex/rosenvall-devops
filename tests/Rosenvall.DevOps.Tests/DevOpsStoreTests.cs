@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -151,11 +152,37 @@ public sealed class DevOpsStoreTests
         var workspace = store.GetWorkspaces().First();
         var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
 
-        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo Klocka", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
 
         Assert.Equal("preview-then-pr", board.ImplementationWorkflow);
-        Assert.Equal("clock-app.rosenvall.se", board.PublicHostname);
+        Assert.Equal("demo-klocka.rosenvall.se", board.PublicHostname);
         Assert.Contains("preview", board.ProviderCapabilities ?? []);
+    }
+
+    [Fact]
+    public void Existing_previewable_board_backfills_workflow_and_public_hostname_from_board_name()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo Klocka", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        fixture.UpdateSnapshotJson(json =>
+        {
+            var root = JsonNode.Parse(json)!.AsObject();
+            var boardNode = root["boards"]!.AsArray().Single(node =>
+                string.Equals(node?["id"]?.GetValue<string>(), board.Id.ToString(), StringComparison.OrdinalIgnoreCase))!.AsObject();
+            boardNode["publicHostname"] = null;
+            boardNode["implementationWorkflow"] = "";
+            return root.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        });
+
+        var reopened = fixture.Reopen();
+        var upgraded = reopened.GetBoard(board.Id)!;
+
+        Assert.Equal("preview-then-pr", upgraded.ImplementationWorkflow);
+        Assert.Equal("demo-klocka.rosenvall.se", upgraded.PublicHostname);
+        Assert.Contains("preview", upgraded.ProviderCapabilities ?? []);
     }
 
     [Fact]
@@ -181,14 +208,20 @@ public sealed class DevOpsStoreTests
         Assert.Equal("preview-promotion", run.RunKind);
         Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
         Assert.Contains("RDO_PULL_REQUEST_URL", manifest);
+        Assert.Contains("git status --porcelain", manifest);
+        Assert.Contains("git commit -m", manifest);
+        Assert.Contains("git push --set-upstream origin", manifest);
+        Assert.Contains("ROSENVALL_PUBLIC_HOSTNAME", manifest);
+        Assert.Contains("Production hostname:", manifest);
         Assert.DoesNotContain("codex exec", manifest);
-        Assert.Contains("ln -s /opt/rosenvall-preview/node_modules node_modules", manifest);
-        Assert.Contains("preview_node_modules_linked=1", manifest);
-        Assert.Contains("preview_dist_existed=0", manifest);
-        Assert.Contains("rm -f node_modules", manifest);
-        Assert.Contains("rm -rf dist", manifest);
+        Assert.DoesNotContain("RDO_STEP=Testing", manifest);
+        Assert.DoesNotContain("npm test", manifest);
+        Assert.DoesNotContain("npm run build", manifest);
         Assert.DoesNotContain("npm install", manifest);
         Assert.DoesNotContain("npm ci", manifest);
+        Assert.DoesNotContain("node_modules", manifest);
+        Assert.DoesNotContain("/opt/rosenvall-preview", manifest);
+        Assert.DoesNotContain("rm -rf dist", manifest);
         Assert.Equal("Running", store.GetWorkItemDetail(item.Id)!.Preview!.Status);
     }
 
@@ -2682,14 +2715,14 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Api_dockerfile_installs_preview_base_dependencies_for_preview_promotion()
+    public void Api_dockerfile_does_not_install_preview_base_dependencies_for_preview_promotion()
     {
         var dockerfile = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Dockerfile"));
 
-        Assert.Contains("preview-base/package.json", dockerfile);
-        Assert.Contains("/opt/rosenvall-preview/package.json", dockerfile);
-        Assert.Contains("cd /opt/rosenvall-preview", dockerfile);
-        Assert.Contains("npm install --no-audit --no-fund", dockerfile);
+        Assert.DoesNotContain("preview-base/package.json", dockerfile);
+        Assert.DoesNotContain("/opt/rosenvall-preview/package.json", dockerfile);
+        Assert.DoesNotContain("cd /opt/rosenvall-preview", dockerfile);
+        Assert.DoesNotContain("npm install --no-audit --no-fund", dockerfile);
     }
 
     [Fact]
@@ -3832,6 +3865,18 @@ public sealed class DevOpsStoreTests
             return new DevOpsStore(new TestDbContextFactory(options));
         }
 
+        public void UpdateSnapshotJson(Func<string, string> update)
+        {
+            var options = new DbContextOptionsBuilder<DevOpsStateDbContext>()
+                .UseSqlite($"Data Source={_databasePath}")
+                .Options;
+            using var db = new DevOpsStateDbContext(options);
+            var document = db.Documents.Single(document => document.Id == "default");
+            document.Json = update(document.Json);
+            document.UpdatedAt = DateTimeOffset.UtcNow;
+            db.SaveChanges();
+        }
+
         public static DevOpsStoreFixture Create()
         {
             var databasePath = Path.Combine(Path.GetTempPath(), $"devops-store-{Guid.NewGuid():N}.db");
@@ -4076,6 +4121,7 @@ exit /b {exitCode}
             var unixScriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-noop-{Guid.NewGuid():N}.sh");
             File.WriteAllText(unixScriptPath, $$"""
 #!/usr/bin/env sh
+cat >/dev/null
 exit {{exitCode}}
 """);
             File.SetUnixFileMode(unixScriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -4085,6 +4131,7 @@ exit {{exitCode}}
         var scriptPath = Path.Combine(Path.GetTempPath(), $"fake-codex-noop-{Guid.NewGuid():N}.cmd");
         File.WriteAllText(scriptPath, $"""
 @echo off
+more > nul
 exit /b {exitCode}
 """);
         return scriptPath;
