@@ -182,6 +182,13 @@ public sealed class DevOpsStoreTests
         Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
         Assert.Contains("RDO_PULL_REQUEST_URL", manifest);
         Assert.DoesNotContain("codex exec", manifest);
+        Assert.Contains("ln -s /opt/rosenvall-preview/node_modules node_modules", manifest);
+        Assert.Contains("preview_node_modules_linked=1", manifest);
+        Assert.Contains("preview_dist_existed=0", manifest);
+        Assert.Contains("rm -f node_modules", manifest);
+        Assert.Contains("rm -rf dist", manifest);
+        Assert.DoesNotContain("npm install", manifest);
+        Assert.DoesNotContain("npm ci", manifest);
         Assert.Equal("Running", store.GetWorkItemDetail(item.Id)!.Preview!.Status);
     }
 
@@ -2672,6 +2679,17 @@ public sealed class DevOpsStoreTests
         Assert.Contains("in-process", script);
         Assert.Contains("Preview__KubeconfigPath", script);
         Assert.Contains("Pipelines__KubeconfigPath", script);
+    }
+
+    [Fact]
+    public void Api_dockerfile_installs_preview_base_dependencies_for_preview_promotion()
+    {
+        var dockerfile = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Dockerfile"));
+
+        Assert.Contains("preview-base/package.json", dockerfile);
+        Assert.Contains("/opt/rosenvall-preview/package.json", dockerfile);
+        Assert.Contains("cd /opt/rosenvall-preview", dockerfile);
+        Assert.Contains("npm install --no-audit --no-fund", dockerfile);
     }
 
     [Fact]
