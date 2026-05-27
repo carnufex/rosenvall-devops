@@ -3545,6 +3545,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("codex exec --ephemeral", manifest);
         Assert.Contains("--sandbox danger-full-access", manifest);
         Assert.Contains("codex-output.log", manifest);
+        Assert.Contains("const skippedFiles = new Set(['seed.json', 'prompt.md', 'result.json', 'codex-output.log']);", manifest);
         Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.Contains("name: kube-api-access", manifest);
         Assert.Contains("serviceAccountToken:", manifest);
@@ -3598,12 +3599,46 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_source_job_result_accepts_real_app_ignores_runner_log_artifact()
+    {
+        var result = """
+            {
+              "data": {
+                "result.json": "{\"files\":[{\"key\":\"codex-output-log\",\"path\":\"codex-output.log\",\"content\":\"Codex summary\"},{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"},{\"key\":\"src-index-css\",\"path\":\"src/index.css\",\"content\":\"body { margin: 0; }\"}]}"
+              }
+            }
+            """;
+
+        var files = PreviewSourceJobResultParser.ParseConfigMapJson(result);
+
+        Assert.Contains(files, file => file.Path == "src/App.tsx");
+        Assert.Contains(files, file => file.Path == "src/index.css");
+        Assert.DoesNotContain(files, file => file.Path == "codex-output.log");
+    }
+
+    [Fact]
     public void Preview_source_job_result_still_rejects_non_documentation_files_outside_allowed_paths()
     {
         var result = """
             {
               "data": {
                 "result.json": "{\"files\":[{\"key\":\"env\",\"path\":\".env\",\"content\":\"SECRET=1\"},{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"}]}"
+              }
+            }
+            """;
+
+        var error = Assert.Throws<AiPlanProviderUnavailableException>(() => PreviewSourceJobResultParser.ParseConfigMapJson(result));
+
+        Assert.Contains("outside the allowed React preview paths", error.Message);
+    }
+
+    [Fact]
+    public void Preview_source_job_result_still_rejects_arbitrary_root_log_files()
+    {
+        var result = """
+            {
+              "data": {
+                "result.json": "{\"files\":[{\"key\":\"debug-log\",\"path\":\"debug.log\",\"content\":\"debug output\"},{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"}]}"
               }
             }
             """;
