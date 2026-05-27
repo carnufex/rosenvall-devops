@@ -5163,6 +5163,10 @@ namespace Rosenvall.DevOps.Api
             "tailwind.config.js",
             "components.json"
         };
+        private static readonly HashSet<string> IgnorableGeneratedArtifacts = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "README.md"
+        };
 
         public static void Validate(IReadOnlyList<PreviewSourceFile> files)
         {
@@ -5201,6 +5205,9 @@ namespace Rosenvall.DevOps.Api
 
         private static string NormalizePath(string path) =>
             path.Replace("\\", "/", StringComparison.Ordinal).Trim();
+
+        public static bool IsIgnorableGeneratedArtifact(string path) =>
+            IgnorableGeneratedArtifacts.Contains(NormalizePath(path));
 
         private static bool IsAllowedPath(string path)
         {
@@ -7716,27 +7723,31 @@ namespace Rosenvall.DevOps.Api
     {
         public static IReadOnlyList<PreviewSourceFile> ValidateGeneratedSource(IReadOnlyList<PreviewSourceFile> sourceFiles)
         {
-            if (sourceFiles.All(file => !string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)))
+            var deployableSourceFiles = sourceFiles
+                .Where(file => !PreviewSourcePolicy.IsIgnorableGeneratedArtifact(file.Path))
+                .ToArray();
+
+            if (deployableSourceFiles.All(file => !string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)))
             {
                 throw new AiPlanProviderUnavailableException("Codex preview source generation did not produce src/App.tsx; no preview was deployed.");
             }
 
             try
             {
-                PreviewSourcePolicy.Validate(sourceFiles);
+                PreviewSourcePolicy.Validate(deployableSourceFiles);
             }
             catch (ArgumentException ex)
             {
                 throw new AiPlanProviderUnavailableException($"{ex.Message} No preview was deployed.");
             }
 
-            var appSource = sourceFiles.First(file => string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)).Content;
+            var appSource = deployableSourceFiles.First(file => string.Equals(file.Path, "src/App.tsx", StringComparison.OrdinalIgnoreCase)).Content;
             if (LooksLikeSeededPlaceholder(appSource))
             {
                 throw new AiPlanProviderUnavailableException("Codex preview source generation left the seeded placeholder app unchanged; no preview was deployed.");
             }
 
-            return sourceFiles;
+            return deployableSourceFiles;
         }
 
         public static bool LooksLikeSeededPlaceholder(string source) =>
@@ -7834,6 +7845,8 @@ namespace Rosenvall.DevOps.Api
               - Update source files in this workspace.
               - The app must compile with the seeded Vite React TypeScript project.
               - `src/App.tsx` must contain a real implementation of the requested app, including meaningful state and interactions when the work item asks for a tool or workflow.
+              - Do not create or update README.md or documentation-only files during preview generation.
+              - Keep generated changes to runtime Vite/React source and config needed to render the preview.
               - The UI copy should follow the language of the work item unless the plan explicitly says otherwise.
               - Do not add explanatory implementation notes to the rendered UI.
               - Return only a short implementation summary in your final message; the server reads source files from disk.
@@ -8304,9 +8317,9 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var sourceFiles = await CollectWorkspaceSourceFilesAsync(workspacePath, cancellationToken);
-                PreviewSourceResultValidator.ValidateGeneratedSource(sourceFiles);
+                var deployableSourceFiles = PreviewSourceResultValidator.ValidateGeneratedSource(sourceFiles);
                 await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
-                return sourceFiles;
+                return deployableSourceFiles;
             }
             catch (Exception ex) when (ex is not AiPlanProviderUnavailableException && (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException))
             {
@@ -8507,6 +8520,8 @@ namespace Rosenvall.DevOps.Api
               - Update source files in this workspace.
               - The app must compile with the seeded Vite React TypeScript project.
               - `src/App.tsx` must contain a real implementation of the requested app, including meaningful state and interactions when the work item asks for a tool or workflow.
+              - Do not create or update README.md or documentation-only files during preview generation.
+              - Keep generated changes to runtime Vite/React source and config needed to render the preview.
               - The UI copy should follow the language of the work item unless the plan explicitly says otherwise.
               - Do not add explanatory implementation notes to the rendered UI.
               - Return only a short implementation summary in your final message; the server reads source files from disk.
