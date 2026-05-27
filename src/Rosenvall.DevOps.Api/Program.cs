@@ -2587,8 +2587,15 @@ namespace Rosenvall.DevOps.Api
                                  git switch -c "$ROSENVALL_BRANCH"
                                  echo "RDO_STEP=Implementing"
                    {{Indent(RenderSourceWrites(sourceFiles), 14)}}
+                                 preview_node_modules_linked=0
+                                 preview_dist_existed=0
+                                 [ -e dist ] && preview_dist_existed=1
                                  if [ -f package.json ]; then
                                    echo "RDO_STEP=Testing"
+                                   if [ ! -e node_modules ] && [ -d /opt/rosenvall-preview/node_modules ]; then
+                                     ln -s /opt/rosenvall-preview/node_modules node_modules
+                                     preview_node_modules_linked=1
+                                   fi
                                    if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
                                      npm test || { echo "RDO_FAILURE=npm test failed"; exit 23; }
                                    elif node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
@@ -2596,6 +2603,12 @@ namespace Rosenvall.DevOps.Api
                                    else
                                      echo "No npm test or build script found; skipping npm checks."
                                    fi
+                                 fi
+                                 if [ "$preview_node_modules_linked" = "1" ] && [ -L node_modules ]; then
+                                   rm -f node_modules
+                                 fi
+                                 if [ "$preview_dist_existed" = "0" ] && [ -e dist ]; then
+                                   rm -rf dist
                                  fi
                                  echo "RDO_STEP=Validating"
                                  git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/changed-files.txt"
