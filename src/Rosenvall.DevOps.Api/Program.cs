@@ -5165,7 +5165,8 @@ namespace Rosenvall.DevOps.Api
         };
         private static readonly HashSet<string> IgnorableGeneratedArtifacts = new(StringComparer.OrdinalIgnoreCase)
         {
-            "README.md"
+            "README.md",
+            "codex-output.log"
         };
 
         public static void Validate(IReadOnlyList<PreviewSourceFile> files)
@@ -8048,7 +8049,7 @@ namespace Rosenvall.DevOps.Api
                                  const path = require('path');
                                  const workspace = process.env.WORKSPACE;
                                  const skipped = new Set(['node_modules', 'dist', '.git', '.codex']);
-                                 const skippedFiles = new Set(['seed.json', 'prompt.md', 'result.json']);
+                                 const skippedFiles = new Set(['seed.json', 'prompt.md', 'result.json', 'codex-output.log']);
                                  const files = [];
                                  function keyFor(relative) {
                                    return relative.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'source-file';
@@ -8446,6 +8447,7 @@ namespace Rosenvall.DevOps.Api
         }
 
         private static bool ShouldSkip(string relativePath) =>
+            PreviewSourcePolicy.IsIgnorableGeneratedArtifact(relativePath) ||
             relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries)
                 .Any(part => SkippedDirectories.Contains(part, StringComparer.OrdinalIgnoreCase));
 
