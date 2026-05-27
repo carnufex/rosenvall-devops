@@ -144,6 +144,48 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Website_board_uses_preview_then_pr_workflow_and_public_hostname()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+
+        Assert.Equal("preview-then-pr", board.ImplementationWorkflow);
+        Assert.Equal("clock-app.rosenvall.se", board.PublicHostname);
+        Assert.Contains("preview", board.ProviderCapabilities ?? []);
+    }
+
+    [Fact]
+    public void Approving_preview_for_pr_creates_preview_promotion_run_without_codex()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("index", "index.html", "<div id=\"root\"></div>"),
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder().Build(), "github-token")!;
+
+        Assert.Equal("preview-promotion", run.RunKind);
+        Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
+        Assert.Contains("RDO_PULL_REQUEST_URL", manifest);
+        Assert.DoesNotContain("codex exec", manifest);
+        Assert.Equal("Running", store.GetWorkItemDetail(item.Id)!.Preview!.Status);
+    }
+
+    [Fact]
     public void Board_can_be_created_for_provider_neutral_repository()
     {
         using var fixture = DevOpsStoreFixture.Create();

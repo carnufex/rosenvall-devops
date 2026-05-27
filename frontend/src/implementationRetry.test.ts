@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { implementationActionState } from './implementationRetry.ts';
+import { implementationActionState, workflowForRepositoryProfile } from './implementationRetry.ts';
 
 test('labels failed repository implementation as retry and keeps it startable', () => {
   const action = implementationActionState({
@@ -90,4 +90,28 @@ test('labels failed Unity implementation as Unity retry', () => {
   });
 
   assert.equal(action.label, 'Retry Unity implementation');
+});
+
+test('labels previewable repository plans as build preview', () => {
+  const action = implementationActionState({
+    workflow: 'preview-then-pr',
+    repositoryProfile: 'react-preview',
+    repositoryCanRunImplementation: true,
+    gitOpsSettingsReady: true,
+    hasSelectedPlan: true,
+    selectedPlanStatus: 'PlanReady',
+    previewBusy: false,
+    previewRunning: false,
+    previewHasGeneratedSource: false
+  });
+
+  assert.equal(action.canStart, true);
+  assert.equal(action.label, 'Build preview');
+  assert.match(action.helpText, /approve it to create a pull request/);
+});
+
+test('workflow helper keeps GitOps direct and React preview gated', () => {
+  assert.equal(workflowForRepositoryProfile('gitops-homelab'), 'direct-pr');
+  assert.equal(workflowForRepositoryProfile('react-preview'), 'preview-then-pr');
+  assert.equal(workflowForRepositoryProfile(null), 'preview-only');
 });

@@ -2,7 +2,7 @@ import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
 import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
-import { implementationActionState, isImplementationRunPendingStatus } from './implementationRetry';
+import { implementationActionState, isImplementationRunPendingStatus, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
   Activity,
@@ -77,6 +77,8 @@ type Board = {
   aiContext?: BoardAiContextDto | null;
   repositorySyncState?: string | null;
   providerCapabilities?: string[] | null;
+  implementationWorkflow?: ImplementationWorkflow | string | null;
+  publicHostname?: string | null;
 };
 
 type BoardGitOpsSettingsDto = {
@@ -103,6 +105,7 @@ type RepositoryDto = {
   createdAt: string;
   owner?: string | null;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
+  implementationWorkflow?: ImplementationWorkflow | string | null;
 };
 
 type BoardRepositoryDto = {
@@ -112,6 +115,7 @@ type BoardRepositoryDto = {
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | string;
   repository: RepositoryDto;
   profile?: RepositoryProfileDto | null;
+  implementationWorkflow?: ImplementationWorkflow | string | null;
 };
 
 type BoardTeamAccessDto = {
@@ -157,6 +161,8 @@ type WorkItemDetail = {
     repositoryProfile: string;
     gitOpsSettings?: BoardGitOpsSettingsDto | null;
     aiContext?: BoardAiContextDto | null;
+    implementationWorkflow?: ImplementationWorkflow | string | null;
+    publicHostname?: string | null;
   } | null;
 };
 
@@ -489,6 +495,8 @@ type CreateBoardForm = {
   repositoryWebUrl: string;
   repositoryDefaultBranch: string;
   implementationProfile: 'react-preview' | 'code-repo' | 'unity' | 'gitops-homelab';
+  implementationWorkflow: ImplementationWorkflow;
+  publicHostname: string;
   teamIds: string[];
   gitOpsAllowedPaths: string;
   argoNamespace: string;
@@ -583,6 +591,8 @@ const emptyBoardForm: CreateBoardForm = {
   repositoryWebUrl: '',
   repositoryDefaultBranch: 'main',
   implementationProfile: 'code-repo',
+  implementationWorkflow: 'direct-pr',
+  publicHostname: '',
   teamIds: [],
   gitOpsAllowedPaths: 'apps/\nclusters/\ninfrastructure/\nkubernetes/\ntofu/',
   argoNamespace: 'argocd',
@@ -874,6 +884,8 @@ function App() {
           repositoryDefaultBranch: hasRepository ? form.repositoryDefaultBranch || 'main' : null,
           repositoryOwner: hasRepository ? form.repositoryOwner || repositoryOwnerFromRemote(form.repositoryRemoteUrl) : null,
           implementationProfile: form.implementationProfile,
+          implementationWorkflow: hasRepository ? form.implementationWorkflow : 'preview-only',
+          publicHostname: hasRepository ? form.publicHostname || null : null,
           providerMode: form.providerMode,
           customRepositoryUrl: form.providerMode === 'CustomUrl' ? form.repositoryRemoteUrl : null,
           gitHubRepositoryId: form.providerMode === 'GitHub' || form.providerMode === 'GitHubNew' ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : null,
@@ -1054,6 +1066,12 @@ function App() {
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
       });
     },
+    updateBoardHosting: async (boardId, settings) => {
+      return runAction('Saving board hosting', async () => {
+        await api.put<Board>(`/api/boards/${boardId}/hosting`, settings);
+        await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
     updateBoardRepositoryProfile: async (boardId, repositoryId, profile) => {
       return runAction('Saving repository profile', async () => {
         await api.put<Board>(`/api/boards/${boardId}/repositories/${repositoryId}/profile`, profile);
@@ -1070,6 +1088,13 @@ function App() {
       return runAction('Approving PR and stopping preview', async () => {
         await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
+      });
+    },
+    approvePreviewForPr: async (workItemId) => {
+      return runAction('Creating PR from approved preview', async () => {
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/preview/approve-for-pr`, { actor });
+        await refreshAfterChange(workItemId);
+        addToast('info', 'Pull request creation started from the approved preview.');
       });
     },
     startPreview: async (workItemId) => {
@@ -1416,9 +1441,11 @@ type BoardActions = {
   deleteBoardSecret(boardId: string, secretId: string): Promise<boolean>;
   updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<boolean>;
   updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<boolean>;
+  updateBoardHosting(boardId: string, settings: { publicHostname?: string | null; implementationWorkflow?: string | null }): Promise<boolean>;
   updateBoardRepositoryProfile(boardId: string, repositoryId: string, profile: RepositoryProfileDto): Promise<boolean>;
   discardPlan(runId: string, workItemId: string): Promise<boolean>;
   approvePullRequest(workItemId: string): Promise<boolean>;
+  approvePreviewForPr(workItemId: string): Promise<boolean>;
   startPreview(workItemId: string): Promise<boolean>;
   stopPreview(workItemId: string): Promise<boolean>;
   addComment(id: string, body: string): Promise<boolean>;
@@ -1989,8 +2016,10 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const defaultPlan = [...sortedPlans].reverse().find((run) => run.status === 'PlanReady') ?? sortedPlans[sortedPlans.length - 1];
   const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(() => defaultPlan?.id ?? null);
   const selectedPlan = sortedPlans.find((run) => run.id === selectedPlanId) ?? defaultPlan;
-  const targetRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const targetRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
   const [targetRepositoryId, setTargetRepositoryId] = React.useState<string | null>(() => targetRepositories.find((entry) => entry.isPrimary)?.repositoryId ?? targetRepositories[0]?.repositoryId ?? null);
+  const selectedTargetRepository = targetRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? targetRepositories.find((entry) => entry.isPrimary) ?? targetRepositories[0];
+  const selectedWorkflow = workflowForRepositoryProfile(selectedTargetRepository?.implementationProfile ?? board?.repository?.implementationProfile, selectedTargetRepository?.implementationWorkflow ?? board?.implementationWorkflow ?? board?.repository?.implementationWorkflow ?? null);
 
   React.useEffect(() => {
     setForm(formFromDetail(detail));
@@ -2010,6 +2039,11 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const cleanupPending = isImplementationRunPendingStatus(activeRepositoryCleanupRun?.status);
   const cleanupReady = activeRepositoryCleanupRun?.status === 'PullRequestReady' || activeRepositoryCleanupRun?.status === 'Merged';
   const hasRepositoryPr = !!detail.item.pullRequestUrl || (detail.implementationRuns ?? []).some((run) => !!run.pullRequestUrl);
+  const canApprovePreviewForPr = selectedWorkflow === 'preview-then-pr' &&
+    detail.preview?.status === 'Running' &&
+    (detail.preview.sourceFiles?.length ?? 0) > 0 &&
+    !detail.development?.pullRequestUrl &&
+    !isImplementationRunPendingStatus(activeImplementationRun?.status);
   const cleanupActionLabel = cleanupPending
     ? 'Repository cleanup running'
     : cleanupReady
@@ -2100,7 +2134,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
               } else {
                 await actions.startPreview(detail.item.id);
               }
-            }} />
+            }} canApproveForPr={canApprovePreviewForPr} onApproveForPr={() => actions.approvePreviewForPr(detail.item.id)} />
           )}
           <PreviewHistoryPanel detail={detail} aiRuns={sortedPlans} />
         </aside>
@@ -2123,10 +2157,11 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   aiModel: string | null;
   actions: BoardActions;
 }) {
-  const boardRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const boardRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
   const targetRepository = boardRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? boardRepositories.find((entry) => entry.isPrimary) ?? boardRepositories[0];
   const repositoryProfile = targetRepository?.implementationProfile ?? board?.repository?.implementationProfile ?? 'react-preview';
-  const isRepositoryImplementation = repositoryProfile !== 'react-preview';
+  const implementationWorkflow = workflowForRepositoryProfile(repositoryProfile, targetRepository?.implementationWorkflow ?? board?.implementationWorkflow ?? board?.repository?.implementationWorkflow ?? null);
+  const isRepositoryImplementation = implementationWorkflow === 'direct-pr';
   const repositoryCanRunImplementation = !isRepositoryImplementation || targetRepository?.repository.provider === 'GitHub';
   const gitOpsSettingsReady = repositoryProfile !== 'gitops-homelab' || !!board?.gitOpsSettings;
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
@@ -2138,6 +2173,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const implementationRunsForAction = relevantImplementationRuns.length > 0 ? relevantImplementationRuns : detail.implementationRuns;
   const latestRunForAction = latestImplementationRun(implementationRunsForAction);
   const implementationAction = implementationActionState({
+    workflow: implementationWorkflow,
     isRepositoryImplementation,
     repositoryProfile,
     repositoryCanRunImplementation,
@@ -2195,7 +2231,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
               <p>Provider: {selectedPlan.provider} / {selectedPlan.model}. Status: {selectedPlan.status}.</p>
               {selectedPlan.status === 'NeedsInput' && <p className="needs-input-note">Questions need answers before implementation can start.</p>}
               {detail.aiSession && <p className="session-line">Session: {detail.aiSession.provider} / {detail.aiSession.model} - {detail.aiSession.providerSessionId ? 'Codex resume ready' : 'No provider session id yet'}.</p>}
-              {isRepositoryImplementation && boardRepositories.length > 0 && (
+              {implementationWorkflow !== 'preview-only' && boardRepositories.length > 0 && (
                 <label className="target-repo-select">Target repo<select value={targetRepository?.repositoryId ?? ''} onChange={(event) => onTargetRepositoryChange(event.target.value || null)}>
                   {boardRepositories.map((entry) => <option key={entry.repositoryId} value={entry.repositoryId}>{repositoryLabel(entry.repository)} {entry.isPrimary ? '(primary)' : ''} - {profileLabel(entry.implementationProfile)}</option>)}
                 </select></label>
@@ -2400,16 +2436,17 @@ function CleanupAdoptionPanel({ workItemId, busy, onAdopt, compact = false }: { 
   );
 }
 
-function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: boolean; onRetry: () => Promise<void> }) {
+function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onApproveForPr }: { preview: PreviewDto; busy: boolean; onRetry: () => Promise<void>; canApproveForPr?: boolean; onApproveForPr?: () => Promise<boolean> }) {
   const status = preview.status;
   const running = status === 'Running';
   const failed = status === 'Failed';
   const waiting = !running && !failed;
   const implementing = status === 'Implementing';
+  const stopped = status === 'Stopped';
   const failedDuringSourceGeneration = preview.failureReason === 'ImplementationFailed';
   const canRetrySetup = failed && (failedDuringSourceGeneration || (preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml);
-  const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
-  const retryLabel = failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
+  const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : stopped ? 'Preview stopped' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
+  const retryLabel = stopped ? 'Recreate preview' : failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
   const steps = previewLifecycleSteps(preview);
   return (
     <section className="panel compact-panel preview-panel">
@@ -2418,6 +2455,9 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       {running
         ? <SafeExternalLink className="demo-link" href={preview.url}>Open demo environment <ExternalLink size={16} /></SafeExternalLink>
         : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
+      {running && canApproveForPr && onApproveForPr && (
+        <button className="primary-action side-action" disabled={busy} onClick={() => void onApproveForPr()}><GitPullRequest size={16} />Approve preview and create PR</button>
+      )}
       <ol className="preview-stepper" aria-label="Preview lifecycle">
         {steps.map((step, index) => (
           <li className={`stepper-item ${step.state}`} key={step.key}>
@@ -2434,7 +2474,7 @@ function PreviewPanel({ preview, busy, onRetry }: { preview: PreviewDto; busy: b
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
-      {failed && canRetrySetup && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />{retryLabel}</button>}
+      {(failed && canRetrySetup || stopped && ((preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml)) && <button className="primary-action side-action" disabled={busy} onClick={() => void onRetry()}><Play size={16} />{retryLabel}</button>}
       {failed && !canRetrySetup && <p className="namespace-note">Source generation did not finish, so there is no Kubernetes preview manifest to retry.</p>}
     </section>
   );
@@ -2830,6 +2870,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
     setForm((current) => ({
       ...current,
       implementationProfile,
+      implementationWorkflow: workflowForRepositoryProfile(implementationProfile, null),
       enabledSkills: (profile.enabledSkills ?? []).join('\n'),
       capabilityTags: (profile.capabilityTags ?? []).join('\n'),
       aiInstructions: profile.instructions,
@@ -2880,12 +2921,17 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
       throw new Error(createPermissionMessage ?? 'You do not have permission to create repositories for this GitHub installation.');
     }
 
+    const requestedWorkflow = workflowForRepositoryProfile(form.implementationProfile, form.implementationWorkflow);
+    const repositoryWorkflow = requestedWorkflow === 'direct-pr' && looksLikeWebsiteText(`${newRepoName} ${newRepoDescription} ${newRepoPrompt}`)
+      ? 'preview-then-pr'
+      : requestedWorkflow;
     const response = await api.post<GitHubRepositoryCreateResponse>('/api/repositories/github', {
       installationId: selectedInstallationId,
       name: normalizeRepositoryNameInput(newRepoName),
       private: newRepoPrivate,
       description: newRepoDescription,
       implementationProfile: form.implementationProfile,
+      implementationWorkflow: repositoryWorkflow,
       onboardingPrompt: newRepoPrompt,
       files: onboardingDraft.files,
       repositoryProfile: repositoryProfileFromForm(form, onboardingDraft.repositoryProfile),
@@ -2906,7 +2952,9 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
       repositoryRemoteUrl: repository.remoteUrl,
       repositoryWebUrl: repository.webUrl ?? '',
       repositoryDefaultBranch: repository.defaultBranch || 'main',
-      implementationProfile: normalizeImplementationProfile(repository.implementationProfile)
+      implementationProfile: normalizeImplementationProfile(repository.implementationProfile),
+      implementationWorkflow: workflowForRepositoryProfile(repository.implementationProfile, repository.implementationWorkflow),
+      publicHostname: form.publicHostname || `${slugFromText(repository.name)}.rosenvall.se`
     };
   }
 
@@ -3372,7 +3420,10 @@ function RepositoryProfileEditor({ form, profile, profileStatus, aiProfileStatus
       {profileError && <p className="provider-status">{profileError}</p>}
       {profile?.signals?.length ? <p className="profile-signals">Signals: {profile.signals.join(', ')}</p> : null}
       <div className="form-grid two">
-        <label>Profile<select value={form.implementationProfile} onChange={(event) => onChange((current) => ({ ...current, implementationProfile: normalizeImplementationProfile(event.target.value) }))}>
+        <label>Profile<select value={form.implementationProfile} onChange={(event) => onChange((current) => {
+          const nextProfile = normalizeImplementationProfile(event.target.value);
+          return { ...current, implementationProfile: nextProfile, implementationWorkflow: workflowForRepositoryProfile(nextProfile, null) };
+        })}>
           <option value="code-repo">Code repo</option>
           <option value="gitops-homelab">GitOps homelab</option>
           <option value="unity">Unity</option>
@@ -3579,7 +3630,7 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
   const [secretKey, setSecretKey] = React.useState('');
   const [secretValue, setSecretValue] = React.useState('');
   const [secretRepositoryId, setSecretRepositoryId] = React.useState('');
-  const boardRepositories = board.repositories?.length ? board.repositories : board.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, repository: board.repository }] : [];
+  const boardRepositories = board.repositories?.length ? board.repositories : board.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
   const canSaveSecret = secretKey.trim().length > 0 && secretValue.length > 0;
   const latestGitHubIntegration = githubIntegrations[0];
   const gitHubConnected = settings.gitHub.connected || githubIntegrations.length > 0;
@@ -3660,6 +3711,10 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
         </section>
         </>}
         {scope === 'board' && <>
+        <SectionTitle icon={<ExternalLink size={22} />} title="Hosting workflow" />
+        <section className="panel form-panel">
+          <BoardHostingForm board={board} actions={actions} />
+        </section>
         <SectionTitle icon={<Boxes size={22} />} title="GitOps" />
         <section className="panel form-panel">
           <GitOpsSettingsForm board={board} actions={actions} />
@@ -3740,6 +3795,32 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
         </>}
       </div>
     </section>
+  );
+}
+
+function BoardHostingForm({ board, actions }: { board: Board; actions: BoardActions }) {
+  const [publicHostname, setPublicHostname] = React.useState(board.publicHostname ?? '');
+  const [workflow, setWorkflow] = React.useState(board.implementationWorkflow ?? workflowForRepositoryProfile(board.repository?.implementationProfile, board.repository?.implementationWorkflow));
+
+  React.useEffect(() => {
+    setPublicHostname(board.publicHostname ?? '');
+    setWorkflow(board.implementationWorkflow ?? workflowForRepositoryProfile(board.repository?.implementationProfile, board.repository?.implementationWorkflow));
+  }, [board.id, board.publicHostname, board.implementationWorkflow, board.repository?.implementationProfile, board.repository?.implementationWorkflow]);
+
+  return (
+    <form className="form-grid two" onSubmit={(event) => {
+      event.preventDefault();
+      void actions.updateBoardHosting(board.id, { publicHostname: publicHostname.trim() || null, implementationWorkflow: workflow });
+    }}>
+      <label>Implementation workflow<select value={workflow ?? 'preview-only'} onChange={(event) => setWorkflow(event.target.value)}>
+        <option value="preview-only">Preview only</option>
+        <option value="preview-then-pr">Preview, then PR</option>
+        <option value="direct-pr">Direct PR</option>
+      </select></label>
+      <label>Public hostname<input value={publicHostname} onChange={(event) => setPublicHostname(event.target.value)} placeholder={board.repository ? `${slugFromText(board.repository.name)}.rosenvall.se` : 'app.rosenvall.se'} /></label>
+      <p className="provider-status">Preview URLs stay temporary per card. Public hostname is production intent for website repository PRs.</p>
+      <div className="form-actions-row"><button className="secondary" type="submit"><Save size={16} />Save hosting</button></div>
+    </form>
   );
 }
 
@@ -4466,6 +4547,10 @@ function normalizeRepositoryNameInput(value: string) {
   return normalized || 'new-repository';
 }
 
+function looksLikeWebsiteText(value: string) {
+  return /website|hemsida|frontend|react|vite|webapp|landing|site|clock|klock/i.test(value);
+}
+
 function boardRepositorySummary(board: Board) {
   const repositories = board.repositories?.length
     ? board.repositories
@@ -4520,6 +4605,8 @@ function createBoardFormFromRepositoryProfile(board: Board, entry: BoardReposito
     repositoryWebUrl: entry.repository.webUrl ?? '',
     repositoryDefaultBranch: entry.repository.defaultBranch,
     implementationProfile: normalizeImplementationProfile(profile?.implementationProfile ?? entry.implementationProfile),
+    implementationWorkflow: workflowForRepositoryProfile(profile?.implementationProfile ?? entry.implementationProfile, entry.implementationWorkflow ?? entry.repository.implementationWorkflow),
+    publicHostname: board.publicHostname ?? '',
     gitOpsAllowedPaths: gitOps.allowedPaths.join('\n'),
     argoNamespace: gitOps.argoNamespace,
     argoApplicationSelector: gitOps.argoApplicationSelector,
