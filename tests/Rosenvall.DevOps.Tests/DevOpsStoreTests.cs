@@ -2147,6 +2147,85 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_terminal_lines_are_split_by_lifecycle_step()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "preview steps", "Generate preview step logs.", "Todo", "Medium", null));
+        store.BeginPreviewImplementation(item.Id, "codex");
+        store.AppendPreviewTerminalLine(item.Id, "agent", "OpenAI Codex started.", stepKey: "source");
+        store.AppendPreviewTerminalLine(item.Id, "system", "Codex generated 2 source files.", stepKey: "source");
+        var sourceFiles = LocalReactPreviewProject.ForWorkItem(item.Key, item.Title, "Generate preview step logs.")
+            .Select(file => file.Path == "src/App.tsx"
+                ? new PreviewSourceFile(file.Key, file.Path, "export default function App() { return <main>Step logs</main>; }")
+                : file)
+            .ToArray();
+
+        store.CompletePreviewImplementation(item.Id, sourceFiles, "codex");
+        store.MarkPreviewApplying(item.Id, "Applying Kubernetes resources.");
+        store.AppendPreviewTerminalLine(item.Id, "system", "kubectl apply started.", stepKey: "apply");
+        store.MarkPreviewProvisioning(item.Id, "deployment/task-preview configured");
+        store.UpdatePreviewHealth(item.Id, PreviewHealthCheckResult.Running("task-preview-pod", "Deployment is available and at least one preview pod is ready."));
+
+        var preview = store.GetWorkItemDetail(item.Id)!.Preview!;
+        var source = preview.StepLogs!.Single(step => step.Key == "source");
+        var apply = preview.StepLogs!.Single(step => step.Key == "apply");
+        var readiness = preview.StepLogs!.Single(step => step.Key == "readiness");
+        var running = preview.StepLogs!.Single(step => step.Key == "running");
+
+        Assert.Contains(source.TerminalLines!, line => line.Message.Contains("OpenAI Codex", StringComparison.Ordinal));
+        Assert.Contains(apply.TerminalLines!, line => line.Message.Contains("kubectl apply", StringComparison.Ordinal));
+        Assert.Contains(readiness.TerminalLines!, line => line.Message.Contains("deployment/task-preview", StringComparison.Ordinal));
+        Assert.Contains(running.TerminalLines!, line => line.Message.Contains("Deployment is available", StringComparison.Ordinal));
+        Assert.Equal("done", source.State);
+        Assert.Equal("done", apply.State);
+        Assert.Equal("done", readiness.State);
+        Assert.Equal("done", running.State);
+        Assert.Contains(preview.TerminalLines!, line => line.Message.Contains("kubectl apply", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Legacy_preview_terminal_tail_is_backfilled_into_step_logs_on_snapshot_load()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "legacy preview", "Load old preview logs.", "Todo", "Medium", null));
+        store.BeginPreviewImplementation(item.Id, "codex");
+        store.AppendPreviewTerminalLine(item.Id, "agent", "OpenAI Codex v0.133.0");
+        store.AppendPreviewTerminalLine(item.Id, "system", "kubectl apply started.");
+        fixture.UpdateSnapshotJson(RemovePreviewStepLogs);
+
+        var reopened = fixture.Reopen();
+        var preview = reopened.GetWorkItemDetail(item.Id)!.Preview!;
+
+        Assert.NotNull(preview.StepLogs);
+        Assert.Contains(preview.StepLogs!.Single(step => step.Key == "source").TerminalLines!, line => line.Message.Contains("Legacy combined log", StringComparison.Ordinal));
+        Assert.Contains(preview.StepLogs!.Single(step => step.Key == "source").TerminalLines!, line => line.Message.Contains("OpenAI Codex", StringComparison.Ordinal));
+        Assert.Contains(preview.StepLogs!.Single(step => step.Key == "apply").TerminalLines!, line => line.Message.Contains("kubectl apply", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Snapshot_load_deduplicates_exact_rosenvall_ai_result_comments()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "plan duplicate", "Generate one plan.", "Todo", "Medium", null));
+        store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implementation Plan");
+        fixture.UpdateSnapshotJson(DuplicateFirstRosenvallAiResultComment);
+
+        var reopened = fixture.Reopen();
+        var detail = reopened.GetWorkItemDetail(item.Id)!;
+
+        Assert.Equal(1, detail.Comments.Count(comment =>
+            comment.Author == "Rosenvall AI" &&
+            comment.Kind == "Result" &&
+            comment.Body.Contains("Created plan #1", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public void Repository_run_terminal_tails_are_capped_and_long_lines_are_truncated()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -4199,6 +4278,33 @@ public sealed class DevOpsStoreTests
         }
 
         throw new InvalidOperationException($"Environment value {name} was not found.");
+    }
+
+    private static string RemovePreviewStepLogs(string json)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        if (root["previews"] is JsonArray previews)
+        {
+            foreach (var preview in previews.OfType<JsonObject>())
+            {
+                preview.Remove("stepLogs");
+            }
+        }
+
+        return root.ToJsonString();
+    }
+
+    private static string DuplicateFirstRosenvallAiResultComment(string json)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        var comments = root["comments"]!.AsArray();
+        var firstSystemResult = comments
+            .OfType<JsonObject>()
+            .First(comment =>
+                string.Equals(comment["author"]?.GetValue<string>(), "Rosenvall AI", StringComparison.Ordinal) &&
+                string.Equals(comment["kind"]?.GetValue<string>(), "Result", StringComparison.Ordinal));
+        comments.Add(firstSystemResult.DeepClone());
+        return root.ToJsonString();
     }
 
     private static void AssertImplementationManifestEnvListIsWellFormed(string manifest)

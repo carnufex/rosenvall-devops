@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, previewStatusMessage, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -67,6 +67,56 @@ test('stopped preview is shown as historical and not live', () => {
   assert.equal(previewStatusMessage('Stopped'), 'Preview is stopped. The reviewed source is kept so it can be recreated.');
   assert.equal(previewDisplayMessage('Stopped', 'Deployment is available and at least one preview pod is ready.', 'Ready'), 'Preview is stopped. The reviewed source is kept so it can be recreated.');
   assert.deepEqual(buildPreviewLifecycleSteps('Stopped').map((step) => step.state), ['done', 'done', 'done', 'done']);
+});
+
+test('preview step logs expose clickable per-step terminal history', () => {
+  const steps = previewStepLogsForDisplay({
+    status: 'Applying',
+    stepLogs: [
+      {
+        key: 'source',
+        title: 'Implementing preview source',
+        description: 'Codex generates files.',
+        state: 'done',
+        terminalLines: [{ createdAt: '2026-05-28T10:00:00Z', stream: 'agent', message: 'OpenAI Codex started.' }]
+      },
+      {
+        key: 'apply',
+        title: 'Applying Kubernetes resources',
+        description: 'Apply manifests.',
+        state: 'active',
+        terminalLines: [{ createdAt: '2026-05-28T10:01:00Z', stream: 'system', message: 'kubectl apply started.' }]
+      }
+    ]
+  });
+
+  assert.equal(defaultPreviewStepKey(steps), 'apply');
+  assert.deepEqual(steps.map((step) => step.key), ['source', 'apply', 'readiness', 'running']);
+  assert.equal(steps[0].logCount, 1);
+  assert.equal(steps[1].terminalLines[0].message, 'kubectl apply started.');
+});
+
+test('legacy preview logs fall back to source terminal history', () => {
+  const steps = previewStepLogsForDisplay({
+    status: 'Implementing',
+    terminalLines: [{ createdAt: '2026-05-28T10:00:00Z', stream: 'agent', message: 'OpenAI Codex v0.133.0' }]
+  });
+
+  assert.equal(defaultPreviewStepKey(steps), 'source');
+  assert.equal(steps[0].logCount, 2);
+  assert.match(steps[0].terminalLines[0].message, /Legacy combined log/);
+});
+
+test('activity comments dedupe exact generated Rosenvall AI results only', () => {
+  const comments = dedupeGeneratedActivityComments([
+    { workItemId: 'task-1', author: 'Rosenvall AI', kind: 'Result', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:00:00Z' },
+    { workItemId: 'task-1', author: 'Rosenvall AI', kind: 'Result', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:01:00Z' },
+    { workItemId: 'task-1', author: 'Christopher', kind: 'Comment', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:02:00Z' },
+    { workItemId: 'task-1', author: 'Christopher', kind: 'Comment', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:03:00Z' }
+  ]);
+
+  assert.equal(comments.length, 3);
+  assert.equal(comments.filter((comment) => comment.author === 'Christopher').length, 2);
 });
 
 test('repo-less board can sync only when provider capability allows it', () => {
