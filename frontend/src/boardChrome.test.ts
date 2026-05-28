@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -60,6 +60,53 @@ test('public app link is shown only when board app is running', () => {
     name: 'Demo Klocka',
     publicHostname: 'demo-klocka.rosenvall.se'
   }), 'App not deployed');
+});
+
+test('local git development copy stays internal to RDO', () => {
+  const localDevelopment = {
+    repository: 'demo-app',
+    branch: 'rdo/task-1',
+    pullRequestUrl: 'http://forgejo.local/rdo/demo-app/pulls/7',
+    checksStatus: 'Local pull request ready',
+    pullRequestProvider: 'LocalGit',
+    pullRequestNumber: 7,
+    pullRequestState: 'open'
+  };
+
+  assert.equal(isLocalGitDevelopmentRecord(localDevelopment), true);
+  assert.equal(pullRequestDisplayLabel(localDevelopment), 'Local pull request #7');
+  assert.equal(approvePullRequestActionLabel(localDevelopment), 'Merge local PR and deploy app');
+  assert.equal(approvePullRequestActionLabel({ ...localDevelopment, pullRequestProvider: 'GitHub' }), 'Approve PR');
+});
+
+test('board delete confirmation includes board-owned local git cleanup but excludes github deletion', () => {
+  const message = boardDeleteCleanupMessage('Demo app');
+
+  assert.match(message, /board-owned Local Git repositories/);
+  assert.match(message, /GitHub repositories and PRs will remain/);
+});
+
+test('local git provider state stays visible when forgejo is unavailable', () => {
+  assert.deepEqual(localGitProviderState({
+    localGitEnabled: true,
+    localGitAvailable: false,
+    canCreateRepositories: false,
+    localGitMessage: 'Forgejo is not deployed.'
+  }), {
+    visible: true,
+    available: false,
+    message: 'Forgejo is not deployed.'
+  });
+
+  assert.deepEqual(localGitProviderState({
+    localGitEnabled: true,
+    localGitAvailable: true,
+    canCreateRepositories: true
+  }), {
+    visible: true,
+    available: true,
+    message: 'Local Git is ready.'
+  });
 });
 
 test('stopped preview is shown as historical and not live', () => {
@@ -124,14 +171,15 @@ test('repo-less board can sync only when provider capability allows it', () => {
   assert.equal(canSyncBoardToProvider({ id: 'demo', name: 'Demo', repository: { provider: 'Sample' }, providerCapabilities: ['preview'] }), false);
 });
 
-test('github repository creation is disabled in the chrome helpers', () => {
+test('github repository creation requires a matching personal authorization', () => {
   assert.equal(canCreateRepositoryInInstallation(undefined), false);
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex' }), false);
-  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true }), false);
+  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true }), true);
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), false);
   assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: false }), false);
-  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: true, hasUserAuthorization: true }), false);
-  assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false }), 'GitHub repository creation is disabled. Link an existing repository instead.');
+  assert.equal(canCreateRepositoryInInstallation({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: true, requiresUserAuthorizationForRepositoryCreation: false, hasUserAuthorization: true, authorizedGitHubLogin: 'carnufex' }), true);
+  assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false, requiresUserAuthorizationForRepositoryCreation: true }), 'Authorize GitHub user access before creating repositories under carnufex.');
+  assert.equal(repositoryCreatePermissionMessage({ installationId: 1, accountLogin: 'carnufex', canCreateRepositories: false, hasUserAuthorization: true, authorizedGitHubLogin: 'someoneelse' }), 'Connected as someoneelse; repository creation under carnufex is blocked.');
 });
 
 test('github user authorization callback result is parsed from URL query', () => {
@@ -150,6 +198,7 @@ test('api unavailable banner message is persistent and specific for 503 or netwo
   assert.equal(apiUnavailableBannerMessage(new Error('503 Service Unavailable')), 'API is restarting or unavailable. Latest known board state is still shown.');
   assert.equal(apiUnavailableBannerMessage(new Error('Failed to fetch')), 'API is restarting or unavailable. Latest known board state is still shown.');
   assert.equal(apiUnavailableBannerMessage(new Error('Implementation cannot start because Rosenvall DevOps API is memory pressured.')), 'API is memory pressured. Implementation cannot start until capacity recovers.');
+  assert.equal(apiUnavailableBannerMessage(new Error('No workspace available for this account.')), null);
   assert.equal(apiUnavailableBannerMessage(new Error('validation failed')), null);
 });
 

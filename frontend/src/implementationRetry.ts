@@ -4,6 +4,20 @@ export type ImplementationRunState = {
   pullRequestUrl?: string | null;
 };
 
+export type RepositoryRunStep = {
+  key: string;
+  title: string;
+  description: string;
+  state: 'done' | 'blocked' | 'active' | 'pending';
+};
+
+export type RepositoryRunPresentation = {
+  title: string;
+  terminalTitle: string;
+  ariaLabel: string;
+  steps: RepositoryRunStep[];
+};
+
 export type RepositoryImplementationActionState = {
   canStart: boolean;
   label: string;
@@ -56,7 +70,7 @@ export function implementationActionState(options: {
         : 'Retry implementation'
       : options.repositoryProfile === 'unity'
         ? 'Implement in Unity repo'
-        : 'Implement in GitHub repo'
+        : 'Implement in repository'
     : options.selectedPlanStatus === 'Approved'
       ? 'Rebuild with Codex'
       : isPreviewThenPr
@@ -83,5 +97,57 @@ export function implementationActionState(options: {
 }
 
 export function isImplementationRunPendingStatus(status?: string | null) {
-  return status === 'Queued' || status === 'Cloning' || status === 'Inspecting' || status === 'Implementing' || status === 'Validating' || status === 'Testing' || status === 'Pushing';
+  return status === 'Queued' || status === 'Cloning' || status === 'Inspecting' || status === 'Implementing' || status === 'WritingPreviewSource' || status === 'Validating' || status === 'Testing' || status === 'Pushing';
+}
+
+export function repositoryRunPresentation(status: string, runKind?: string | null): RepositoryRunPresentation {
+  const previewPromotion = runKind === 'preview-promotion';
+  return {
+    title: previewPromotion ? 'Preview approval PR' : 'Implementation run',
+    terminalTitle: previewPromotion ? 'PR creation log' : 'Implementation log',
+    ariaLabel: previewPromotion ? 'Preview approval pull request lifecycle' : 'Repository implementation lifecycle',
+    steps: repositoryRunSteps(status, previewPromotion)
+  };
+}
+
+function repositoryRunSteps(status: string, previewPromotion: boolean): RepositoryRunStep[] {
+  const steps = previewPromotion
+    ? [
+        ['Cloning', 'Clone repository', 'The runner checks out the linked repository and creates a task branch.'],
+        ['WritingPreviewSource', 'Write approved preview source', 'The runner writes the exact source files from the reviewed preview.'],
+        ['Validating', 'Validate changed files', 'Changed files are checked against the board allowed paths.'],
+        ['Pushing', 'Push branch', 'Changes are committed and pushed to the linked repository.'],
+        ['PullRequestReady', 'Pull request ready', 'A pull request is available for review.']
+      ] as const
+    : [
+        ['Cloning', 'Clone repository', 'The runner checks out the linked repository and creates a task branch.'],
+        ['Inspecting', 'Inspect repository', 'The runner records repository state before Codex starts.'],
+        ['Implementing', 'Implement with Codex', 'Codex edits the repository according to the selected plan.'],
+        ['Validating', 'Validate scope', 'Changed files are checked against the board allowed paths.'],
+        ['Testing', 'Run checks', 'The runner executes lightweight tests or builds when they are discoverable.'],
+        ['Pushing', 'Push branch', 'Changes are committed and pushed to the linked repository.'],
+        ['PullRequestReady', 'Pull request ready', 'A pull request is available for review.']
+      ] as const;
+
+  const fallbackFailedKey = previewPromotion ? 'WritingPreviewSource' : 'Implementing';
+  const current = status === 'Queued'
+    ? 0
+    : status === 'Failed'
+      ? Math.max(0, steps.findIndex(([key]) => key === fallbackFailedKey))
+      : Math.max(0, steps.findIndex(([key]) => key === status || (previewPromotion && status === 'Implementing' && key === 'WritingPreviewSource')));
+
+  return steps.map(([key, title, description], index) => ({
+    key,
+    title,
+    description,
+    state: status === 'PullRequestReady'
+      ? 'done'
+      : status === 'Failed' && index === current
+        ? 'blocked'
+        : index < current
+          ? 'done'
+          : index === current
+            ? 'active'
+            : 'pending'
+  }));
 }

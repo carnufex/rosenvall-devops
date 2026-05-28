@@ -1,6 +1,7 @@
 param(
     [int]$ApiPort = 5088,
     [int]$FrontendPort = 5173,
+    [int]$ForgejoPort = 3001,
     [ValidateSet("Local", "ClusterPortForward")]
     [string]$ApiMode = "Local",
     [switch]$SkipClusterSecrets,
@@ -21,6 +22,8 @@ $apiOut = Join-Path $logDir "api.out.log"
 $apiErr = Join-Path $logDir "api.err.log"
 $frontendOut = Join-Path $logDir "frontend.out.log"
 $frontendErr = Join-Path $logDir "frontend.err.log"
+$forgejoOut = Join-Path $logDir "forgejo.out.log"
+$forgejoErr = Join-Path $logDir "forgejo.err.log"
 $homelabKubeconfig = Join-Path (Split-Path $repoRoot -Parent) "Rosenvalls-Homelab\tofu\output\kubeconfig"
 $previousPreviewKubeconfig = $env:Preview__KubeconfigPath
 $previousPipelinesKubeconfig = $env:Pipelines__KubeconfigPath
@@ -35,11 +38,22 @@ $previousGitHubAppClientSecret = $env:GitHub__AppClientSecret
 $previousGitHubTokenSecretName = $env:GitHub__TokenSecretName
 $previousRepositoriesProvider = $env:Repositories__Provider
 $previousRepositoriesMode = $env:Repositories__Mode
+$previousLocalGitEnabled = $env:LocalGit__Enabled
+$previousLocalGitApiBaseUrl = $env:LocalGit__ApiBaseUrl
+$previousLocalGitRunnerApiBaseUrl = $env:LocalGit__RunnerApiBaseUrl
+$previousLocalGitCloneBaseUrl = $env:LocalGit__CloneBaseUrl
+$previousLocalGitOwner = $env:LocalGit__Owner
+$previousLocalGitUsername = $env:LocalGit__Username
+$previousLocalGitPassword = $env:LocalGit__Password
+$previousLocalGitUnavailableReason = $env:LocalGit__UnavailableReason
 $previousViteAuthEnabled = $env:VITE_AUTH_ENABLED
 $previousViteAuthAuthority = $env:VITE_AUTH_AUTHORITY
 $previousViteAuthClientId = $env:VITE_AUTH_CLIENT_ID
 $previousViteAuthRedirectUri = $env:VITE_AUTH_REDIRECT_URI
 $previousViteAuthPostLogoutRedirectUri = $env:VITE_AUTH_POST_LOGOUT_REDIRECT_URI
+$previousViteAuthProxyPrefix = $env:VITE_AUTH_PROXY_PREFIX
+$previousAuthenticationAuthority = $env:Authentication__Authority
+$previousAuthenticationAudience = $env:Authentication__Audience
 
 function Get-KubectlBaseArgs {
     if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
@@ -64,8 +78,12 @@ function Get-KubernetesSecretValue {
         return $null
     }
 
-    $json = & kubectl @KubectlBaseArgs -n rosenvall-devops get secret $Name -o json 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+    try {
+        $json = & kubectl @KubectlBaseArgs -n rosenvall-devops get secret $Name -o json 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+            return $null
+        }
+    } catch {
         return $null
     }
 
@@ -76,6 +94,24 @@ function Get-KubernetesSecretValue {
     }
 
     return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($property.Value))
+}
+
+function Test-KubernetesResource {
+    param(
+        [string[]]$KubectlBaseArgs,
+        [string[]]$Arguments
+    )
+
+    if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    try {
+        & kubectl @KubectlBaseArgs @Arguments *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
 }
 
 function Set-EnvIfBlank {
@@ -139,20 +175,60 @@ if (-not $SkipClusterSecrets -and $ApiMode -eq "Local") {
 }
 
 if ($EnableAuth -or $ApiMode -eq "ClusterPortForward") {
+    Set-EnvIfBlank "Authentication__Authority" "https://authentik.rosenvall.se/application/o/rosenvall-devops/"
+    Set-EnvIfBlank "Authentication__Audience" "rosenvall-devops"
     Set-EnvIfBlank "VITE_AUTH_ENABLED" "true"
     Set-EnvIfBlank "VITE_AUTH_AUTHORITY" "https://authentik.rosenvall.se/application/o/rosenvall-devops/"
     Set-EnvIfBlank "VITE_AUTH_CLIENT_ID" "rosenvall-devops"
     Set-EnvIfBlank "VITE_AUTH_REDIRECT_URI" "http://localhost:$FrontendPort/auth/callback"
     Set-EnvIfBlank "VITE_AUTH_POST_LOGOUT_REDIRECT_URI" "http://localhost:$FrontendPort/"
+    Set-EnvIfBlank "VITE_AUTH_PROXY_PREFIX" "/authentik"
 }
 
 Get-CimInstance Win32_Process |
     Where-Object {
         ($_.Name -eq "dotnet.exe" -and $_.CommandLine -match "Rosenvall.DevOps.Api") -or
         ($_.Name -eq "node.exe" -and $_.CommandLine -match "vite") -or
-        ($_.Name -eq "kubectl.exe" -and $_.CommandLine -match "rosenvall-devops-api" -and $_.CommandLine -match "port-forward")
+        ($_.Name -eq "kubectl.exe" -and $_.CommandLine -match "rosenvall-devops-api" -and $_.CommandLine -match "port-forward") -or
+        ($_.Name -eq "kubectl.exe" -and $_.CommandLine -match "rosenvall-devops-forgejo" -and $_.CommandLine -match "port-forward")
     } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+$forgejo = $null
+if ($ApiMode -eq "Local" -and (Test-Path -LiteralPath $homelabKubeconfig) -and -not $SkipClusterSecrets) {
+    $forgejoServiceReady = Test-KubernetesResource -KubectlBaseArgs $kubectlBaseArgs -Arguments @("-n", "rosenvall-devops", "get", "svc", "rosenvall-devops-forgejo")
+    $forgejoSecretReady = Test-KubernetesResource -KubectlBaseArgs $kubectlBaseArgs -Arguments @("-n", "rosenvall-devops", "get", "secret", "rosenvall-devops-forgejo-admin")
+    $forgejoUsername = Get-KubernetesSecretValue "rosenvall-devops-forgejo-admin" "username" $kubectlBaseArgs
+    $forgejoPassword = Get-KubernetesSecretValue "rosenvall-devops-forgejo-admin" "password" $kubectlBaseArgs
+
+    Set-EnvIfBlank "LocalGit__Enabled" "true"
+    Set-EnvIfBlank "LocalGit__ApiBaseUrl" "http://localhost:$ForgejoPort/api/v1"
+    Set-EnvIfBlank "LocalGit__RunnerApiBaseUrl" "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/api/v1"
+    Set-EnvIfBlank "LocalGit__CloneBaseUrl" "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000"
+    Set-EnvIfBlank "LocalGit__Owner" "rdo"
+    Set-EnvIfBlank "LocalGit__Username" $(if ([string]::IsNullOrWhiteSpace($forgejoUsername)) { "rdo" } else { $forgejoUsername })
+
+    if ($forgejoServiceReady -and $forgejoSecretReady -and -not [string]::IsNullOrWhiteSpace($forgejoPassword)) {
+        Set-EnvIfBlank "LocalGit__Password" $forgejoPassword
+        $env:LocalGit__UnavailableReason = $null
+        $forgejoArgs = @($kubectlBaseArgs + @("-n", "rosenvall-devops", "port-forward", "svc/rosenvall-devops-forgejo", "$ForgejoPort`:3000"))
+        $forgejo = Start-Process -FilePath "kubectl" `
+            -ArgumentList $forgejoArgs `
+            -WorkingDirectory $repoRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $forgejoOut `
+            -RedirectStandardError $forgejoErr `
+            -PassThru
+
+        if (-not (Wait-HttpOk "http://localhost:$ForgejoPort/api/healthz" 20)) {
+            $env:LocalGit__UnavailableReason = "Local Git is configured, but Forgejo did not become reachable through localhost port-forward. Check $forgejoOut and $forgejoErr."
+            Write-Warning $env:LocalGit__UnavailableReason
+        }
+    } else {
+        $env:LocalGit__UnavailableReason = "Local Git is enabled, but Forgejo is not deployed or the rosenvall-devops-forgejo-admin secret is missing. Sync the rosenvall-devops Homelab app and restart local demo."
+        Write-Warning $env:LocalGit__UnavailableReason
+    }
+}
 
 if ($ApiMode -eq "ClusterPortForward") {
     if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
@@ -190,6 +266,16 @@ $env:GitHub__AppClientSecret = $previousGitHubAppClientSecret
 $env:GitHub__TokenSecretName = $previousGitHubTokenSecretName
 $env:Repositories__Provider = $previousRepositoriesProvider
 $env:Repositories__Mode = $previousRepositoriesMode
+$env:LocalGit__Enabled = $previousLocalGitEnabled
+$env:LocalGit__ApiBaseUrl = $previousLocalGitApiBaseUrl
+$env:LocalGit__RunnerApiBaseUrl = $previousLocalGitRunnerApiBaseUrl
+$env:LocalGit__CloneBaseUrl = $previousLocalGitCloneBaseUrl
+$env:LocalGit__Owner = $previousLocalGitOwner
+$env:LocalGit__Username = $previousLocalGitUsername
+$env:LocalGit__Password = $previousLocalGitPassword
+$env:LocalGit__UnavailableReason = $previousLocalGitUnavailableReason
+$env:Authentication__Authority = $previousAuthenticationAuthority
+$env:Authentication__Audience = $previousAuthenticationAudience
 
 if (-not (Wait-HttpOk "http://localhost:$ApiPort/healthz")) {
     Write-Warning "API did not become healthy on http://localhost:$ApiPort/healthz. Check $apiOut and $apiErr."
@@ -212,6 +298,7 @@ $env:VITE_AUTH_AUTHORITY = $previousViteAuthAuthority
 $env:VITE_AUTH_CLIENT_ID = $previousViteAuthClientId
 $env:VITE_AUTH_REDIRECT_URI = $previousViteAuthRedirectUri
 $env:VITE_AUTH_POST_LOGOUT_REDIRECT_URI = $previousViteAuthPostLogoutRedirectUri
+$env:VITE_AUTH_PROXY_PREFIX = $previousViteAuthProxyPrefix
 
 Write-Host "Rosenvall DevOps demo is running."
 Write-Host "Frontend: http://localhost:$FrontendPort"
@@ -219,13 +306,17 @@ Write-Host "API:      http://localhost:$ApiPort/healthz"
 Write-Host "API mode: $ApiMode"
 Write-Host "API PID:  $($api.Id)"
 Write-Host "UI PID:   $($frontend.Id)"
+if ($null -ne $forgejo) {
+    Write-Host "Forgejo: http://localhost:$ForgejoPort/api/v1"
+    Write-Host "Forgejo PID: $($forgejo.Id)"
+}
 Write-Host "Logs:     $logDir"
 if (Test-Path -LiteralPath $homelabKubeconfig) {
     Write-Host "Kubeconfig: $homelabKubeconfig"
 }
 if (-not $SkipClusterSecrets -and $ApiMode -eq "Local") {
-    Write-Host "Cluster secrets: GitHub App values loaded into the local API process when available."
+    Write-Host "Cluster secrets: GitHub App and LocalGit values loaded into the local API process when available."
 }
-if ($ApiMode -eq "ClusterPortForward") {
-    Write-Host "Auth: local frontend is started with Authentik settings and localhost callback."
+if ($EnableAuth -or $ApiMode -eq "ClusterPortForward") {
+    Write-Host "Auth: enabled with Authentik, localhost callback."
 }
