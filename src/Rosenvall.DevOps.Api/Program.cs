@@ -290,7 +290,7 @@ if (!string.IsNullOrWhiteSpace(authority))
 }
 
 api.MapGet("/status", (IConfiguration configuration, DevOpsStore store) =>
-    Results.Ok(new ApiStatusDto(ApiResourceDiagnosticsReader.Read(configuration, store.LastSnapshotJsonBytes))));
+    Results.Ok(new ApiStatusDto(ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics))));
 
 api.MapGet("/workspaces", (ClaimsPrincipal user, DevOpsStore store) => store.GetWorkspaces(AuthenticatedSubjectOrNull(user)));
 api.MapPost("/workspaces", async (CreateWorkspaceRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
@@ -1268,11 +1268,19 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     return Results.Accepted($"/api/ai-runs/{run.Id}", run);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IHubContext<DevOpsHub> hub, IConfiguration configuration) =>
 {
     if (!CanMutateAiRunRequest(store, aiRunId, user))
     {
         return BoardMutationForbidden();
+    }
+
+    var resourceDiagnostics = ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics);
+    var minHeadroomBytes = configuration.GetValue("Ai:Codex:PreviewSourceApiMemoryMinHeadroomBytes", configuration.GetValue("RepositoryRuns:ApiMemoryMinHeadroomBytes", 128L * 1024 * 1024));
+    var preflight = ImplementationCapacityPreflight.Evaluate(resourceDiagnostics, minHeadroomBytes);
+    if (!preflight.Succeeded)
+    {
+        return Results.Problem("Preview source generation cannot start because Rosenvall DevOps API is memory pressured. Try again after cleanup or restart.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
     AiRun? result;
@@ -1624,7 +1632,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         return BoardMutationForbidden();
     }
 
-    var resourceDiagnostics = ApiResourceDiagnosticsReader.Read(configuration, store.LastSnapshotJsonBytes);
+    var resourceDiagnostics = ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics);
     var preflight = ImplementationCapacityPreflight.Evaluate(resourceDiagnostics, configuration.GetValue("RepositoryRuns:ApiMemoryMinHeadroomBytes", 128L * 1024 * 1024));
     if (!preflight.Succeeded)
     {
@@ -1929,7 +1937,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, string RunKind = "codex", Guid? SourcePreviewId = null);
     public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, bool Adopted = false, DateTimeOffset? MergedAt = null, DateTimeOffset? VerifiedAt = null, string? VerificationFailure = null);
     public sealed record ApiStatusDto(ApiResourceDiagnosticsDto Resources);
-    public sealed record ApiResourceDiagnosticsDto(long? ProcessRssBytes, long? MemoryCurrentBytes, long? MemoryLimitBytes, long? MemoryAvailableBytes, bool IsMemoryPressured, string Status, string? Message, long? SnapshotJsonBytes = null);
+    public sealed record ApiResourceDiagnosticsDto(long? ProcessRssBytes, long? MemoryCurrentBytes, long? MemoryLimitBytes, long? MemoryAvailableBytes, bool IsMemoryPressured, string Status, string? Message, long? SnapshotJsonBytes = null, long SnapshotPersistWriteCount = 0, long SnapshotPersistSkipCount = 0, DateTimeOffset? LastSnapshotPersistedAt = null);
     public sealed record ImplementationCapacityPreflightResult(bool Succeeded, string Message, ApiResourceDiagnosticsDto Diagnostics);
     public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null, string? HeadRef = null);
     public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt, IReadOnlyList<string>? ApplicationUrls = null);
@@ -2014,6 +2022,7 @@ namespace Rosenvall.DevOps.Api
     public sealed record ExecutePipelineRunRequest(string Actor);
     public sealed record StartImplementationRunRequest(Guid AiRunId, string Actor, Guid? RepositoryId = null, string? ReasoningEffort = null);
     public sealed record GitHubIntegrationCallbackRequest(long InstallationId, string AccountLogin, string AccountType, string InstalledBy, int RepositoriesCount = 0, string Status = "Installed");
+    public sealed record SnapshotStoreDiagnostics(long? JsonBytes, long PersistWriteCount, long PersistSkipCount, DateTimeOffset? LastPersistedAt);
     public sealed record UpdateAiSessionProviderRequest(string ProviderSessionId);
     public sealed record GitHubCallbackRequest(Guid WorkItemId, string Repository, string Branch, string? PullRequestUrl, string Image, string ChecksStatus, string? StaticHtml = null);
 
@@ -2024,7 +2033,7 @@ namespace Rosenvall.DevOps.Api
     {
         private const long DefaultMinHeadroomBytes = 128L * 1024 * 1024;
 
-        public static ApiResourceDiagnosticsDto Read(IConfiguration configuration, long? snapshotJsonBytes = null)
+        public static ApiResourceDiagnosticsDto Read(IConfiguration configuration, SnapshotStoreDiagnostics? snapshot = null)
         {
             var processRssBytes = Process.GetCurrentProcess().WorkingSet64;
             var memoryCurrentBytes = ReadCgroupLong("/sys/fs/cgroup/memory.current") ??
@@ -2048,7 +2057,10 @@ namespace Rosenvall.DevOps.Api
                 pressured,
                 pressured ? "Degraded" : "Healthy",
                 message,
-                snapshotJsonBytes);
+                snapshot?.JsonBytes,
+                snapshot?.PersistWriteCount ?? 0,
+                snapshot?.PersistSkipCount ?? 0,
+                snapshot?.LastPersistedAt);
         }
 
         private static long? ReadCgroupLong(string path)
@@ -3217,7 +3229,7 @@ namespace Rosenvall.DevOps.Api
                 await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
                 foreach (var run in store.GetPreviewImplementationRunsAwaitingRecovery())
                 {
-                    var detail = store.AppendPreviewTerminalLine(run.WorkItemId, "system", "Restarting Codex preview implementation after API restart.");
+                    var detail = store.AppendPreviewTerminalLine(run.WorkItemId, "system", "Reattaching to existing Codex preview source job after API restart.");
                     await hub.Clients.All.SendAsync("previewChanged", detail?.Preview, stoppingToken);
                     await runner.RunAsync(run, run.ApprovedBy ?? "system", stoppingToken);
                 }
@@ -8013,6 +8025,7 @@ namespace Rosenvall.DevOps.Api
     public static class PreviewSourceJobManifestRenderer
     {
         public const string Namespace = RepositoryImplementationJobManifestRenderer.Namespace;
+        public const string DefaultRunnerImage = "ghcr.io/carnufex/rosenvall-devops-api:main";
         private const string PartOf = "rosenvall-devops-preview-source";
 
         public static string JobName(AiRun run, WorkItemDetailDto context) =>
@@ -8021,7 +8034,7 @@ namespace Rosenvall.DevOps.Api
         public static string ResultConfigMapName(AiRun run) =>
             SafeName($"preview-source-result-{run.Id:N}");
 
-        public static string Render(AiRun run, WorkItemDetailDto context, string model, string? reasoningEffort, string? sandboxMode = null)
+        public static string Render(AiRun run, WorkItemDetailDto context, string model, string? reasoningEffort, string? sandboxMode = null, string? runnerImage = null)
         {
             var jobName = JobName(run, context);
             var resultConfigMap = ResultConfigMapName(run);
@@ -8029,6 +8042,7 @@ namespace Rosenvall.DevOps.Api
             var seed = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(seedFiles)));
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(PreviewSourcePromptBuilder.BuildImplementationPrompt(run, context)));
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
+            var image = string.IsNullOrWhiteSpace(runnerImage) ? DefaultRunnerImage : runnerImage.Trim();
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -8094,7 +8108,7 @@ namespace Rosenvall.DevOps.Api
                                            fieldPath: metadata.namespace
                          initContainers:
                            - name: prepare-codex-home
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsUser: 0
@@ -8125,7 +8139,7 @@ namespace Rosenvall.DevOps.Api
                                  if [ -f /app/codex-home/auth.json ]; then chmod 600 /app/codex-home/auth.json; fi
                                  if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
                            - name: generate-preview-source
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsNonRoot: true
@@ -8228,7 +8242,7 @@ namespace Rosenvall.DevOps.Api
                                  cp "$workspace/result.json" /result/result.json
                          containers:
                            - name: publish-result
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsNonRoot: true
@@ -8318,13 +8332,49 @@ namespace Rosenvall.DevOps.Api
         {
             var jobName = PreviewSourceJobManifestRenderer.JobName(run, context);
             var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:PreviewSourceJobTimeoutSeconds", configuration.GetValue("Ai:Codex:ImplementationTimeoutSeconds", 600)));
-            await ReportTerminalAsync(onTerminalLine, "system", $"Queuing Kubernetes preview source job {jobName}.");
+            var runnerImage = configuration["Ai:Codex:KubernetesRunnerImage"];
+            await ReportTerminalAsync(onTerminalLine, "system", $"Checking Kubernetes preview source job {jobName}.");
 
-            await jobs.DeleteAsync(PreviewSourceJobManifestRenderer.RenderDelete(run, context), cancellationToken);
-            var apply = await jobs.ApplyAsync(PreviewSourceJobManifestRenderer.Render(run, context, model, reasoningEffort, CodexKubernetesRunner.SandboxMode(configuration)), cancellationToken);
-            if (!apply.Succeeded)
+            if (await TryReadResultAsync(run, onTerminalLine, cancellationToken) is { } existingFiles)
             {
-                throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(apply.Message, "submission")} No preview was deployed.");
+                return existingFiles;
+            }
+
+            var shouldCreateJob = true;
+            var existingJob = await jobs.GetOutputAsync($"get job {jobName} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+            if (existingJob.Succeeded)
+            {
+                using var document = JsonDocument.Parse(existingJob.Message);
+                var succeeded = StatusInt(document.RootElement, "succeeded");
+                var failed = StatusInt(document.RootElement, "failed");
+                if (succeeded > 0)
+                {
+                    await ReportTerminalAsync(onTerminalLine, "system", $"Preview source job {jobName} already completed. Reading existing result.");
+                    var result = await ReadRequiredResultAsync(run, cancellationToken);
+                    await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
+                    return result;
+                }
+
+                if (failed == 0)
+                {
+                    await ReportTerminalAsync(onTerminalLine, "system", $"Reattaching to running Kubernetes preview source job {jobName}.");
+                    shouldCreateJob = false;
+                }
+                else
+                {
+                    await ReportTerminalAsync(onTerminalLine, "system", $"Previous Kubernetes preview source job {jobName} failed. Replacing it.");
+                }
+            }
+
+            if (shouldCreateJob)
+            {
+                await ReportTerminalAsync(onTerminalLine, "system", $"Queuing Kubernetes preview source job {jobName}.");
+                await jobs.DeleteAsync(PreviewSourceJobManifestRenderer.RenderDelete(run, context), cancellationToken);
+                var apply = await jobs.ApplyAsync(PreviewSourceJobManifestRenderer.Render(run, context, model, reasoningEffort, CodexKubernetesRunner.SandboxMode(configuration), runnerImage), cancellationToken);
+                if (!apply.Succeeded)
+                {
+                    throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(apply.Message, "submission")} No preview was deployed.");
+                }
             }
 
             var startedAt = DateTimeOffset.UtcNow;
@@ -8351,14 +8401,9 @@ namespace Rosenvall.DevOps.Api
                     var failed = StatusInt(document.RootElement, "failed");
                     if (succeeded > 0)
                     {
-                        var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
-                        if (!result.Succeeded)
-                        {
-                            throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(result.Message, "result lookup")} No preview was deployed.");
-                        }
-
+                        var result = await ReadRequiredResultAsync(run, cancellationToken);
                         await ReportTerminalAsync(onTerminalLine, "system", "Codex source generation finished.");
-                        return PreviewSourceJobResultParser.ParseConfigMapJson(result.Message);
+                        return result;
                     }
 
                     if (failed > 0)
@@ -8374,6 +8419,29 @@ namespace Rosenvall.DevOps.Api
             }
 
             throw new AiPlanProviderUnavailableException($"Preview source job {jobName} timed out after {timeout.TotalSeconds:0} seconds; no preview was deployed.");
+        }
+
+        private async Task<IReadOnlyList<PreviewSourceFile>?> TryReadResultAsync(AiRun run, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
+        {
+            var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+            if (!result.Succeeded)
+            {
+                return null;
+            }
+
+            await ReportTerminalAsync(onTerminalLine, "system", "Found existing preview source result. Reusing it instead of starting Codex again.");
+            return PreviewSourceJobResultParser.ParseConfigMapJson(result.Message);
+        }
+
+        private async Task<IReadOnlyList<PreviewSourceFile>> ReadRequiredResultAsync(AiRun run, CancellationToken cancellationToken)
+        {
+            var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+            if (!result.Succeeded)
+            {
+                throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(result.Message, "result lookup")} No preview was deployed.");
+            }
+
+            return PreviewSourceJobResultParser.ParseConfigMapJson(result.Message);
         }
 
         private static string PreviewSourceJobFailureMessage(string? message, string operation)
@@ -8689,6 +8757,9 @@ namespace Rosenvall.DevOps.Api
     public sealed class DevOpsStore
     {
         private const string DocumentId = "default";
+        private const int PreviewTerminalTailLimit = 200;
+        private const int PreviewTerminalLineMaxChars = 1000;
+        private const int PreviewTerminalTotalMaxChars = PreviewTerminalTailLimit * PreviewTerminalLineMaxChars;
         private const int RepositoryRunTerminalTailLimit = 150;
         private const int RepositoryRunTerminalLineMaxChars = 1000;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web)
@@ -8727,6 +8798,10 @@ namespace Rosenvall.DevOps.Api
         private readonly List<BoardPublicAppDto> _boardPublicApps = [];
         private int _nextTaskNumber = 4821;
         private long? _lastSnapshotJsonBytes;
+        private string? _lastSnapshotHash;
+        private long _snapshotPersistWriteCount;
+        private long _snapshotPersistSkipCount;
+        private DateTimeOffset? _lastSnapshotPersistedAt;
 
         public DevOpsStore(IDbContextFactory<DevOpsStateDbContext> dbFactory)
         {
@@ -8796,6 +8871,39 @@ namespace Rosenvall.DevOps.Api
                 lock (_lock)
                 {
                     return _lastSnapshotJsonBytes;
+                }
+            }
+        }
+
+        public long SnapshotPersistWriteCount
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _snapshotPersistWriteCount;
+                }
+            }
+        }
+
+        public long SnapshotPersistSkipCount
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _snapshotPersistSkipCount;
+                }
+            }
+        }
+
+        public SnapshotStoreDiagnostics SnapshotDiagnostics
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return new SnapshotStoreDiagnostics(_lastSnapshotJsonBytes, _snapshotPersistWriteCount, _snapshotPersistSkipCount, _lastSnapshotPersistedAt);
                 }
             }
         }
@@ -9486,13 +9594,28 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
+                var changed = false;
                 foreach (var request in requests)
                 {
-                    _githubIntegrations.RemoveAll(integration => integration.InstallationId == request.InstallationId);
-                    _githubIntegrations.Add(CreateGitHubIntegrationDto(request));
+                    var candidate = CreateGitHubIntegrationDto(request);
+                    var index = _githubIntegrations.FindIndex(integration => integration.InstallationId == request.InstallationId);
+                    if (index < 0)
+                    {
+                        _githubIntegrations.Add(candidate);
+                        changed = true;
+                        continue;
+                    }
+
+                    var existing = _githubIntegrations[index];
+                    var updated = candidate with { Id = existing.Id, CreatedAt = existing.CreatedAt };
+                    if (!GitHubIntegrationEquivalent(existing, updated))
+                    {
+                        _githubIntegrations[index] = updated;
+                        changed = true;
+                    }
                 }
 
-                if (requests.Count > 0)
+                if (changed)
                 {
                     Persist();
                 }
@@ -9586,6 +9709,16 @@ namespace Rosenvall.DevOps.Api
                 Math.Max(0, request.RepositoriesCount),
                 NormalizeText(request.InstalledBy, "system"),
                 DateTimeOffset.UtcNow);
+
+        private static bool GitHubIntegrationEquivalent(GitHubIntegrationDto left, GitHubIntegrationDto right) =>
+            left.InstallationId == right.InstallationId &&
+            left.Id == right.Id &&
+            string.Equals(left.AccountLogin, right.AccountLogin, StringComparison.Ordinal) &&
+            string.Equals(left.AccountType, right.AccountType, StringComparison.Ordinal) &&
+            string.Equals(left.Status, right.Status, StringComparison.Ordinal) &&
+            left.RepositoriesCount == right.RepositoriesCount &&
+            string.Equals(left.InstalledBy, right.InstalledBy, StringComparison.Ordinal) &&
+            left.CreatedAt == right.CreatedAt;
 
         public IReadOnlyList<BoardSecretDto> GetBoardSecrets(Guid boardId)
         {
@@ -11044,10 +11177,12 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                var lines = (preview.TerminalLines ?? [])
-                    .Concat([new PreviewTerminalLineDto(createdAt ?? DateTimeOffset.UtcNow, NormalizeText(stream, "system"), RedactTerminalMessage(message.Trim()))])
-                    .TakeLast(200)
-                    .ToArray();
+                var lines = AppendPreviewTerminalLineTail(preview.TerminalLines, stream, message, createdAt ?? DateTimeOffset.UtcNow, out var changed);
+                if (!changed)
+                {
+                    return GetWorkItemDetail(workItemId);
+                }
+
                 _previews.Remove(preview);
                 _previews.Add(preview with { TerminalLines = lines });
                 Persist();
@@ -11153,10 +11288,7 @@ namespace Rosenvall.DevOps.Api
                 var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
                 if (preview is not null)
                 {
-                    var failedLines = (preview.TerminalLines ?? [])
-                        .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", message)])
-                        .TakeLast(200)
-                        .ToArray();
+                    var failedLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", message, DateTimeOffset.UtcNow, out _);
                     _previews.Remove(preview);
                     _previews.Add(preview with
                     {
@@ -11375,6 +11507,7 @@ namespace Rosenvall.DevOps.Api
                 var sanitizedFailureLog = string.IsNullOrWhiteSpace(health.FailureLog)
                     ? health.FailureLog
                     : RedactTerminalMessage(health.FailureLog);
+                var isRunning = string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase);
                 var updated = preview with
                 {
                     Status = health.Status,
@@ -11384,14 +11517,29 @@ namespace Rosenvall.DevOps.Api
                     PodName = health.PodName,
                     FailureReason = sanitizedFailureReason,
                     FailureLog = sanitizedFailureLog,
-                    ExpiresAt = string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase) ? DateTimeOffset.UtcNow.AddDays(7) : preview.ExpiresAt
+                    ExpiresAt = isRunning && !string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase)
+                        ? DateTimeOffset.UtcNow.AddDays(7)
+                        : preview.ExpiresAt
                 };
+                if (string.Equals(preview.Status, updated.Status, StringComparison.Ordinal) &&
+                    string.Equals(preview.Phase, updated.Phase, StringComparison.Ordinal) &&
+                    string.Equals(preview.Message, updated.Message, StringComparison.Ordinal) &&
+                    string.Equals(preview.PodName, updated.PodName, StringComparison.Ordinal) &&
+                    string.Equals(preview.FailureReason, updated.FailureReason, StringComparison.Ordinal) &&
+                    string.Equals(preview.FailureLog, updated.FailureLog, StringComparison.Ordinal) &&
+                    preview.ExpiresAt == updated.ExpiresAt)
+                {
+                    _previews.Add(preview);
+                    return GetWorkItemDetail(workItemId);
+                }
+
                 _previews.Add(updated);
-                if (string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase))
+                if (isRunning && !string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase))
                 {
                     AddPreviewEvent(item, updated, "Started", "health-check", sanitizedMessage);
                 }
-                else if (string.Equals(health.Status, "Failed", StringComparison.OrdinalIgnoreCase))
+                else if (string.Equals(health.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase))
                 {
                     AddPreviewEvent(item, updated, "HealthFailed", "health-check", sanitizedMessage);
                 }
@@ -11450,10 +11598,7 @@ namespace Rosenvall.DevOps.Api
 
                 _previews.Remove(preview);
                 var sanitizedMessage = RedactTerminalMessage(message);
-                var terminalLines = (preview.TerminalLines ?? [])
-                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", sanitizedMessage)])
-                    .TakeLast(200)
-                    .ToArray();
+                var terminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", sanitizedMessage, DateTimeOffset.UtcNow, out _);
                 var failed = preview with
                 {
                     Status = "Failed",
@@ -12922,6 +13067,32 @@ namespace Rosenvall.DevOps.Api
                 .ToArray();
         }
 
+        private static IReadOnlyList<PreviewTerminalLineDto> AppendPreviewTerminalLineTail(IReadOnlyList<PreviewTerminalLineDto>? existing, string stream, string message, DateTimeOffset createdAt, out bool changed)
+        {
+            var existingLines = existing ?? [];
+            var normalizedStream = NormalizeText(stream, "system");
+            var normalizedMessage = TruncateTerminalMessage(RedactTerminalMessage(message.Trim()));
+            if (existingLines.LastOrDefault() is { } last &&
+                string.Equals(last.Stream, normalizedStream, StringComparison.Ordinal) &&
+                string.Equals(last.Message, normalizedMessage, StringComparison.Ordinal))
+            {
+                changed = false;
+                return existingLines;
+            }
+
+            var lines = existingLines
+                .Concat([new PreviewTerminalLineDto(createdAt, normalizedStream, normalizedMessage)])
+                .TakeLast(PreviewTerminalTailLimit)
+                .ToList();
+            while (lines.Sum(line => line.Message.Length) > PreviewTerminalTotalMaxChars && lines.Count > 1)
+            {
+                lines.RemoveAt(0);
+            }
+
+            changed = true;
+            return lines.ToArray();
+        }
+
         private static string TruncateTerminalMessage(string message) =>
             message.Length <= RepositoryRunTerminalLineMaxChars
                 ? message
@@ -13152,10 +13323,7 @@ namespace Rosenvall.DevOps.Api
                     (preview.SourceFiles is { Count: > 0 } || preview.StaticHtml is not null))
                 {
                     var applyingRecoveryMessage = "API restarted while Kubernetes resources were being applied. Continuing preview readiness checks.";
-                    var applyingTerminalLines = (preview.TerminalLines ?? [])
-                        .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "system", applyingRecoveryMessage)])
-                        .TakeLast(200)
-                        .ToArray();
+                    var applyingTerminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "system", applyingRecoveryMessage, DateTimeOffset.UtcNow, out _);
                     _previews[index] = preview with
                     {
                         Status = "Provisioning",
@@ -13172,11 +13340,8 @@ namespace Rosenvall.DevOps.Api
 
                 if (IsPreviewImplementationAwaitingRecovery(preview))
                 {
-                    var message = "API restarted while Codex was generating preview source. Restarting preview implementation automatically.";
-                    var terminalLines = (preview.TerminalLines ?? [])
-                        .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "system", message)])
-                        .TakeLast(200)
-                        .ToArray();
+                    var message = "API restarted while Codex was generating preview source. Reattaching to the existing preview source job or result when possible.";
+                    var terminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "system", message, DateTimeOffset.UtcNow, out _);
                     var recoveredPreview = preview with
                     {
                         Status = "Implementing",
@@ -13199,10 +13364,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var failedMessage = "Preview implementation was interrupted before Kubernetes resources could be recovered. Retry the plan implementation to start a fresh Codex session.";
-                var failedTerminalLines = (preview.TerminalLines ?? [])
-                    .Concat([new PreviewTerminalLineDto(DateTimeOffset.UtcNow, "stderr", failedMessage)])
-                    .TakeLast(200)
-                    .ToArray();
+                var failedTerminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", failedMessage, DateTimeOffset.UtcNow, out _);
                 _previews[index] = preview with
                 {
                     Status = "Failed",
@@ -13343,6 +13505,8 @@ namespace Rosenvall.DevOps.Api
             }
 
             _lastSnapshotJsonBytes = Encoding.UTF8.GetByteCount(document.Json);
+            _lastSnapshotHash = ComputeSnapshotHash(document.Json);
+            _lastSnapshotPersistedAt = document.UpdatedAt;
             var snapshot = JsonSerializer.Deserialize<DevOpsSnapshot>(document.Json, SnapshotJsonOptions);
             if (snapshot is null)
             {
@@ -13606,22 +13770,37 @@ namespace Rosenvall.DevOps.Api
                 _githubUserAuthorizations.ToArray(),
                 _boardPublicApps.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
-            _lastSnapshotJsonBytes = Encoding.UTF8.GetByteCount(json);
+            var jsonBytes = Encoding.UTF8.GetByteCount(json);
+            var jsonHash = ComputeSnapshotHash(json);
+            _lastSnapshotJsonBytes = jsonBytes;
+            if (string.Equals(_lastSnapshotHash, jsonHash, StringComparison.Ordinal))
+            {
+                _snapshotPersistSkipCount++;
+                return;
+            }
 
             using var db = _dbFactory.CreateDbContext();
+            var now = DateTimeOffset.UtcNow;
             var document = db.Documents.SingleOrDefault(d => d.Id == DocumentId);
             if (document is null)
             {
-                db.Documents.Add(new DevOpsStateDocument { Id = DocumentId, Json = json, UpdatedAt = DateTimeOffset.UtcNow });
+                db.Documents.Add(new DevOpsStateDocument { Id = DocumentId, Json = json, UpdatedAt = now });
             }
             else
             {
                 document.Json = json;
-                document.UpdatedAt = DateTimeOffset.UtcNow;
+                document.UpdatedAt = now;
             }
 
             db.SaveChanges();
+            _lastSnapshotHash = jsonHash;
+            _lastSnapshotJsonBytes = jsonBytes;
+            _lastSnapshotPersistedAt = now;
+            _snapshotPersistWriteCount++;
         }
+
+        private static string ComputeSnapshotHash(string json) =>
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
     }
 
     internal sealed class BoardRecord(Guid id, Guid workspaceId, string name, IReadOnlyList<string> columns, Guid? repositoryId = null, string? publicHostname = null, string implementationWorkflow = "")

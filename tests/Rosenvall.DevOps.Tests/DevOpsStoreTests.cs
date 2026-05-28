@@ -2102,6 +2102,51 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitHub_integration_sync_is_noop_when_installation_payload_is_unchanged()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var request = new GitHubIntegrationCallbackRequest(12345, "carnufex", "User", "github-app", 7, "Installed");
+
+        store.UpsertGitHubIntegrations([request]);
+        var writesAfterFirstSync = store.SnapshotPersistWriteCount;
+        var first = store.GetGitHubIntegration(12345)!;
+
+        store.UpsertGitHubIntegrations([request]);
+        var second = store.GetGitHubIntegration(12345)!;
+
+        Assert.Equal(writesAfterFirstSync, store.SnapshotPersistWriteCount);
+        Assert.Equal(first.CreatedAt, second.CreatedAt);
+    }
+
+    [Fact]
+    public void Preview_terminal_lines_are_deduplicated_capped_and_truncated()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "preview logs", "Generate lots of preview output.", "Todo", "Medium", null));
+        store.BeginPreviewImplementation(item.Id, "codex");
+        var longLine = new string('x', 1500);
+        var first = store.AppendPreviewTerminalLine(item.Id, "agent", longLine)!;
+        var writesAfterFirstAppend = store.SnapshotPersistWriteCount;
+
+        var duplicate = store.AppendPreviewTerminalLine(item.Id, "agent", longLine)!;
+        for (var index = 0; index < 250; index++)
+        {
+            store.AppendPreviewTerminalLine(item.Id, "agent", $"line-{index:D3}-{longLine}");
+        }
+
+        var detail = store.GetWorkItemDetail(item.Id)!;
+
+        Assert.Equal(writesAfterFirstAppend, store.SnapshotPersistWriteCount - 250);
+        Assert.Equal(first.Preview!.TerminalLines!.Select(line => line.Message), duplicate.Preview!.TerminalLines!.Select(line => line.Message));
+        Assert.Equal(200, detail.Preview!.TerminalLines!.Count);
+        Assert.All(detail.Preview!.TerminalLines!, line => Assert.True(line.Message.Length <= 1000));
+        Assert.Contains(detail.Preview!.TerminalLines!, line => line.Message.StartsWith("line-249-", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Repository_run_terminal_tails_are_capped_and_long_lines_are_truncated()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -2825,6 +2870,42 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Preview_source_provider_reuses_existing_result_configmap_without_recreating_job()
+    {
+        var fakeKubectl = CreatePreviewSourceResultKubectl();
+        try
+        {
+            using var fixture = DevOpsStoreFixture.Create();
+            var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+            var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "build a clock page", "Todo", "Medium", null));
+            var run = fixture.Store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build the preview.")!;
+            run.Approve("crille");
+            var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Pipelines:KubectlPath"] = fakeKubectl.Path,
+                    ["Pipelines:KubeconfigPath"] = ""
+                })
+                .Build();
+            var jobs = new PipelineJobOrchestrator(configuration, NullLogger<PipelineJobOrchestrator>.Instance);
+            var provider = new KubernetesPreviewSourceProvider(jobs, configuration, NullLogger<KubernetesPreviewSourceProvider>.Instance);
+
+            var files = await provider.GenerateSourceAsync("gpt-5.4", "high", run, context, null, CancellationToken.None);
+
+            var commands = File.ReadAllText(fakeKubectl.ArgumentsPath);
+            Assert.Contains(files, file => file.Path == "src/App.tsx" && file.Content.Contains("Klocka", StringComparison.Ordinal));
+            Assert.Contains("get configmap", commands);
+            Assert.DoesNotContain("delete -f", commands);
+            Assert.DoesNotContain("apply -f", commands);
+        }
+        finally
+        {
+            fakeKubectl.Directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void Local_start_script_sets_preview_source_mode_from_kubeconfig_availability()
     {
         var script = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "start-local-demo.ps1"));
@@ -2868,6 +2949,30 @@ public sealed class DevOpsStoreTests
         Assert.Contains("Preview__KubeconfigPath: \"\"", configMap);
         Assert.Contains("Pipelines__KubeconfigPath: \"\"", configMap);
         Assert.Contains("Ai__Codex__KubernetesSandboxMode: danger-full-access", configMap);
+        Assert.Contains("Ai__Codex__KubernetesRunnerImage: ghcr.io/carnufex/rosenvall-devops-api@sha256:", configMap);
+        Assert.Contains("Ai__Codex__PreviewSourceApiMemoryMinHeadroomBytes: \"268435456\"", configMap);
+    }
+
+    [Fact]
+    public void Homelab_api_deployment_has_preview_generation_memory_buffer_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var deploymentPath = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "rosenvall-devops",
+            "api-deployment.yaml");
+        if (!File.Exists(deploymentPath))
+        {
+            return;
+        }
+
+        var deployment = File.ReadAllText(deploymentPath);
+
+        Assert.Contains("memory: 1Gi", deployment);
+        Assert.Contains("memory: 3Gi", deployment);
     }
 
     [Fact]
@@ -3171,8 +3276,8 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal("Implementing", restored.Preview?.Status);
         Assert.Null(restored.Preview?.FailureReason);
-        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("restarting", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("automatically", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("reattaching", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("existing preview source", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(restored.PreviewImplementationRunsAwaitingRecovery!, pending => pending.Id == run.Id);
     }
 
@@ -3182,7 +3287,7 @@ public sealed class DevOpsStoreTests
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
         var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
-        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "gÃ¶r en hemsida med en klocka och en knapp sÃ¥ att man kan vÃ¤xla mellan digital och analogt ur.", "Todo", "Medium", null));
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "build a clock page with a button that switches between digital and analog clock modes", "Todo", "Medium", null));
         var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement a Swedish clock page with a digital/analog toggle.")!;
         store.ApproveAiRun(run.Id, "crille");
         store.BeginPreviewImplementation(item.Id, "codex");
@@ -3192,7 +3297,7 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal("Implementing", restored.Preview?.Status);
         Assert.Null(restored.Preview?.FailureReason);
-        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("restarting", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("reattaching", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(restored.PreviewImplementationRunsAwaitingRecovery!, pending => pending.Id == run.Id);
     }
 
@@ -3694,7 +3799,7 @@ public sealed class DevOpsStoreTests
         run.Approve("crille");
         var context = fixture.Store.GetWorkItemDetail(item.Id)!;
 
-        var manifest = PreviewSourceJobManifestRenderer.Render(run, context, "gpt-5.4", "high");
+        var manifest = PreviewSourceJobManifestRenderer.Render(run, context, "gpt-5.4", "high", runnerImage: "ghcr.io/carnufex/rosenvall-devops-api@sha256:testdigest");
 
         Assert.Contains("kind: Job", manifest);
         Assert.Contains("namespace: rosenvall-devops", manifest);
@@ -3727,6 +3832,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("ROSENVALL_PREVIEW_SEED_B64", manifest);
         Assert.Contains("ROSENVALL_RESULT_CONFIGMAP", manifest);
         Assert.Contains("kubectl -n \"$ROSENVALL_RESULT_NAMESPACE\" create configmap \"$ROSENVALL_RESULT_CONFIGMAP\"", manifest);
+        Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:testdigest", manifest);
+        Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
     }
 
     [Fact]
@@ -4282,6 +4389,52 @@ exit 0
 echo %* > "{{argumentsPath}}"
 more > nul
 exit /b 0
+""");
+        return new FakeKubectl(directory, windowsScriptPath, argumentsPath);
+    }
+
+    private static FakeKubectl CreatePreviewSourceResultKubectl()
+    {
+        var directory = Directory.CreateTempSubdirectory("fake-preview-source-kubectl-");
+        var argumentsPath = Path.Combine(directory.FullName, "arguments.txt");
+        var resultPath = Path.Combine(directory.FullName, "result.json");
+        File.WriteAllText(resultPath, """
+            {
+              "data": {
+                "result.json": "{\"files\":[{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Klocka</main>; }\"}]}"
+              }
+            }
+            """);
+        if (!OperatingSystem.IsWindows())
+        {
+            var scriptPath = Path.Combine(directory.FullName, "kubectl");
+            File.WriteAllText(scriptPath, $$"""
+#!/usr/bin/env sh
+printf '%s\n' "$*" >> '{{argumentsPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}'
+case "$*" in
+  *"get configmap"*)
+    cat '{{resultPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}'
+    exit 0
+    ;;
+esac
+echo "unexpected kubectl command: $*" >&2
+exit 1
+""");
+            File.SetUnixFileMode(scriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return new FakeKubectl(directory, scriptPath, argumentsPath);
+        }
+
+        var windowsScriptPath = Path.Combine(directory.FullName, "kubectl.cmd");
+        File.WriteAllText(windowsScriptPath, $$"""
+@echo off
+echo %* >> "{{argumentsPath}}"
+echo %* | findstr /C:"get configmap" > nul
+if %errorlevel%==0 (
+  type "{{resultPath}}"
+  exit /b 0
+)
+echo unexpected kubectl command: %* 1>&2
+exit /b 1
 """);
         return new FakeKubectl(directory, windowsScriptPath, argumentsPath);
     }
