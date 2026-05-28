@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -24,6 +24,42 @@ test('github board exposes a direct repository link', () => {
 
   assert.equal(boardSyncLabel(board), 'GitOps board');
   assert.equal(boardRepositoryUrl(board), 'https://github.com/carnufex/Rosenvalls-Homelab');
+});
+
+test('public app link is shown only when board app is running', () => {
+  assert.equal(boardPublicAppUrl({
+    id: 'clock',
+    name: 'Demo Klocka',
+    publicHostname: 'demo-klocka.rosenvall.se',
+    publicApp: { status: 'Running', url: 'https://demo-klocka.rosenvall.se' }
+  }), 'https://demo-klocka.rosenvall.se');
+
+  assert.equal(boardPublicAppStatusLabel({
+    id: 'clock',
+    name: 'Demo Klocka',
+    publicHostname: 'demo-klocka.rosenvall.se',
+    publicApp: { status: 'Queued', url: 'https://demo-klocka.rosenvall.se' }
+  }), 'App deploying');
+
+  assert.equal(boardPublicAppStatusLabel({
+    id: 'clock',
+    name: 'Demo Klocka',
+    publicHostname: 'demo-klocka.rosenvall.se',
+    publicApp: { status: 'Failed', url: 'https://demo-klocka.rosenvall.se' }
+  }), 'App failed');
+
+  assert.equal(boardPublicAppUrl({
+    id: 'clock',
+    name: 'Demo Klocka',
+    publicHostname: 'demo-klocka.rosenvall.se',
+    publicApp: { status: 'Failed', url: 'https://demo-klocka.rosenvall.se' }
+  }), null);
+
+  assert.equal(boardPublicAppStatusLabel({
+    id: 'clock',
+    name: 'Demo Klocka',
+    publicHostname: 'demo-klocka.rosenvall.se'
+  }), 'App not deployed');
 });
 
 test('repo-less board can sync only when provider capability allows it', () => {
