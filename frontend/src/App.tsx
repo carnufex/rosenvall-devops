@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -216,12 +216,23 @@ type PreviewDto = {
   failureLog?: string | null;
   sourceFiles?: Array<{ key: string; path: string; content: string }> | null;
   terminalLines?: PreviewTerminalLineDto[] | null;
+  stepLogs?: PreviewStepLogDto[] | null;
 };
 
 type PreviewTerminalLineDto = {
   createdAt: string;
   stream: string;
   message: string;
+};
+
+type PreviewStepLogDto = {
+  key: string;
+  title?: string | null;
+  description?: string | null;
+  state?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  terminalLines?: PreviewTerminalLineDto[] | null;
 };
 
 type ImplementationRunDto = {
@@ -2046,6 +2057,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
       : hasRepositoryPr && detail.item.status === 'Done'
         ? 'Start repository cleanup'
         : 'Delete and clean up';
+  const activityComments = React.useMemo(() => dedupeGeneratedActivityComments(detail.comments), [detail.comments]);
 
   return (
     <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose}>
@@ -2069,8 +2081,8 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
           <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
           <section className="activity">
             <h2>Activity</h2>
-            {detail.comments.length === 0 && <EmptyState>No comments yet.</EmptyState>}
-            {detail.comments.map((entry) => (
+            {activityComments.length === 0 && <EmptyState>No comments yet.</EmptyState>}
+            {activityComments.map((entry) => (
               <ActivityEntry
                 actor={actor}
                 aiRuns={sortedPlans}
@@ -2131,7 +2143,6 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
               }
             }} canApproveForPr={canApprovePreviewForPr} onApproveForPr={() => actions.approvePreviewForPr(detail.item.id)} />
           )}
-          <PreviewHistoryPanel detail={detail} aiRuns={sortedPlans} />
         </aside>
       </div>
     </ModalFrame>
@@ -2442,7 +2453,16 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
   const canRetrySetup = failed && (failedDuringSourceGeneration || (preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml);
   const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : stopped ? 'Preview stopped' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
   const retryLabel = stopped ? 'Recreate preview' : failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
-  const steps = previewLifecycleSteps(preview);
+  const steps = React.useMemo(() => previewStepLogsForDisplay(preview), [preview]);
+  const preferredStepKey = React.useMemo(() => defaultPreviewStepKey(steps), [steps]);
+  const [selectedStepKey, setSelectedStepKey] = React.useState(preferredStepKey);
+  React.useEffect(() => {
+    const selectedStep = steps.find((step) => step.key === selectedStepKey);
+    if (!selectedStep || (selectedStep.state === 'pending' && selectedStepKey !== preferredStepKey)) {
+      setSelectedStepKey(preferredStepKey);
+    }
+  }, [preferredStepKey, selectedStepKey, steps]);
+  const selectedStep = steps.find((step) => step.key === selectedStepKey) ?? steps[0];
   const runtimeDiagnostic = previewRuntimeDiagnostic(preview);
   return (
     <section className="panel compact-panel preview-panel">
@@ -2456,9 +2476,15 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
       )}
       <ol className="preview-stepper" aria-label="Preview lifecycle">
         {steps.map((step, index) => (
-          <li className={`stepper-item ${step.state}`} key={step.key}>
-            <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
-            <span className="stepper-body"><strong>{step.title}</strong><span>{step.description}</span></span>
+          <li className={`stepper-item ${step.state} ${selectedStep?.key === step.key ? 'selected' : ''}`} key={step.key}>
+            <button className="stepper-button" type="button" onClick={() => setSelectedStepKey(step.key)} aria-pressed={selectedStep?.key === step.key}>
+              <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
+              <span className="stepper-body">
+                <strong>{step.title}</strong>
+                <span>{step.description}</span>
+                <span className="step-log-count">{step.logCount === 1 ? '1 log line' : `${step.logCount} log lines`}</span>
+              </span>
+            </button>
           </li>
         ))}
       </ol>
@@ -2467,7 +2493,7 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
       {runtimeDiagnostic && <p className="failure-reason">{runtimeDiagnostic}</p>}
       {preview.podName && <p className="namespace-note">Pod: <code>{preview.podName}</code></p>}
       {preview.lastCheckedAt && <p className="namespace-note">Last checked {relativeTime(preview.lastCheckedAt)}.</p>}
-      <PreviewTerminal lines={preview.terminalLines ?? []} active={isPreviewTerminalLive(status)} />
+      {selectedStep && <PreviewTerminal lines={selectedStep.terminalLines} active={isPreviewTerminalLive(status) && selectedStep.state === 'active'} title={selectedStep.title} />}
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
@@ -2496,73 +2522,7 @@ function previewRuntimeDiagnostic(preview: PreviewDto): string | null {
   return null;
 }
 
-type PreviewHistoryEntry = {
-  id: string;
-  createdAt: string;
-  label: string;
-  title: string;
-  detail?: string | null;
-};
-
-function PreviewHistoryPanel({ detail, aiRuns }: { detail: WorkItemDetail; aiRuns: AiRun[] }) {
-  const entries = React.useMemo<PreviewHistoryEntry[]>(() => {
-    const previewLines = detail.preview?.terminalLines ?? [];
-    return [
-      ...aiRuns.map((run) => ({
-        id: `run-${run.id}`,
-        createdAt: run.createdAt,
-        label: 'AI',
-        title: `Plan #${run.sequenceNumber} ${run.status}`,
-        detail: run.model
-      })),
-      ...(detail.previewEvents ?? []).map((event) => ({
-        id: `preview-${event.id}`,
-        createdAt: event.createdAt,
-        label: 'Preview',
-        title: event.eventType,
-        detail: event.message
-      })),
-      ...detail.comments
-        .filter((comment) => comment.author === 'Rosenvall AI' || comment.kind !== 'Comment')
-        .map((comment) => ({
-          id: `comment-${comment.id}`,
-          createdAt: comment.createdAt,
-          label: comment.kind,
-          title: comment.author,
-          detail: comment.body
-        })),
-      ...previewLines.slice(-4).map((line, index) => ({
-        id: `terminal-${line.createdAt}-${index}`,
-        createdAt: line.createdAt,
-        label: terminalStreamLabel(line.stream),
-        title: 'Implementation log',
-        detail: line.message
-      }))
-    ].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 10);
-  }, [aiRuns, detail.comments, detail.preview?.terminalLines, detail.previewEvents]);
-
-  if (entries.length === 0) return null;
-
-  return (
-    <section className="panel compact-panel preview-history-panel">
-      <PanelHeader icon={<History size={20} />} title="Preview history" />
-      <ol className="preview-history-list">
-        {entries.map((entry) => (
-          <li key={entry.id}>
-            <time>{relativeTime(entry.createdAt)}</time>
-            <div>
-              <strong>{entry.label}</strong>
-              <span>{entry.title}</span>
-              {entry.detail && <p>{compactHistoryText(entry.detail)}</p>}
-            </div>
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
-
-function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; active: boolean }) {
+function PreviewTerminal({ lines, active, title = 'Implementation log' }: { lines: PreviewTerminalLineDto[]; active: boolean; title?: string }) {
   const [expanded, setExpanded] = React.useState(false);
   const visibleLines = lines.slice(-160);
   const resetKey = lines[0] ? `${lines[0].createdAt}-${lines[0].message}` : 'empty';
@@ -2571,16 +2531,16 @@ function PreviewTerminal({ lines, active }: { lines: PreviewTerminalLineDto[]; a
     <>
       <div className="preview-terminal">
         <div className="terminal-head">
-          <span><SquareTerminal size={15} />Implementation log</span>
+          <span><SquareTerminal size={15} />{title}</span>
           <div className="terminal-actions">
             {active && <span className="terminal-live"><span className="spinner" />live</span>}
-            <button className="terminal-expand" type="button" onClick={() => setExpanded(true)} aria-label="Open larger implementation log"><Maximize2 size={14} />Expand</button>
+            <button className="terminal-expand" type="button" onClick={() => setExpanded(true)} aria-label={`Open larger ${title} log`}><Maximize2 size={14} />Expand</button>
           </div>
         </div>
         {terminalContent}
       </div>
       {expanded && (
-        <ModalFrame title="Implementation log" onClose={() => setExpanded(false)} size="wide">
+        <ModalFrame title={`${title} log`} onClose={() => setExpanded(false)} size="wide">
           <div className="terminal-modal-content">
             <div className="terminal-modal-meta">
               <span>{lines.length} log lines</span>
@@ -2632,10 +2592,6 @@ function TerminalLog({ lines, expanded = false, resetKey }: { lines: PreviewTerm
   );
 }
 
-function previewLifecycleSteps(preview: PreviewDto) {
-  return buildPreviewLifecycleSteps(preview.status, preview.failureReason);
-}
-
 function implementationRunSteps(status: string) {
   const steps = [
     ['Cloning', 'Clone repository', 'The runner checks out the linked repository and creates a task branch.'],
@@ -2673,11 +2629,6 @@ function terminalStreamLabel(stream: string) {
   if (normalized === 'stderr') return 'agent';
   if (normalized === 'stdout') return 'output';
   return normalized || 'system';
-}
-
-function compactHistoryText(value: string) {
-  const compacted = value.replace(/\s+/g, ' ').trim();
-  return compacted.length > 140 ? `${compacted.slice(0, 137).trimEnd()}...` : compacted;
 }
 
 function isPreviewPendingStatus(status?: string) {

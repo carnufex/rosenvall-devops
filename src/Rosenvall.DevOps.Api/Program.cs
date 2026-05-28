@@ -1927,7 +1927,8 @@ namespace Rosenvall.DevOps.Api
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
     public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null, BoardPlanningContextDto? BoardContext = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
-    public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
+    public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, IReadOnlyList<PreviewStepLogDto>? StepLogs = null);
+    public sealed record PreviewStepLogDto(string Key, string Title, string Description, string State, DateTimeOffset? StartedAt = null, DateTimeOffset? CompletedAt = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record BoardPublicAppDto(Guid BoardId, string Hostname, string Url, string Namespace, string ResourceName, string Status, Guid? SourceWorkItemId, Guid? SourcePreviewId, Guid? SourceImplementationRunId, string? SourcePullRequestUrl, string? SourceBranch, string? CommitSha, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastDeployedAt = null, string? FailureReason = null, string? Message = null);
     public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
     public sealed record PreviewEventDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string EventType, string? Namespace, string? Url, string Actor, string Message, DateTimeOffset CreatedAt);
@@ -3162,7 +3163,7 @@ namespace Rosenvall.DevOps.Api
                     context,
                     async line =>
                     {
-                        var updated = store.AppendPreviewTerminalLine(run.WorkItemId, line.Stream, line.Message, line.CreatedAt);
+                        var updated = store.AppendPreviewTerminalLine(run.WorkItemId, line.Stream, line.Message, line.CreatedAt, "source");
                         if (updated is not null)
                         {
                             await hub.Clients.All.SendAsync("previewChanged", updated.Preview, cancellationToken);
@@ -3170,7 +3171,7 @@ namespace Rosenvall.DevOps.Api
                     },
                     cancellationToken);
 
-                store.AppendPreviewTerminalLine(run.WorkItemId, "system", $"Codex generated {sourceFiles.Count} source files.");
+                store.AppendPreviewTerminalLine(run.WorkItemId, "system", $"Codex generated {sourceFiles.Count} source files.", stepKey: "source");
                 var implementation = store.CompletePreviewImplementation(run.WorkItemId, sourceFiles, "codex");
                 await hub.Clients.All.SendAsync("previewChanged", implementation?.Preview, cancellationToken);
 
@@ -3183,11 +3184,11 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 store.MarkPreviewApplying(run.WorkItemId, "Applying Kubernetes resources.");
-                store.AppendPreviewTerminalLine(run.WorkItemId, "system", "kubectl apply started.");
+                store.AppendPreviewTerminalLine(run.WorkItemId, "system", "kubectl apply started.", stepKey: "apply");
                 await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
 
                 var apply = await previews.ApplyAsync(manifest, cancellationToken);
-                store.AppendPreviewTerminalLine(run.WorkItemId, apply.Succeeded ? "system" : "stderr", apply.Message);
+                store.AppendPreviewTerminalLine(run.WorkItemId, apply.Succeeded ? "system" : "stderr", apply.Message, stepKey: "apply");
                 if (!apply.Succeeded)
                 {
                     store.RecordPreviewFailure(run.WorkItemId, "ApplyFailed", approvedBy, apply.Message);
@@ -3229,7 +3230,7 @@ namespace Rosenvall.DevOps.Api
                 await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
                 foreach (var run in store.GetPreviewImplementationRunsAwaitingRecovery())
                 {
-                    var detail = store.AppendPreviewTerminalLine(run.WorkItemId, "system", "Reattaching to existing Codex preview source job after API restart.");
+                    var detail = store.AppendPreviewTerminalLine(run.WorkItemId, "system", "Reattaching to existing Codex preview source job after API restart.", stepKey: "source");
                     await hub.Clients.All.SendAsync("previewChanged", detail?.Preview, stoppingToken);
                     await runner.RunAsync(run, run.ApprovedBy ?? "system", stoppingToken);
                 }
@@ -8762,6 +8763,17 @@ namespace Rosenvall.DevOps.Api
         private const int PreviewTerminalTotalMaxChars = PreviewTerminalTailLimit * PreviewTerminalLineMaxChars;
         private const int RepositoryRunTerminalTailLimit = 150;
         private const int RepositoryRunTerminalLineMaxChars = 1000;
+        private const string PreviewStepSource = "source";
+        private const string PreviewStepApply = "apply";
+        private const string PreviewStepReadiness = "readiness";
+        private const string PreviewStepRunning = "running";
+        private static readonly PreviewStepDefinition[] PreviewStepDefinitions =
+        [
+            new(PreviewStepSource, "Implementing preview source", "Codex generates the React/Tailwind files."),
+            new(PreviewStepApply, "Applying Kubernetes resources", "The API submits namespace, ConfigMap, Deployment, Service and route."),
+            new(PreviewStepReadiness, "Waiting for pod readiness", "Kubernetes starts the preview pod and health checks it."),
+            new(PreviewStepRunning, "Running", "The deployment is available and the demo link is enabled.")
+        ];
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web)
         {
             WriteIndented = false,
@@ -11142,6 +11154,11 @@ namespace Rosenvall.DevOps.Api
                 var resources = PreviewResourceSet.Create(item.Key, item.Title, LocalReactPreviewProject.Image);
                 var providerName = NormalizeText(implementationProvider, "codex");
                 var now = DateTimeOffset.UtcNow;
+                IReadOnlyList<PreviewTerminalLineDto> terminalLines =
+                [
+                    new PreviewTerminalLineDto(now, "system", $"Queued preview implementation for {item.Key}."),
+                    new PreviewTerminalLineDto(now, "system", $"Provider: {providerName}.")
+                ];
                 var preview = new PreviewDto(
                     Guid.NewGuid(),
                     item.Id,
@@ -11154,11 +11171,8 @@ namespace Rosenvall.DevOps.Api
                     resources.Name,
                     "Implementing preview source",
                     $"{providerName} is generating React/Tailwind preview source from the approved plan.",
-                    TerminalLines:
-                    [
-                        new PreviewTerminalLineDto(now, "system", $"Queued preview implementation for {item.Key}."),
-                        new PreviewTerminalLineDto(now, "system", $"Provider: {providerName}.")
-                    ]);
+                    TerminalLines: terminalLines,
+                    StepLogs: CreatePreviewStepLogs(PreviewStepSource, terminalLines, now));
                 _previews.RemoveAll(p => p.WorkItemId == item.Id);
                 _previews.Add(preview);
                 AddPreviewEvent(item, preview, "Implementing", providerName, $"Preview implementation started for {item.Key}.");
@@ -11167,7 +11181,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public WorkItemDetailDto? AppendPreviewTerminalLine(Guid workItemId, string stream, string message, DateTimeOffset? createdAt = null)
+        public WorkItemDetailDto? AppendPreviewTerminalLine(Guid workItemId, string stream, string message, DateTimeOffset? createdAt = null, string? stepKey = null)
         {
             lock (_lock)
             {
@@ -11177,14 +11191,16 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                var lines = AppendPreviewTerminalLineTail(preview.TerminalLines, stream, message, createdAt ?? DateTimeOffset.UtcNow, out var changed);
-                if (!changed)
+                var created = createdAt ?? DateTimeOffset.UtcNow;
+                var lines = AppendPreviewTerminalLineTail(preview.TerminalLines, stream, message, created, out var globalChanged);
+                var stepLogs = AppendPreviewStepTerminalLine(preview.StepLogs, stepKey ?? PreviewStepForStatus(preview.Status, preview.FailureReason), stream, message, created, out var stepChanged);
+                if (!globalChanged && !stepChanged)
                 {
                     return GetWorkItemDetail(workItemId);
                 }
 
                 _previews.Remove(preview);
-                _previews.Add(preview with { TerminalLines = lines });
+                _previews.Add(preview with { TerminalLines = lines, StepLogs = stepLogs });
                 Persist();
                 return GetWorkItemDetail(workItemId);
             }
@@ -11211,7 +11227,7 @@ namespace Rosenvall.DevOps.Api
                 item.Status = "Review";
 
                 var existingPreview = _previews.SingleOrDefault(p => p.WorkItemId == item.Id);
-                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Implementing", DateTimeOffset.UtcNow.AddDays(7), null, resources.Namespace, resources.Name, "Implementing preview source", "Generating local React/Tailwind source from the card context.", SourceFiles: sourceFiles, TerminalLines: existingPreview?.TerminalLines);
+                var preview = new PreviewDto(Guid.NewGuid(), item.Id, $"https://{resources.Hostname}", resources.Image, "Implementing", DateTimeOffset.UtcNow.AddDays(7), null, resources.Namespace, resources.Name, "Implementing preview source", "Generating local React/Tailwind source from the card context.", SourceFiles: sourceFiles, TerminalLines: existingPreview?.TerminalLines, StepLogs: SetPreviewStepProgress(existingPreview?.StepLogs, PreviewStepApply, DateTimeOffset.UtcNow));
                 _previews.RemoveAll(p => p.WorkItemId == item.Id);
                 _previews.Add(preview);
                 AddPreviewEvent(item, preview, "Created", "system", $"Preview created for {item.Key}.");
@@ -11261,7 +11277,8 @@ namespace Rosenvall.DevOps.Api
                     "Implementing preview source",
                     $"{providerName} generated React/Tailwind preview source from the approved plan.",
                     SourceFiles: sourceFiles,
-                    TerminalLines: existingPreview?.TerminalLines);
+                    TerminalLines: existingPreview?.TerminalLines,
+                    StepLogs: SetPreviewStepProgress(existingPreview?.StepLogs, PreviewStepApply, DateTimeOffset.UtcNow));
                 _previews.RemoveAll(p => p.WorkItemId == item.Id);
                 _previews.Add(preview);
                 AddPreviewEvent(item, preview, "Created", providerName, $"Preview source generated for {item.Key}.");
@@ -11288,7 +11305,15 @@ namespace Rosenvall.DevOps.Api
                 var preview = _previews.SingleOrDefault(p => p.WorkItemId == workItemId);
                 if (preview is not null)
                 {
-                    var failedLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", message, DateTimeOffset.UtcNow, out _);
+                    var now = DateTimeOffset.UtcNow;
+                    var failedLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", message, now, out _);
+                    var failedStepLogs = AppendPreviewStepTerminalLine(
+                        SetPreviewStepFailed(preview.StepLogs, PreviewStepForFailure("ImplementationFailed"), now),
+                        PreviewStepForFailure("ImplementationFailed"),
+                        "stderr",
+                        message,
+                        now,
+                        out _);
                     _previews.Remove(preview);
                     _previews.Add(preview with
                     {
@@ -11298,7 +11323,8 @@ namespace Rosenvall.DevOps.Api
                         LastCheckedAt = DateTimeOffset.UtcNow,
                         FailureReason = "ImplementationFailed",
                         FailureLog = message,
-                        TerminalLines = failedLines
+                        TerminalLines = failedLines,
+                        StepLogs = failedStepLogs
                     });
                     AddPreviewEvent(item, preview, "ImplementationFailed", actor, message);
                 }
@@ -11444,12 +11470,14 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _previews.Remove(preview);
+                var now = DateTimeOffset.UtcNow;
                 var applying = preview with
                 {
                     Status = "Applying",
                     Phase = "Applying Kubernetes resources",
                     Message = NormalizeText(message, "Applying Kubernetes resources."),
-                    LastCheckedAt = DateTimeOffset.UtcNow
+                    LastCheckedAt = now,
+                    StepLogs = SetPreviewStepProgress(preview.StepLogs, PreviewStepApply, now)
                 };
                 _previews.Add(applying);
                 AddPreviewEvent(item, applying, "Applying", "system", applying.Message ?? "Applying Kubernetes resources.");
@@ -11470,14 +11498,23 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 _previews.Remove(preview);
+                var now = DateTimeOffset.UtcNow;
+                var normalizedMessage = NormalizeText(message, "Kubernetes resources applied. Waiting for preview pod to become ready.");
                 var provisioning = preview with
                 {
                     Status = "Provisioning",
                     Phase = "Waiting for pod readiness.",
-                    Message = NormalizeText(message, "Kubernetes resources applied. Waiting for preview pod to become ready."),
-                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    Message = normalizedMessage,
+                    LastCheckedAt = now,
                     FailureReason = null,
-                    FailureLog = null
+                    FailureLog = null,
+                    StepLogs = AppendPreviewStepTerminalLine(
+                        SetPreviewStepProgress(preview.StepLogs, PreviewStepReadiness, now),
+                        PreviewStepReadiness,
+                        "system",
+                        normalizedMessage,
+                        now,
+                        out _)
                 };
                 _previews.Add(provisioning);
                 AddPreviewEvent(item, provisioning, "Provisioning", "system", provisioning.Message ?? "Waiting for preview pod readiness.");
@@ -11507,19 +11544,37 @@ namespace Rosenvall.DevOps.Api
                 var sanitizedFailureLog = string.IsNullOrWhiteSpace(health.FailureLog)
                     ? health.FailureLog
                     : RedactTerminalMessage(health.FailureLog);
+                var now = DateTimeOffset.UtcNow;
                 var isRunning = string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase);
+                var isFailed = string.Equals(health.Status, "Failed", StringComparison.OrdinalIgnoreCase);
+                var stepKey = isRunning
+                    ? PreviewStepRunning
+                    : isFailed
+                        ? PreviewStepForFailure(sanitizedFailureReason ?? health.Phase)
+                        : PreviewStepReadiness;
+                var stepLogs = isRunning
+                    ? SetPreviewStepsDone(preview.StepLogs, now)
+                    : isFailed
+                        ? SetPreviewStepFailed(preview.StepLogs, stepKey, now)
+                        : SetPreviewStepProgress(preview.StepLogs, PreviewStepReadiness, now);
+                if (!string.IsNullOrWhiteSpace(sanitizedMessage))
+                {
+                    stepLogs = AppendPreviewStepTerminalLine(stepLogs, stepKey, isFailed ? "stderr" : "system", sanitizedMessage, now, out _);
+                }
+
                 var updated = preview with
                 {
                     Status = health.Status,
                     Phase = health.Phase,
                     Message = sanitizedMessage,
-                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    LastCheckedAt = now,
                     PodName = health.PodName,
                     FailureReason = sanitizedFailureReason,
                     FailureLog = sanitizedFailureLog,
                     ExpiresAt = isRunning && !string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase)
-                        ? DateTimeOffset.UtcNow.AddDays(7)
-                        : preview.ExpiresAt
+                        ? now.AddDays(7)
+                        : preview.ExpiresAt,
+                    StepLogs = stepLogs
                 };
                 if (string.Equals(preview.Status, updated.Status, StringComparison.Ordinal) &&
                     string.Equals(preview.Phase, updated.Phase, StringComparison.Ordinal) &&
@@ -11527,7 +11582,8 @@ namespace Rosenvall.DevOps.Api
                     string.Equals(preview.PodName, updated.PodName, StringComparison.Ordinal) &&
                     string.Equals(preview.FailureReason, updated.FailureReason, StringComparison.Ordinal) &&
                     string.Equals(preview.FailureLog, updated.FailureLog, StringComparison.Ordinal) &&
-                    preview.ExpiresAt == updated.ExpiresAt)
+                    preview.ExpiresAt == updated.ExpiresAt &&
+                    PreviewStepLogsEquivalent(preview.StepLogs, updated.StepLogs))
                 {
                     _previews.Add(preview);
                     return GetWorkItemDetail(workItemId);
@@ -11598,16 +11654,26 @@ namespace Rosenvall.DevOps.Api
 
                 _previews.Remove(preview);
                 var sanitizedMessage = RedactTerminalMessage(message);
-                var terminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", sanitizedMessage, DateTimeOffset.UtcNow, out _);
+                var now = DateTimeOffset.UtcNow;
+                var stepKey = PreviewStepForFailure(eventType);
+                var terminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", sanitizedMessage, now, out _);
+                var stepLogs = AppendPreviewStepTerminalLine(
+                    SetPreviewStepFailed(preview.StepLogs, stepKey, now),
+                    stepKey,
+                    "stderr",
+                    sanitizedMessage,
+                    now,
+                    out _);
                 var failed = preview with
                 {
                     Status = "Failed",
                     Phase = "Failed",
                     Message = sanitizedMessage,
-                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    LastCheckedAt = now,
                     FailureReason = eventType,
                     FailureLog = null,
-                    TerminalLines = terminalLines
+                    TerminalLines = terminalLines,
+                    StepLogs = stepLogs
                 };
                 _previews.Add(failed);
                 AddPreviewEvent(item, failed, eventType, actor, sanitizedMessage);
@@ -13093,6 +13159,255 @@ namespace Rosenvall.DevOps.Api
             return lines.ToArray();
         }
 
+        private static IReadOnlyList<PreviewStepLogDto> CreatePreviewStepLogs(string activeStepKey, IReadOnlyList<PreviewTerminalLineDto>? sourceLines = null, DateTimeOffset? now = null)
+        {
+            var createdAt = now ?? DateTimeOffset.UtcNow;
+            var activeKey = NormalizePreviewStepKey(activeStepKey);
+            return PreviewStepDefinitions
+                .Select(definition => new PreviewStepLogDto(
+                    definition.Key,
+                    definition.Title,
+                    definition.Description,
+                    string.Equals(definition.Key, activeKey, StringComparison.Ordinal) ? "active" : "pending",
+                    string.Equals(definition.Key, activeKey, StringComparison.Ordinal) ? createdAt : null,
+                    null,
+                    string.Equals(definition.Key, PreviewStepSource, StringComparison.Ordinal) ? sourceLines ?? [] : []))
+                .ToArray();
+        }
+
+        private static IReadOnlyList<PreviewStepLogDto> EnsurePreviewStepLogs(IReadOnlyList<PreviewStepLogDto>? existing)
+        {
+            var byKey = (existing ?? []).ToDictionary(step => NormalizePreviewStepKey(step.Key), step => step, StringComparer.Ordinal);
+            return PreviewStepDefinitions
+                .Select(definition => byKey.TryGetValue(definition.Key, out var step)
+                    ? step with
+                    {
+                        Key = definition.Key,
+                        Title = string.IsNullOrWhiteSpace(step.Title) ? definition.Title : step.Title,
+                        Description = string.IsNullOrWhiteSpace(step.Description) ? definition.Description : step.Description,
+                        State = string.IsNullOrWhiteSpace(step.State) ? "pending" : step.State,
+                        TerminalLines = step.TerminalLines ?? []
+                    }
+                    : new PreviewStepLogDto(definition.Key, definition.Title, definition.Description, "pending", TerminalLines: []))
+                .ToArray();
+        }
+
+        private static IReadOnlyList<PreviewStepLogDto> SetPreviewStepProgress(IReadOnlyList<PreviewStepLogDto>? existing, string activeStepKey, DateTimeOffset now)
+        {
+            var activeKey = NormalizePreviewStepKey(activeStepKey);
+            var activeIndex = Array.FindIndex(PreviewStepDefinitions, definition => string.Equals(definition.Key, activeKey, StringComparison.Ordinal));
+            if (activeIndex < 0)
+            {
+                activeIndex = 0;
+                activeKey = PreviewStepSource;
+            }
+
+            return EnsurePreviewStepLogs(existing)
+                .Select((step, index) => step with
+                {
+                    State = index < activeIndex ? "done" : string.Equals(step.Key, activeKey, StringComparison.Ordinal) ? "active" : "pending",
+                    StartedAt = index <= activeIndex ? step.StartedAt ?? now : step.StartedAt,
+                    CompletedAt = index < activeIndex ? step.CompletedAt ?? now : step.CompletedAt
+                })
+                .ToArray();
+        }
+
+        private static IReadOnlyList<PreviewStepLogDto> SetPreviewStepsDone(IReadOnlyList<PreviewStepLogDto>? existing, DateTimeOffset now) =>
+            EnsurePreviewStepLogs(existing)
+                .Select(step => step with
+                {
+                    State = "done",
+                    StartedAt = step.StartedAt ?? now,
+                    CompletedAt = step.CompletedAt ?? now
+                })
+                .ToArray();
+
+        private static IReadOnlyList<PreviewStepLogDto> SetPreviewStepFailed(IReadOnlyList<PreviewStepLogDto>? existing, string failedStepKey, DateTimeOffset now)
+        {
+            var failedKey = NormalizePreviewStepKey(failedStepKey);
+            var failedIndex = Array.FindIndex(PreviewStepDefinitions, definition => string.Equals(definition.Key, failedKey, StringComparison.Ordinal));
+            if (failedIndex < 0)
+            {
+                failedIndex = 0;
+                failedKey = PreviewStepSource;
+            }
+
+            return EnsurePreviewStepLogs(existing)
+                .Select((step, index) => step with
+                {
+                    State = index < failedIndex ? "done" : string.Equals(step.Key, failedKey, StringComparison.Ordinal) ? "failed" : "pending",
+                    StartedAt = index <= failedIndex ? step.StartedAt ?? now : step.StartedAt,
+                    CompletedAt = index <= failedIndex ? step.CompletedAt ?? now : step.CompletedAt
+                })
+                .ToArray();
+        }
+
+        private static IReadOnlyList<PreviewStepLogDto> AppendPreviewStepTerminalLine(IReadOnlyList<PreviewStepLogDto>? existing, string? stepKey, string stream, string message, DateTimeOffset createdAt, out bool changed)
+        {
+            var normalizedStepKey = NormalizePreviewStepKey(stepKey);
+            var anyChanged = false;
+            var steps = EnsurePreviewStepLogs(existing)
+                .Select(step =>
+                {
+                    if (!string.Equals(step.Key, normalizedStepKey, StringComparison.Ordinal))
+                    {
+                        return step;
+                    }
+
+                    var lines = AppendPreviewTerminalLineTail(step.TerminalLines, stream, message, createdAt, out var stepChanged);
+                    anyChanged |= stepChanged;
+                    return step with
+                    {
+                        StartedAt = step.StartedAt ?? createdAt,
+                        TerminalLines = lines
+                    };
+                })
+                .ToArray();
+            changed = anyChanged;
+            return steps;
+        }
+
+        private static string NormalizePreviewStepKey(string? key)
+        {
+            var normalized = NormalizeText(key, PreviewStepSource).ToLowerInvariant();
+            return PreviewStepDefinitions.Any(definition => string.Equals(definition.Key, normalized, StringComparison.Ordinal))
+                ? normalized
+                : PreviewStepSource;
+        }
+
+        private static string PreviewStepForStatus(string? status, string? failureReason = null)
+        {
+            if (string.Equals(status, "Applying", StringComparison.OrdinalIgnoreCase))
+            {
+                return PreviewStepApply;
+            }
+
+            if (string.Equals(status, "Provisioning", StringComparison.OrdinalIgnoreCase))
+            {
+                return PreviewStepReadiness;
+            }
+
+            if (string.Equals(status, "Running", StringComparison.OrdinalIgnoreCase))
+            {
+                return PreviewStepRunning;
+            }
+
+            if (string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                return PreviewStepForFailure(failureReason);
+            }
+
+            return PreviewStepSource;
+        }
+
+        private static string PreviewStepForFailure(string? failureReason)
+        {
+            var normalized = NormalizeText(failureReason, "").ToLowerInvariant();
+            if (normalized.Contains("apply", StringComparison.Ordinal) ||
+                normalized.Contains("manifest", StringComparison.Ordinal) ||
+                normalized.Contains("cleanup", StringComparison.Ordinal) ||
+                normalized.Contains("networkpolicy", StringComparison.Ordinal))
+            {
+                return PreviewStepApply;
+            }
+
+            if (normalized.Contains("health", StringComparison.Ordinal) ||
+                normalized.Contains("timeout", StringComparison.Ordinal) ||
+                normalized.Contains("pod", StringComparison.Ordinal) ||
+                normalized.Contains("readiness", StringComparison.Ordinal))
+            {
+                return PreviewStepReadiness;
+            }
+
+            return PreviewStepSource;
+        }
+
+        private static PreviewDto BackfillPreviewStepLogs(PreviewDto preview)
+        {
+            if (preview.StepLogs is { Count: > 0 })
+            {
+                return preview with { StepLogs = EnsurePreviewStepLogs(preview.StepLogs) };
+            }
+
+            var stepLogs = SetPreviewStepProgress(null, PreviewStepForStatus(preview.Status, preview.FailureReason), preview.LastCheckedAt ?? DateTimeOffset.UtcNow);
+            if (string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase))
+            {
+                stepLogs = SetPreviewStepsDone(stepLogs, preview.LastCheckedAt ?? DateTimeOffset.UtcNow);
+            }
+            else if (string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                stepLogs = SetPreviewStepFailed(stepLogs, PreviewStepForFailure(preview.FailureReason), preview.LastCheckedAt ?? DateTimeOffset.UtcNow);
+            }
+
+            if (preview.TerminalLines is { Count: > 0 })
+            {
+                var legacyAt = preview.TerminalLines.First().CreatedAt;
+                stepLogs = AppendPreviewStepTerminalLine(stepLogs, PreviewStepSource, "system", "Legacy combined log. Older preview attempts stored one shared terminal tail.", legacyAt, out _);
+                foreach (var line in preview.TerminalLines)
+                {
+                    stepLogs = AppendPreviewStepTerminalLine(stepLogs, PreviewStepForLegacyLine(line), line.Stream, line.Message, line.CreatedAt, out _);
+                }
+            }
+
+            return preview with { StepLogs = stepLogs };
+        }
+
+        private static string PreviewStepForLegacyLine(PreviewTerminalLineDto line)
+        {
+            var message = line.Message.ToLowerInvariant();
+            if (message.Contains("deployment is available", StringComparison.Ordinal) ||
+                message.Contains("demo link is enabled", StringComparison.Ordinal))
+            {
+                return PreviewStepRunning;
+            }
+
+            if (message.Contains("pod", StringComparison.Ordinal) ||
+                message.Contains("health", StringComparison.Ordinal) ||
+                message.Contains("ready", StringComparison.Ordinal) ||
+                message.Contains("readiness", StringComparison.Ordinal) ||
+                message.Contains("waiting", StringComparison.Ordinal) ||
+                message.Contains("timeout", StringComparison.Ordinal))
+            {
+                return PreviewStepReadiness;
+            }
+
+            if (message.Contains("kubectl", StringComparison.Ordinal) ||
+                message.Contains("apply", StringComparison.Ordinal) ||
+                message.Contains("namespace/", StringComparison.Ordinal) ||
+                message.Contains("configmap/", StringComparison.Ordinal) ||
+                message.Contains("deployment/", StringComparison.Ordinal) ||
+                message.Contains("service/", StringComparison.Ordinal) ||
+                message.Contains("httproute", StringComparison.Ordinal) ||
+                message.Contains("networkpolicy", StringComparison.Ordinal))
+            {
+                return PreviewStepApply;
+            }
+
+            return PreviewStepSource;
+        }
+
+        private static bool PreviewStepLogsEquivalent(IReadOnlyList<PreviewStepLogDto>? left, IReadOnlyList<PreviewStepLogDto>? right)
+        {
+            var leftSteps = EnsurePreviewStepLogs(left);
+            var rightSteps = EnsurePreviewStepLogs(right);
+            if (leftSteps.Count != rightSteps.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < leftSteps.Count; index++)
+            {
+                if (!string.Equals(leftSteps[index].Key, rightSteps[index].Key, StringComparison.Ordinal) ||
+                    !string.Equals(leftSteps[index].State, rightSteps[index].State, StringComparison.Ordinal) ||
+                    !TerminalLinesEquivalent(leftSteps[index].TerminalLines, rightSteps[index].TerminalLines))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private static string TruncateTerminalMessage(string message) =>
             message.Length <= RepositoryRunTerminalLineMaxChars
                 ? message
@@ -13118,6 +13433,8 @@ namespace Rosenvall.DevOps.Api
 
             return true;
         }
+
+        private sealed record PreviewStepDefinition(string Key, string Title, string Description);
 
         private static void EnsureEditableHumanComment(CommentDto comment, string actor)
         {
@@ -13323,16 +13640,25 @@ namespace Rosenvall.DevOps.Api
                     (preview.SourceFiles is { Count: > 0 } || preview.StaticHtml is not null))
                 {
                     var applyingRecoveryMessage = "API restarted while Kubernetes resources were being applied. Continuing preview readiness checks.";
-                    var applyingTerminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "system", applyingRecoveryMessage, DateTimeOffset.UtcNow, out _);
+                    var now = DateTimeOffset.UtcNow;
+                    var applyingTerminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "system", applyingRecoveryMessage, now, out _);
+                    var stepLogs = AppendPreviewStepTerminalLine(
+                        SetPreviewStepProgress(preview.StepLogs, PreviewStepReadiness, now),
+                        PreviewStepReadiness,
+                        "system",
+                        applyingRecoveryMessage,
+                        now,
+                        out _);
                     _previews[index] = preview with
                     {
                         Status = "Provisioning",
                         Phase = "Waiting for pod readiness.",
                         Message = applyingRecoveryMessage,
-                        LastCheckedAt = DateTimeOffset.UtcNow,
+                        LastCheckedAt = now,
                         FailureReason = null,
                         FailureLog = null,
-                        TerminalLines = applyingTerminalLines
+                        TerminalLines = applyingTerminalLines,
+                        StepLogs = stepLogs
                     };
                     recovered = true;
                     continue;
@@ -13341,16 +13667,25 @@ namespace Rosenvall.DevOps.Api
                 if (IsPreviewImplementationAwaitingRecovery(preview))
                 {
                     var message = "API restarted while Codex was generating preview source. Reattaching to the existing preview source job or result when possible.";
-                    var terminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "system", message, DateTimeOffset.UtcNow, out _);
+                    var now = DateTimeOffset.UtcNow;
+                    var terminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "system", message, now, out _);
+                    var stepLogs = AppendPreviewStepTerminalLine(
+                        SetPreviewStepProgress(preview.StepLogs, PreviewStepSource, now),
+                        PreviewStepSource,
+                        "system",
+                        message,
+                        now,
+                        out _);
                     var recoveredPreview = preview with
                     {
                         Status = "Implementing",
                         Phase = "Restarting preview source",
                         Message = message,
-                        LastCheckedAt = DateTimeOffset.UtcNow,
+                        LastCheckedAt = now,
                         FailureReason = null,
                         FailureLog = null,
-                        TerminalLines = terminalLines
+                        TerminalLines = terminalLines,
+                        StepLogs = stepLogs
                     };
                     _previews[index] = recoveredPreview;
                     var item = _items.SingleOrDefault(i => i.Id == preview.WorkItemId);
@@ -13364,16 +13699,25 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var failedMessage = "Preview implementation was interrupted before Kubernetes resources could be recovered. Retry the plan implementation to start a fresh Codex session.";
-                var failedTerminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", failedMessage, DateTimeOffset.UtcNow, out _);
+                var failedAt = DateTimeOffset.UtcNow;
+                var failedTerminalLines = AppendPreviewTerminalLineTail(preview.TerminalLines, "stderr", failedMessage, failedAt, out _);
+                var failedStepLogs = AppendPreviewStepTerminalLine(
+                    SetPreviewStepFailed(preview.StepLogs, PreviewStepSource, failedAt),
+                    PreviewStepSource,
+                    "stderr",
+                    failedMessage,
+                    failedAt,
+                    out _);
                 _previews[index] = preview with
                 {
                     Status = "Failed",
                     Phase = "Failed",
                     Message = failedMessage,
-                    LastCheckedAt = DateTimeOffset.UtcNow,
+                    LastCheckedAt = failedAt,
                     FailureReason = "ServerRestart",
                     FailureLog = failedMessage,
-                    TerminalLines = failedTerminalLines
+                    TerminalLines = failedTerminalLines,
+                    StepLogs = failedStepLogs
                 };
                 recovered = true;
             }
@@ -13495,6 +13839,29 @@ namespace Rosenvall.DevOps.Api
             AddTimelineEvent(board.Id, repository.Id, task.Id, "Commit", task.Key, "Sample auth-service history imported.", "seed", null, DateTimeOffset.UtcNow.AddHours(-3));
         }
 
+        private void DeduplicateGeneratedRosenvallAiResultComments()
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var deduped = _comments
+                .OrderBy(comment => comment.CreatedAt)
+                .Where(comment =>
+                {
+                    if (!string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(comment.Kind, "Result", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    var key = $"{comment.WorkItemId:N}\n{comment.Author}\n{comment.Kind}\n{comment.Body}";
+                    return seen.Add(key);
+                })
+                .OrderBy(comment => comment.CreatedAt)
+                .ToArray();
+
+            _comments.Clear();
+            _comments.AddRange(deduped);
+        }
+
         private bool TryLoad()
         {
             using var db = _dbFactory.CreateDbContext();
@@ -13522,6 +13889,7 @@ namespace Rosenvall.DevOps.Api
                 PullRequestUrl = item.PullRequestUrl
             }));
             _comments.AddRange(snapshot.Comments);
+            DeduplicateGeneratedRosenvallAiResultComments();
             _aiRuns.AddRange(snapshot.AiRuns
                 .GroupBy(run => run.WorkItemId)
                 .SelectMany(group => group.Select((run, index) =>
@@ -13536,7 +13904,7 @@ namespace Rosenvall.DevOps.Api
                         run.SequenceNumber > 0 ? run.SequenceNumber : index + 1,
                     run.CreatedAt ?? DateTimeOffset.UtcNow.AddTicks(index),
                     run.ReasoningEffort))));
-            _previews.AddRange(snapshot.Previews.Select(preview => preview with { Status = NormalizePreviewStatus(preview.Status) }));
+            _previews.AddRange(snapshot.Previews.Select(preview => BackfillPreviewStepLogs(preview with { Status = NormalizePreviewStatus(preview.Status) })));
             _boardPublicApps.AddRange(snapshot.BoardPublicApps ?? []);
             _development.AddRange(snapshot.Development.Select(development => new DevelopmentDtoRecord(development.WorkItemId, development.Development)));
             _previewEvents.AddRange(snapshot.PreviewEvents ?? []);

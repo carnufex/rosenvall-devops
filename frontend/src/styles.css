@@ -262,12 +262,17 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .cleanup-adopt-form.compact { border-top: 1px solid var(--line); margin-top: 10px; padding: 14px 16px 0; }
 .implementation-banner span { display: inline-flex; align-items: center; gap: 8px; }
 .preview-stepper { margin: 16px; padding: 0; list-style: none; display: grid; gap: 0; }
-.stepper-item { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; padding: 0 0 16px; color: var(--muted); }
+.stepper-item { position: relative; padding: 0 0 16px; color: var(--muted); }
 .stepper-item:not(:last-child)::after { content: ""; position: absolute; left: 12px; top: 28px; bottom: 2px; width: 1px; background: var(--line); }
+.stepper-button { appearance: none; border: 0; background: transparent; color: inherit; padding: 0; width: 100%; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; text-align: left; cursor: pointer; }
+.stepper-button:focus-visible .stepper-body { outline: 2px solid var(--focus); outline-offset: 2px; }
+.stepper-button:hover .stepper-body { border-color: rgba(148, 163, 184, 0.55); }
 .stepper-marker { width: 25px; height: 25px; border: 1px solid var(--line); background: #101112; color: var(--muted); border-radius: 999px; display: grid; place-items: center; font-size: 12px; font-weight: 800; z-index: 1; }
 .stepper-body { border: 1px solid var(--line); background: #101112; border-radius: 8px; padding: 9px 11px 10px; display: grid; gap: 3px; min-width: 0; }
 .stepper-body strong { color: var(--muted-strong); font-size: 13px; line-height: 18px; }
 .stepper-body span { color: var(--muted); font-size: 12px; line-height: 18px; }
+.stepper-body .step-log-count { color: var(--focus); font-size: 11px; font-weight: 800; text-transform: uppercase; margin-top: 2px; }
+.stepper-item.selected .stepper-body { box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.34) inset; }
 .stepper-item.done .stepper-marker { color: var(--secondary); border-color: rgba(45, 212, 191, 0.38); background: rgba(45, 212, 191, 0.08); }
 .stepper-item.done::after { background: rgba(45, 212, 191, 0.34); }
 .stepper-item.done .stepper-body { border-color: rgba(45, 212, 191, 0.24); }

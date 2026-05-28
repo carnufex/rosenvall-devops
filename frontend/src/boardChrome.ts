@@ -61,11 +61,52 @@ export type PreviewLifecycleStep = {
   state: PreviewLifecycleStepState;
 };
 
+export type PreviewTerminalLineChrome = {
+  createdAt: string;
+  stream: string;
+  message: string;
+};
+
+export type PreviewStepLogChrome = {
+  key: string;
+  title?: string | null;
+  description?: string | null;
+  state?: string | null;
+  terminalLines?: PreviewTerminalLineChrome[] | null;
+};
+
+export type PreviewStepDisplay = PreviewLifecycleStep & {
+  terminalLines: PreviewTerminalLineChrome[];
+  logCount: number;
+};
+
+export type PreviewStepSource = {
+  status?: string | null;
+  failureReason?: string | null;
+  terminalLines?: PreviewTerminalLineChrome[] | null;
+  stepLogs?: PreviewStepLogChrome[] | null;
+};
+
+export type ActivityCommentChrome = {
+  workItemId: string;
+  author: string;
+  kind: string;
+  body: string;
+  createdAt?: string | null;
+};
+
 const previewLifecycleDefinitions = [
   ['Implementing', 'Implementing preview source', 'Codex generates the React/Tailwind files.'],
   ['Applying', 'Applying Kubernetes resources', 'The API submits namespace, ConfigMap, Deployment, Service and route.'],
   ['Provisioning', 'Waiting for pod readiness', 'Kubernetes starts the preview pod and health checks it.'],
   ['Running', 'Running', 'The deployment is available and the demo link is enabled.']
+] as const;
+
+const previewStepDisplayDefinitions = [
+  ['source', 'Implementing preview source', 'Codex generates the React/Tailwind files.'],
+  ['apply', 'Applying Kubernetes resources', 'The API submits namespace, ConfigMap, Deployment, Service and route.'],
+  ['readiness', 'Waiting for pod readiness', 'Kubernetes starts the preview pod and health checks it.'],
+  ['running', 'Running', 'The deployment is available and the demo link is enabled.']
 ] as const;
 
 export function boardSyncLabel(board: BoardChromeBoard): string {
@@ -135,6 +176,81 @@ export function buildPreviewLifecycleSteps(status: string | null | undefined, fa
             ? 'active'
             : 'pending'
   }));
+}
+
+export function previewStepLogsForDisplay(preview: PreviewStepSource): PreviewStepDisplay[] {
+  const fallbackStates = buildPreviewLifecycleSteps(preview.status, preview.failureReason).map((step) => step.state);
+  if (preview.stepLogs?.length) {
+    const byKey = new Map(preview.stepLogs.map((step) => [normalizePreviewStepKey(step.key), step]));
+    return previewStepDisplayDefinitions.map(([key, title, description], index) => {
+      const step = byKey.get(key);
+      const terminalLines = step?.terminalLines ?? [];
+      return {
+        key,
+        title: step?.title?.trim() || title,
+        description: step?.description?.trim() || description,
+        state: normalizePreviewStepState(step?.state) ?? fallbackStates[index] ?? 'pending',
+        terminalLines,
+        logCount: terminalLines.length
+      };
+    });
+  }
+
+  const legacyLines = preview.terminalLines ?? [];
+  return previewStepDisplayDefinitions.map(([key, title, description], index) => {
+    const terminalLines = key === 'source' && legacyLines.length > 0
+      ? [
+          {
+            createdAt: legacyLines[0]?.createdAt ?? new Date(0).toISOString(),
+            stream: 'system',
+            message: 'Legacy combined log. Older preview attempts stored one shared terminal tail.'
+          },
+          ...legacyLines
+        ]
+      : [];
+    return {
+      key,
+      title,
+      description,
+      state: fallbackStates[index] ?? 'pending',
+      terminalLines,
+      logCount: terminalLines.length
+    };
+  });
+}
+
+export function defaultPreviewStepKey(steps: PreviewStepDisplay[]): string {
+  return steps.find((step) => step.state === 'blocked')?.key ??
+    steps.find((step) => step.state === 'active')?.key ??
+    [...steps].reverse().find((step) => step.terminalLines.length > 0)?.key ??
+    steps[0]?.key ??
+    'source';
+}
+
+export function dedupeGeneratedActivityComments<T extends ActivityCommentChrome>(comments: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return comments.filter((comment) => {
+    if (comment.author.toLowerCase() !== 'rosenvall ai' || comment.kind.toLowerCase() !== 'result') {
+      return true;
+    }
+
+    const key = `${comment.workItemId}\n${comment.author}\n${comment.kind}\n${comment.body}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizePreviewStepKey(value: string | null | undefined): string {
+  const normalized = (value ?? '').trim().toLowerCase();
+  return previewStepDisplayDefinitions.some(([key]) => key === normalized) ? normalized : 'source';
+}
+
+function normalizePreviewStepState(value: string | null | undefined): PreviewLifecycleStepState | null {
+  const normalized = (value ?? '').trim().toLowerCase();
+  if (normalized === 'done' || normalized === 'active' || normalized === 'pending' || normalized === 'blocked') return normalized;
+  if (normalized === 'failed' || normalized === 'failure') return 'blocked';
+  return null;
 }
 
 export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {
