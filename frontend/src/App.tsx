@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -2435,9 +2435,9 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
   const status = preview.status;
   const running = status === 'Running';
   const failed = status === 'Failed';
-  const waiting = !running && !failed;
   const implementing = status === 'Implementing';
   const stopped = status === 'Stopped';
+  const waiting = !running && !failed && !stopped;
   const failedDuringSourceGeneration = preview.failureReason === 'ImplementationFailed';
   const canRetrySetup = failed && (failedDuringSourceGeneration || (preview.sourceFiles?.length ?? 0) > 0 || !!preview.staticHtml);
   const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : stopped ? 'Preview stopped' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
@@ -2462,10 +2462,10 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
         ))}
       </ol>
       {preview.namespace && <p className="namespace-note">Namespace: <code>{preview.namespace}</code></p>}
-      <p className="preview-message">{preview.message ?? preview.phase ?? previewStatusText(preview)}</p>
+      <p className="preview-message">{previewDisplayMessage(preview.status, preview.message, preview.phase)}</p>
       {preview.podName && <p className="namespace-note">Pod: <code>{preview.podName}</code></p>}
       {preview.lastCheckedAt && <p className="namespace-note">Last checked {relativeTime(preview.lastCheckedAt)}.</p>}
-      <PreviewTerminal lines={preview.terminalLines ?? []} active={waiting} />
+      <PreviewTerminal lines={preview.terminalLines ?? []} active={isPreviewTerminalLive(status)} />
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
@@ -2612,36 +2612,7 @@ function TerminalLog({ lines, expanded = false, resetKey }: { lines: PreviewTerm
 }
 
 function previewLifecycleSteps(preview: PreviewDto) {
-  const status = preview.status;
-  const steps = [
-    ['Implementing', 'Implementing preview source', 'Codex generates the React/Tailwind files.'],
-    ['Applying', 'Applying Kubernetes resources', 'The API submits namespace, ConfigMap, Deployment, Service and route.'],
-    ['Provisioning', 'Waiting for pod readiness', 'Kubernetes starts the preview pod and health checks it.'],
-    ['Running', 'Running', 'The deployment is available and the demo link is enabled.']
-  ] as const;
-  const failedIndex = ['ImplementationFailed', 'ServerRestart', 'ManifestMissing'].includes(preview.failureReason ?? '')
-    ? 0
-    : preview.failureReason === 'ApplyFailed'
-      ? 1
-      : 2;
-  const current = status === 'Failed'
-    ? failedIndex
-    : Math.max(0, steps.findIndex(([key]) => key === status));
-
-  return steps.map(([key, title, description], index) => ({
-    key,
-    title,
-    description,
-    state: status === 'Running'
-      ? 'done'
-      : status === 'Failed' && index === current
-        ? 'blocked'
-        : index < current
-          ? 'done'
-          : index === current
-            ? 'active'
-            : 'pending'
-  }));
+  return buildPreviewLifecycleSteps(preview.status, preview.failureReason);
 }
 
 function implementationRunSteps(status: string) {
@@ -2681,14 +2652,6 @@ function terminalStreamLabel(stream: string) {
   if (normalized === 'stderr') return 'agent';
   if (normalized === 'stdout') return 'output';
   return normalized || 'system';
-}
-
-function previewStatusText(preview: PreviewDto) {
-  if (preview.status === 'Running') return 'Preview is healthy and ready.';
-  if (preview.status === 'Failed') return 'Preview setup failed. Review the reason below and retry after fixing the issue.';
-  if (preview.status === 'Implementing') return 'Codex is generating React/Tailwind source from the approved plan.';
-  if (preview.status === 'Applying') return 'Applying Kubernetes resources.';
-  return 'Kubernetes resources are applied. Waiting for a healthy preview pod.';
 }
 
 function compactHistoryText(value: string) {
