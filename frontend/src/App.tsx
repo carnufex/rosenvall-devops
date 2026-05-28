@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -80,6 +80,27 @@ type Board = {
   providerCapabilities?: string[] | null;
   implementationWorkflow?: ImplementationWorkflow | string | null;
   publicHostname?: string | null;
+  publicApp?: BoardPublicAppDto | null;
+};
+
+type BoardPublicAppDto = {
+  boardId: string;
+  hostname: string;
+  url: string;
+  namespace: string;
+  resourceName: string;
+  status: 'NotDeployed' | 'Queued' | 'Deploying' | 'Running' | 'Failed' | string;
+  sourceWorkItemId?: string | null;
+  sourcePreviewId?: string | null;
+  sourceImplementationRunId?: string | null;
+  sourcePullRequestUrl?: string | null;
+  sourceBranch?: string | null;
+  commitSha?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastDeployedAt?: string | null;
+  failureReason?: string | null;
+  message?: string | null;
 };
 
 type BoardGitOpsSettingsDto = {
@@ -1050,7 +1071,7 @@ function App() {
       });
     },
     approvePullRequest: async (workItemId) => {
-      return runAction('Approving PR and stopping preview', async () => {
+      return runAction('Approving PR and deploying app', async () => {
         await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
       });
@@ -1631,6 +1652,8 @@ function BoardHeader({ board, subtitle, onSyncBoard, children }: {
   children?: React.ReactNode;
 }) {
   const repositoryUrl = boardRepositoryUrl(board);
+  const appUrl = boardPublicAppUrl(board);
+  const appStatus = boardPublicAppStatusLabel(board);
   const syncable = onSyncBoard && canSyncBoardToProvider(board);
   const profile = board.repository?.implementationProfile;
   return (
@@ -1646,6 +1669,8 @@ function BoardHeader({ board, subtitle, onSyncBoard, children }: {
         <p>{subtitle}</p>
       </div>
       <div className="board-header-actions">
+        {appUrl && <SafeExternalLink className="primary-action" href={appUrl}><ExternalLink size={16} />Go to app</SafeExternalLink>}
+        {!appUrl && appStatus && <span className={appStatus === 'App failed' ? 'state-bad' : appStatus === 'App deploying' ? 'state-warn' : 'state-muted'}>{appStatus}</span>}
         {repositoryUrl && <SafeExternalLink className="secondary" href={repositoryUrl}><ExternalLink size={16} />Go to repository</SafeExternalLink>}
         {syncable && <button className="secondary" onClick={onSyncBoard} type="button"><Github size={16} />Sync to provider</button>}
         {children}
@@ -1675,9 +1700,7 @@ function BoardView({ board, actions, onSyncBoard }: { board: Board; actions: Boa
 
   return (
     <section className="page board-page">
-      <BoardHeader board={board} onSyncBoard={onSyncBoard} subtitle={`${boardRepositorySummary(board)} - ${board.columns.reduce((total, column) => total + column.items.length, 0)} active items`}>
-        <button className="primary-action" onClick={() => actions.openCreateCard(board.columns[0]?.name ?? 'Todo')}><Plus size={16} />New card</button>
-      </BoardHeader>
+      <BoardHeader board={board} onSyncBoard={onSyncBoard} subtitle={`${boardRepositorySummary(board)} - ${board.columns.reduce((total, column) => total + column.items.length, 0)} active items`} />
       <DndContext sensors={sensors} collisionDetection={stableCollisionDetection} onDragStart={handleDragStart} onDragCancel={() => setActiveCard(null)} onDragEnd={handleDragEnd}>
         <div className="board">
           {board.columns.map((column) => (
@@ -2785,6 +2808,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
   const [profileError, setProfileError] = React.useState<string | null>(null);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
+  const [publicHostnameTouched, setPublicHostnameTouched] = React.useState(false);
   const profileRequestRef = React.useRef(0);
   const normalizedName = form.name.trim();
   const usesGitHub = form.providerMode === 'GitHub';
@@ -2795,6 +2819,18 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
     (usesGitHub ? form.repositoryRemoteUrl.trim().length > 0 : false) ||
     (usesCustomUrl ? isPublicGitUrl(form.repositoryRemoteUrl) : false)
   );
+
+  React.useEffect(() => {
+    if (publicHostnameTouched) return;
+    setForm((current) => {
+      if (current.implementationWorkflow !== 'preview-then-pr') {
+        return current.publicHostname ? { ...current, publicHostname: '' } : current;
+      }
+
+      const hostname = `${slugFromText(current.name || 'app')}.rosenvall.se`;
+      return current.publicHostname === hostname ? current : { ...current, publicHostname: hostname };
+    });
+  }, [form.name, form.implementationWorkflow, publicHostnameTouched]);
 
   const loadGithubRepositories = React.useCallback(async () => {
     setGithubStatus('loading');
@@ -2883,6 +2919,7 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
   const selectGitHubRepository = (repoKey: string) => {
     const repository = githubRepos.find((entry) => `${entry.owner ?? ''}/${entry.name}` === repoKey);
     if (!repository) return;
+    const implementationProfile = normalizeImplementationProfile(repository.implementationProfile);
     setForm({
       ...form,
       name: form.name || repository.name,
@@ -2893,7 +2930,8 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
       repositoryRemoteUrl: repository.remoteUrl,
       repositoryWebUrl: repository.webUrl ?? '',
       repositoryDefaultBranch: repository.defaultBranch || 'main',
-      implementationProfile: normalizeImplementationProfile(repository.implementationProfile)
+      implementationProfile,
+      implementationWorkflow: workflowForRepositoryProfile(implementationProfile, null)
     });
     void loadRepositoryProfile(repository);
   };
@@ -2968,6 +3006,20 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
             onChange={setForm}
             onAnalyze={selectedGitHubRepository ? () => void loadRepositoryProfile(selectedGitHubRepository) : undefined}
           />
+        )}
+        {!usesNoRepository && form.implementationWorkflow === 'preview-then-pr' && (
+          <section className="repository-profile-editor">
+            <div className="settings-inline">
+              <div>
+                <strong>Production hosting</strong>
+                <p>Previewable boards are published to this hostname after an approved preview PR is merged.</p>
+              </div>
+            </div>
+            <label>Public hostname<input value={form.publicHostname} onChange={(event) => {
+              setPublicHostnameTouched(true);
+              setForm({ ...form, publicHostname: event.target.value });
+            }} placeholder={`${slugFromText(form.name || 'board')}.rosenvall.se`} /></label>
+          </section>
         )}
         <fieldset className="team-picker">
           <legend>Teams</legend>
@@ -3529,6 +3581,7 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
 function BoardHostingForm({ board, actions }: { board: Board; actions: BoardActions }) {
   const [publicHostname, setPublicHostname] = React.useState(board.publicHostname ?? '');
   const [workflow, setWorkflow] = React.useState(board.implementationWorkflow ?? workflowForRepositoryProfile(board.repository?.implementationProfile, board.repository?.implementationWorkflow));
+  const appStatus = boardPublicAppStatusLabel(board);
 
   React.useEffect(() => {
     setPublicHostname(board.publicHostname ?? '');
@@ -3545,8 +3598,12 @@ function BoardHostingForm({ board, actions }: { board: Board; actions: BoardActi
         <option value="preview-then-pr">Preview, then PR</option>
         <option value="direct-pr">Direct PR</option>
       </select></label>
-      <label>Public hostname<input value={publicHostname} onChange={(event) => setPublicHostname(event.target.value)} placeholder={board.repository ? `${slugFromText(board.repository.name)}.rosenvall.se` : 'app.rosenvall.se'} /></label>
+      <label>Public hostname<input value={publicHostname} onChange={(event) => setPublicHostname(event.target.value)} placeholder={`${slugFromText(board.name || 'app')}.rosenvall.se`} /></label>
       <p className="provider-status">Preview URLs stay temporary per card. Public hostname is production intent for website repository PRs.</p>
+      {board.publicApp?.status === 'Running' && <p className="provider-status full-width">Production app is live at {board.publicApp.url}.</p>}
+      {appStatus === 'App not deployed' && <p className="provider-status full-width">Production app will be created from an approved preview after the pull request is merged.</p>}
+      {appStatus && appStatus !== 'App not deployed' && appStatus !== 'App deploying' && <p className="failure-reason full-width">{appStatus}{board.publicApp?.message ? `: ${board.publicApp.message}` : ''}</p>}
+      {appStatus === 'App deploying' && <p className="provider-status full-width">{appStatus}{board.publicApp?.message ? `: ${board.publicApp.message}` : ''}</p>}
       <div className="form-actions-row"><button className="secondary" type="submit"><Save size={16} />Save hosting</button></div>
     </form>
   );

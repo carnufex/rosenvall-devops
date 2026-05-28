@@ -10,6 +10,13 @@ export type BoardChromeBoard = {
   repository?: BoardChromeRepository | null;
   repositorySyncState?: string | null;
   providerCapabilities?: string[] | null;
+  publicHostname?: string | null;
+  publicApp?: {
+    status?: string | null;
+    url?: string | null;
+    hostname?: string | null;
+    message?: string | null;
+  } | null;
 };
 
 export type GitHubRepositoryCreationIntegration = {
@@ -53,6 +60,20 @@ export function boardSyncLabel(board: BoardChromeBoard): string {
 
 export function boardRepositoryUrl(board: BoardChromeBoard): string | null {
   return board.repository?.webUrl?.trim() || null;
+}
+
+export function boardPublicAppUrl(board: BoardChromeBoard): string | null {
+  if (!board.publicApp || board.publicApp.status !== 'Running') return null;
+  return board.publicApp.url?.trim() || (board.publicApp.hostname ? `https://${board.publicApp.hostname.trim()}` : null);
+}
+
+export function boardPublicAppStatusLabel(board: BoardChromeBoard): string | null {
+  const status = board.publicApp?.status?.trim();
+  if (!status && !board.publicHostname) return null;
+  if (status === 'Running') return null;
+  if (status === 'Deploying' || status === 'Queued') return 'App deploying';
+  if (status === 'Failed') return 'App failed';
+  return 'App not deployed';
 }
 
 export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {

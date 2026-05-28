@@ -66,6 +66,7 @@ builder.Services.AddSingleton<PreviewImplementationRunner>();
 builder.Services.AddHostedService<PreviewImplementationRecoveryService>();
 builder.Services.AddHostedService<PreviewHealthMonitor>();
 builder.Services.AddHostedService<ImplementationRunMonitor>();
+builder.Services.AddHostedService<BoardPublicAppDeploymentReconciler>();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("frontend", policy =>
@@ -132,7 +133,59 @@ app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github
     return Results.Content(github.RenderManifestStartPage(state), "text/html; charset=utf-8");
 });
 
-app.MapPost("/integrations/github/webhook", () => Results.Ok());
+app.MapPost("/integrations/github/webhook", async (HttpRequest httpRequest, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    using var document = await JsonDocument.ParseAsync(httpRequest.Body, cancellationToken: cancellationToken);
+    var root = document.RootElement;
+    if (!root.TryGetProperty("action", out var actionElement) ||
+        !string.Equals(actionElement.GetString(), "closed", StringComparison.OrdinalIgnoreCase) ||
+        !root.TryGetProperty("pull_request", out var pullRequest) ||
+        !pullRequest.TryGetProperty("merged", out var mergedElement) ||
+        !mergedElement.GetBoolean() ||
+        !pullRequest.TryGetProperty("html_url", out var urlElement) ||
+        string.IsNullOrWhiteSpace(urlElement.GetString()))
+    {
+        return Results.Ok();
+    }
+
+    var publicApp = store.QueueBoardPublicAppDeploymentForPullRequest(urlElement.GetString()!, "github");
+    if (publicApp is null)
+    {
+        return Results.Ok();
+    }
+
+    var publicManifest = store.RenderBoardPublicAppManifest(publicApp.BoardId);
+    if (string.IsNullOrWhiteSpace(publicManifest))
+    {
+        store.MarkBoardPublicAppFailed(publicApp.BoardId, "ManifestMissing", "Production app manifest could not be rendered from the merged preview PR source.");
+        return Results.Ok();
+    }
+
+    var apply = await previews.ApplyAsync(publicManifest, cancellationToken);
+    if (!apply.Succeeded)
+    {
+        store.MarkBoardPublicAppFailed(publicApp.BoardId, "DeployFailed", apply.Message);
+        return Results.Ok();
+    }
+
+    store.MarkBoardPublicAppRunning(publicApp.BoardId, apply.Message);
+    if (publicApp.SourceWorkItemId is { } workItemId)
+    {
+        var manifest = store.RenderPreviewManifest(workItemId);
+        if (!string.IsNullOrWhiteSpace(manifest))
+        {
+            await previews.DeleteAsync(manifest, cancellationToken);
+        }
+
+        var detail = store.ApprovePullRequest(workItemId, "github");
+        if (detail is not null)
+        {
+            await hub.Clients.All.SendAsync("workItemChanged", detail.Item, cancellationToken);
+        }
+    }
+
+    return Results.Ok();
+});
 
 app.MapGet("/integrations/github/callback", async (string? code, long? installation_id, string? setup_action, string? state, DevOpsStore store, GitHubRepositoryClient github, PipelineJobOrchestrator jobs, CancellationToken cancellationToken) =>
 {
@@ -1292,6 +1345,36 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
         return BoardMutationForbidden();
     }
 
+    BoardPublicAppDto? publicApp = null;
+    try
+    {
+        publicApp = store.QueueBoardPublicAppDeployment(workItemId, request.ApprovedBy);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+    }
+
+    if (publicApp is not null)
+    {
+        var publicManifest = store.RenderBoardPublicAppManifest(publicApp.BoardId);
+        if (string.IsNullOrWhiteSpace(publicManifest))
+        {
+            var message = "Production app manifest could not be rendered from the approved preview source.";
+            store.MarkBoardPublicAppFailed(publicApp.BoardId, "ManifestMissing", message);
+            return Results.Problem(message, statusCode: StatusCodes.Status409Conflict);
+        }
+
+        var productionApply = await previews.ApplyAsync(publicManifest, cancellationToken);
+        if (!productionApply.Succeeded)
+        {
+            store.MarkBoardPublicAppFailed(publicApp.BoardId, "DeployFailed", productionApply.Message);
+            return Results.Problem(productionApply.Message, statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        store.MarkBoardPublicAppRunning(publicApp.BoardId, productionApply.Message);
+    }
+
     var manifest = store.RenderPreviewManifest(workItemId);
     if (manifest is not null)
     {
@@ -1831,12 +1914,13 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardGitOpsSettingsDto(Guid BoardId, IReadOnlyList<string> AllowedPaths, string ArgoNamespace, string ArgoApplicationSelector);
     public sealed record BoardAiContextDto(Guid BoardId, string Instructions, IReadOnlyList<string> EnabledSkills, bool AskWhenUncertain, string AgentInstructions = "");
     public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, RepositoryProfileDto? RepositoryProfileDraft = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null);
-    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, string RepositorySyncState = "Preview only", IReadOnlyList<string>? ProviderCapabilities = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null);
+    public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, string RepositorySyncState = "Preview only", IReadOnlyList<string>? ProviderCapabilities = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null, BoardPublicAppDto? PublicApp = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
     public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
     public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null, BoardPlanningContextDto? BoardContext = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
     public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
+    public sealed record BoardPublicAppDto(Guid BoardId, string Hostname, string Url, string Namespace, string ResourceName, string Status, Guid? SourceWorkItemId, Guid? SourcePreviewId, Guid? SourceImplementationRunId, string? SourcePullRequestUrl, string? SourceBranch, string? CommitSha, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastDeployedAt = null, string? FailureReason = null, string? Message = null);
     public sealed record PreviewEnvironmentDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Url, string Namespace, string ResourceName, string Image, string Status, DateTimeOffset ExpiresAt, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null);
     public sealed record PreviewEventDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string EventType, string? Namespace, string? Url, string Actor, string Message, DateTimeOffset CreatedAt);
     public sealed record PreviewTerminalLineDto(DateTimeOffset CreatedAt, string Stream, string Message);
@@ -4171,6 +4255,82 @@ namespace Rosenvall.DevOps.Api
                 if (!string.Equals(health.Status, "Provisioning", StringComparison.OrdinalIgnoreCase))
                 {
                     _startedAt.Remove(preview.Id);
+                }
+            }
+        }
+    }
+
+    public sealed class BoardPublicAppDeploymentReconciler(
+        DevOpsStore store,
+        PreviewEnvironmentOrchestrator previews,
+        GitHubRepositoryClient github,
+        ILogger<BoardPublicAppDeploymentReconciler> logger) : BackgroundService
+    {
+        private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
+
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await ReconcileAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Board public app deployment reconcile failed.");
+                }
+
+                await Task.Delay(PollInterval, stoppingToken);
+            }
+        }
+
+        private async Task ReconcileAsync(CancellationToken cancellationToken)
+        {
+            await QueueMergedPreviewPromotionsAsync(cancellationToken);
+
+            foreach (var app in store.GetBoardPublicAppsAwaitingDeployment())
+            {
+                var manifest = store.RenderBoardPublicAppManifest(app.BoardId);
+                if (string.IsNullOrWhiteSpace(manifest))
+                {
+                    store.MarkBoardPublicAppFailed(app.BoardId, "ManifestMissing", "Production app manifest could not be rendered from stored preview source.");
+                    continue;
+                }
+
+                var apply = await previews.ApplyAsync(manifest, cancellationToken);
+                if (apply.Succeeded)
+                {
+                    store.MarkBoardPublicAppRunning(app.BoardId, apply.Message);
+                }
+                else
+                {
+                    store.MarkBoardPublicAppFailed(app.BoardId, "DeployFailed", apply.Message);
+                }
+            }
+        }
+
+        private async Task QueueMergedPreviewPromotionsAsync(CancellationToken cancellationToken)
+        {
+            foreach (var run in store.GetPreviewPromotionRunsAwaitingPublicAppReconcile())
+            {
+                if (string.IsNullOrWhiteSpace(run.PullRequestUrl))
+                {
+                    continue;
+                }
+
+                var repository = store.GetImplementationRunRepository(run.Id);
+                var integration = repository is null ? null : store.GetGitHubIntegrationForRepository(repository);
+                var token = integration is null ? github.ConfiguredToken : await github.CreateInstallationTokenAsync(integration.InstallationId, cancellationToken);
+                if (repository is null || string.IsNullOrWhiteSpace(token))
+                {
+                    continue;
+                }
+
+                var pullRequest = await github.GetPullRequestAsync(run.PullRequestUrl, token, cancellationToken);
+                if (pullRequest?.Merged == true)
+                {
+                    store.QueueBoardPublicAppDeploymentForPullRequest(run.PullRequestUrl, "github-reconcile");
                 }
             }
         }
@@ -8564,6 +8724,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<AiSessionDto> _aiSessions = [];
         private readonly List<BoardGitOpsSettingsDto> _boardGitOpsSettings = [];
         private readonly List<BoardAiContextDto> _boardAiContexts = [];
+        private readonly List<BoardPublicAppDto> _boardPublicApps = [];
         private int _nextTaskNumber = 4821;
         private long? _lastSnapshotJsonBytes;
 
@@ -9747,6 +9908,7 @@ namespace Rosenvall.DevOps.Api
                 _boardSecrets.RemoveAll(secret => secret.BoardId == boardId);
                 _boardGitOpsSettings.RemoveAll(settings => settings.BoardId == boardId);
                 _boardAiContexts.RemoveAll(context => context.BoardId == boardId);
+                _boardPublicApps.RemoveAll(app => app.BoardId == boardId);
                 Persist();
                 return true;
             }
@@ -11468,6 +11630,252 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public BoardPublicAppDto? QueueBoardPublicAppDeployment(Guid workItemId, string actor)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                var board = _boards.SingleOrDefault(entry => entry.Id == item.BoardId);
+                if (board is null)
+                {
+                    return null;
+                }
+
+                var workflow = BoardImplementationWorkflow(board.Id);
+                if (!string.Equals(workflow, "preview-then-pr", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
+                var hostname = NormalizePublicHostname(board.PublicHostname, board.Name, workflow);
+                if (string.IsNullOrWhiteSpace(hostname))
+                {
+                    return null;
+                }
+
+                board.PublicHostname = hostname;
+                var (preview, run) = ResolveBoardPublicAppSourceWithoutLock(item, null);
+                if (preview?.SourceFiles is not { Count: > 0 } sourceFiles)
+                {
+                    throw new InvalidOperationException("No approved preview source files are available for production hosting. Recreate the preview before deploying the app.");
+                }
+
+                PreviewSourcePolicy.Validate(sourceFiles);
+                var resources = CreateBoardPublicAppResources(board, hostname, sourceFiles);
+                var now = DateTimeOffset.UtcNow;
+                var existingIndex = _boardPublicApps.FindIndex(app => app.BoardId == board.Id);
+                var existing = existingIndex >= 0 ? _boardPublicApps[existingIndex] : null;
+                var app = new BoardPublicAppDto(
+                    board.Id,
+                    hostname,
+                    $"https://{hostname}",
+                    resources.Namespace,
+                    resources.Name,
+                    "Deploying",
+                    item.Id,
+                    preview.Id,
+                    run?.Id,
+                    run?.PullRequestUrl ?? item.PullRequestUrl,
+                    run?.Branch,
+                    run?.CommitSha,
+                    existing?.CreatedAt ?? now,
+                    now,
+                    existing?.LastDeployedAt,
+                    null,
+                    $"Deploying {hostname} from {item.Key}.");
+                if (existingIndex >= 0)
+                {
+                    _boardPublicApps[existingIndex] = app;
+                }
+                else
+                {
+                    _boardPublicApps.Add(app);
+                }
+
+                AddTimelineEvent(board.Id, RepositoryIdForBoard(board.Id), item.Id, "PublicAppDeploying", hostname, $"Deploying production app {hostname}.", actor, app.Url, now);
+                Persist();
+                return app;
+            }
+        }
+
+        public BoardPublicAppDto? QueueBoardPublicAppDeploymentForPullRequest(string pullRequestUrl, string actor)
+        {
+            lock (_lock)
+            {
+                if (string.IsNullOrWhiteSpace(pullRequestUrl))
+                {
+                    return null;
+                }
+
+                var run = _implementationRuns
+                    .Where(entry => string.Equals(entry.RunKind, "preview-promotion", StringComparison.OrdinalIgnoreCase))
+                    .Where(entry => string.Equals(entry.PullRequestUrl, pullRequestUrl.Trim(), StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(entry => entry.UpdatedAt)
+                    .FirstOrDefault();
+                return run is null ? null : QueueBoardPublicAppDeployment(run.WorkItemId, actor);
+            }
+        }
+
+        public string? RenderBoardPublicAppManifest(Guid boardId)
+        {
+            lock (_lock)
+            {
+                var app = _boardPublicApps.SingleOrDefault(entry => entry.BoardId == boardId);
+                var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+                if (app is null || board is null)
+                {
+                    return null;
+                }
+
+                var preview = app.SourcePreviewId is { } sourcePreviewId
+                    ? _previews.SingleOrDefault(entry => entry.Id == sourcePreviewId)
+                    : null;
+                if (preview?.SourceFiles is not { Count: > 0 } sourceFiles)
+                {
+                    return null;
+                }
+
+                PreviewSourcePolicy.Validate(sourceFiles);
+                var resources = CreateBoardPublicAppResources(board, app.Hostname, sourceFiles);
+                return PreviewManifestRenderer.Render(resources);
+            }
+        }
+
+        public BoardDto? MarkBoardPublicAppRunning(Guid boardId, string message)
+        {
+            lock (_lock)
+            {
+                var index = _boardPublicApps.FindIndex(entry => entry.BoardId == boardId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var app = _boardPublicApps[index];
+                var updated = app with
+                {
+                    Status = "Running",
+                    UpdatedAt = now,
+                    LastDeployedAt = now,
+                    FailureReason = null,
+                    Message = string.IsNullOrWhiteSpace(message) ? $"Production app is available at {app.Url}." : message.Trim()
+                };
+                _boardPublicApps[index] = updated;
+                AddTimelineEvent(boardId, RepositoryIdForBoard(boardId), updated.SourceWorkItemId, "PublicAppRunning", updated.Hostname, $"Production app is available at {updated.Url}.", "system", updated.Url, now);
+                Persist();
+                return GetBoard(boardId);
+            }
+        }
+
+        public BoardDto? MarkBoardPublicAppFailed(Guid boardId, string reason, string message)
+        {
+            lock (_lock)
+            {
+                var index = _boardPublicApps.FindIndex(entry => entry.BoardId == boardId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var app = _boardPublicApps[index];
+                var updated = app with
+                {
+                    Status = "Failed",
+                    UpdatedAt = now,
+                    FailureReason = NormalizeText(reason, "DeployFailed"),
+                    Message = NormalizeText(message, "Production app deployment failed.")
+                };
+                _boardPublicApps[index] = updated;
+                AddTimelineEvent(boardId, RepositoryIdForBoard(boardId), updated.SourceWorkItemId, "PublicAppFailed", updated.Hostname, updated.Message ?? "Production app deployment failed.", "system", updated.Url, now);
+                Persist();
+                return GetBoard(boardId);
+            }
+        }
+
+        public IReadOnlyList<BoardPublicAppDto> GetBoardPublicAppsAwaitingDeployment()
+        {
+            lock (_lock)
+            {
+                return _boardPublicApps
+                    .Where(app => string.Equals(app.Status, "Queued", StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(app.Status, "Deploying", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(app => app.UpdatedAt)
+                    .ToArray();
+            }
+        }
+
+        public IReadOnlyList<ImplementationRunDto> GetPreviewPromotionRunsAwaitingPublicAppReconcile()
+        {
+            lock (_lock)
+            {
+                return _implementationRuns
+                    .Where(run => string.Equals(run.RunKind, "preview-promotion", StringComparison.OrdinalIgnoreCase))
+                    .Where(run => string.Equals(run.Status, "PullRequestReady", StringComparison.OrdinalIgnoreCase))
+                    .Where(run => !string.IsNullOrWhiteSpace(run.PullRequestUrl))
+                    .Where(run =>
+                    {
+                        var item = _items.SingleOrDefault(entry => entry.Id == run.WorkItemId);
+                        if (item is null)
+                        {
+                            return false;
+                        }
+
+                        if (!string.Equals(BoardImplementationWorkflow(item.BoardId), "preview-then-pr", StringComparison.OrdinalIgnoreCase) ||
+                            _boardPublicApps.Any(app => app.BoardId == item.BoardId))
+                        {
+                            return false;
+                        }
+
+                        var board = _boards.SingleOrDefault(entry => entry.Id == item.BoardId);
+                        var preview = run.SourcePreviewId is { } sourcePreviewId
+                            ? _previews.SingleOrDefault(entry => entry.Id == sourcePreviewId)
+                            : null;
+                        return !string.IsNullOrWhiteSpace(board?.PublicHostname) &&
+                               preview?.SourceFiles is { Count: > 0 };
+                    })
+                    .OrderByDescending(run => run.UpdatedAt)
+                    .ToArray();
+            }
+        }
+
+        private (PreviewDto? Preview, ImplementationRunDto? Run) ResolveBoardPublicAppSourceWithoutLock(WorkItemRecord item, string? pullRequestUrl)
+        {
+            var runs = _implementationRuns
+                .Where(run => run.WorkItemId == item.Id)
+                .Where(run => string.Equals(run.RunKind, "preview-promotion", StringComparison.OrdinalIgnoreCase))
+                .Where(run => string.Equals(run.Status, "PullRequestReady", StringComparison.OrdinalIgnoreCase))
+                .Where(run => string.IsNullOrWhiteSpace(pullRequestUrl) || string.Equals(run.PullRequestUrl, pullRequestUrl, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(run => run.UpdatedAt)
+                .ToArray();
+            var run = runs.FirstOrDefault();
+            var preview = run?.SourcePreviewId is { } sourcePreviewId
+                ? _previews.SingleOrDefault(entry => entry.Id == sourcePreviewId)
+                : _previews
+                    .Where(entry => entry.WorkItemId == item.Id && entry.SourceFiles is { Count: > 0 })
+                    .OrderByDescending(entry => entry.LastCheckedAt ?? entry.ExpiresAt)
+                    .FirstOrDefault();
+            return (preview, run);
+        }
+
+        private static PreviewResourceSet CreateBoardPublicAppResources(BoardRecord board, string hostname, IReadOnlyList<PreviewSourceFile> sourceFiles)
+        {
+            return PreviewResourceSet.Create(
+                board.Name,
+                board.Name,
+                LocalReactPreviewProject.Image,
+                sourceFiles: sourceFiles,
+                hostnameOverride: hostname,
+                namespacePrefix: "devops-app",
+                partOf: "rosenvall-devops-board-app");
+        }
+
         private static bool RequiresGeneratedPreviewSource(PreviewDto preview) =>
             string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
@@ -11543,8 +11951,30 @@ namespace Rosenvall.DevOps.Api
                     documents.Add(RenderDeleteStub("v1", "Secret", BoardSecretManifestRenderer.SecretName(secret), BoardSecretManifestRenderer.Namespace(configuration)));
                 }
 
+                documents.AddRange(RenderBoardPublicAppCleanupDocuments(boardId));
+
                 return documents.Count == 0 ? "" : string.Join("\n---\n", documents);
             }
+        }
+
+        private IReadOnlyList<string> RenderBoardPublicAppCleanupDocuments(Guid boardId)
+        {
+            var app = _boardPublicApps.SingleOrDefault(entry => entry.BoardId == boardId);
+            if (app is null)
+            {
+                return [];
+            }
+
+            return
+            [
+                RenderDeleteStub("networking.k8s.io/v1", "NetworkPolicy", $"{app.ResourceName}-deny-egress", app.Namespace),
+                RenderDeleteStub("gateway.networking.k8s.io/v1", "HTTPRoute", app.ResourceName, app.Namespace),
+                RenderDeleteStub("v1", "Service", app.ResourceName, app.Namespace),
+                RenderDeleteStub("apps/v1", "Deployment", app.ResourceName, app.Namespace),
+                RenderDeleteStub("v1", "ConfigMap", $"{app.ResourceName}-source", app.Namespace),
+                RenderDeleteStub("v1", "ConfigMap", $"{app.ResourceName}-content", app.Namespace),
+                RenderClusterDeleteStub("v1", "Namespace", app.Namespace)
+            ];
         }
 
         public string? RenderPreviousImplementationRunCleanupManifest(Guid workItemId, Guid currentImplementationRunId)
@@ -11629,6 +12059,14 @@ namespace Rosenvall.DevOps.Api
                 namespace: {{@namespace}}
               """;
 
+        private static string RenderClusterDeleteStub(string apiVersion, string kind, string name) =>
+            $$"""
+              apiVersion: {{apiVersion}}
+              kind: {{kind}}
+              metadata:
+                name: {{name}}
+              """;
+
         public string? RenderPipelineJobManifest(Guid pipelineRunId)
         {
             lock (_lock)
@@ -11660,7 +12098,8 @@ namespace Rosenvall.DevOps.Api
                 BoardRepositorySyncState(board.Id),
                 BoardProviderCapabilities(board.Id),
                 BoardImplementationWorkflow(board.Id),
-                board.PublicHostname);
+                board.PublicHostname,
+                BoardPublicAppFor(board.Id));
 
         private string BoardRepositorySyncState(Guid boardId)
         {
@@ -11714,6 +12153,50 @@ namespace Rosenvall.DevOps.Api
             }
 
             return capabilities;
+        }
+
+        private BoardPublicAppDto? BoardPublicAppFor(Guid boardId)
+        {
+            var app = _boardPublicApps.SingleOrDefault(entry => entry.BoardId == boardId);
+            if (app is not null)
+            {
+                return app;
+            }
+
+            var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+            if (board is null ||
+                !string.Equals(BoardImplementationWorkflow(boardId), "preview-then-pr", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(board.PublicHostname))
+            {
+                return null;
+            }
+
+            var hostname = board.PublicHostname.Trim().ToLowerInvariant();
+            var resources = PreviewResourceSet.Create(
+                board.Name,
+                board.Name,
+                LocalReactPreviewProject.Image,
+                hostnameOverride: hostname,
+                namespacePrefix: "devops-app",
+                partOf: "rosenvall-devops-board-app");
+            return new BoardPublicAppDto(
+                board.Id,
+                hostname,
+                $"https://{hostname}",
+                resources.Namespace,
+                resources.Name,
+                "NotDeployed",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                DateTimeOffset.MinValue,
+                DateTimeOffset.MinValue,
+                null,
+                null,
+                "Production app is not deployed yet.");
         }
 
         private TeamDto EnrichTeam(TeamDto team) =>
@@ -12092,7 +12575,9 @@ namespace Rosenvall.DevOps.Api
             if (!string.IsNullOrWhiteSpace(value))
             {
                 var hostname = value.Trim().ToLowerInvariant();
-                return hostname.EndsWith(".rosenvall.se", StringComparison.OrdinalIgnoreCase) && hostname.All(character => char.IsLetterOrDigit(character) || character is '-' or '.')
+                return hostname.EndsWith(".rosenvall.se", StringComparison.OrdinalIgnoreCase) &&
+                       hostname.All(character => char.IsLetterOrDigit(character) || character is '-' or '.') &&
+                       hostname.Split('.').All(label => label.Length is > 0 and <= 63 && !label.StartsWith('-') && !label.EndsWith('-'))
                     ? hostname
                     : null;
             }
@@ -12103,6 +12588,10 @@ namespace Rosenvall.DevOps.Api
             }
 
             var slug = SlugifyRepositoryName(fallbackSlug);
+            if (slug.Length > 48)
+            {
+                slug = slug[..48].Trim('-');
+            }
             return string.IsNullOrWhiteSpace(slug) ? null : $"{slug}.rosenvall.se";
         }
 
@@ -12884,6 +13373,7 @@ namespace Rosenvall.DevOps.Api
                     run.CreatedAt ?? DateTimeOffset.UtcNow.AddTicks(index),
                     run.ReasoningEffort))));
             _previews.AddRange(snapshot.Previews.Select(preview => preview with { Status = NormalizePreviewStatus(preview.Status) }));
+            _boardPublicApps.AddRange(snapshot.BoardPublicApps ?? []);
             _development.AddRange(snapshot.Development.Select(development => new DevelopmentDtoRecord(development.WorkItemId, development.Development)));
             _previewEvents.AddRange(snapshot.PreviewEvents ?? []);
             _pipelineRuns.AddRange(snapshot.PipelineRuns ?? []);
@@ -12914,6 +13404,10 @@ namespace Rosenvall.DevOps.Api
             _boardAiContexts.AddRange(snapshot.BoardAiContexts ?? []);
             _nextTaskNumber = Math.Max(snapshot.NextTaskNumber, NextTaskNumberFromItems());
             var changed = BackfillBoardHostingWithoutLock();
+            if (BackfillBoardPublicAppsWithoutLock())
+            {
+                changed = true;
+            }
             if (BackfillDemoSeedWithoutLock())
             {
                 changed = true;
@@ -12964,6 +13458,76 @@ namespace Rosenvall.DevOps.Api
             }
 
             return changed;
+        }
+
+        private bool BackfillBoardPublicAppsWithoutLock()
+        {
+            var changed = false;
+            foreach (var board in _boards.Where(board =>
+                         string.Equals(BoardImplementationWorkflow(board.Id), "preview-then-pr", StringComparison.OrdinalIgnoreCase) &&
+                         !string.IsNullOrWhiteSpace(board.PublicHostname) &&
+                         _boardPublicApps.All(app => app.BoardId != board.Id)))
+            {
+                var candidate = _items
+                    .Where(item => item.BoardId == board.Id && IsBoardPublicAppBackfillCandidateWithoutLock(item))
+                    .Select(item => (Item: item, Source: ResolveBoardPublicAppSourceWithoutLock(item, null)))
+                    .Where(entry => entry.Source.Preview?.SourceFiles is { Count: > 0 })
+                    .OrderByDescending(entry => entry.Source.Run?.UpdatedAt ?? entry.Source.Preview!.LastCheckedAt ?? entry.Source.Preview!.ExpiresAt)
+                    .FirstOrDefault();
+                if (candidate.Item is null || candidate.Source.Preview is null)
+                {
+                    continue;
+                }
+
+                var hostname = NormalizePublicHostname(board.PublicHostname, board.Name, board.ImplementationWorkflow);
+                if (string.IsNullOrWhiteSpace(hostname))
+                {
+                    continue;
+                }
+
+                var resources = CreateBoardPublicAppResources(board, hostname, candidate.Source.Preview.SourceFiles!);
+                var now = DateTimeOffset.UtcNow;
+                _boardPublicApps.Add(new BoardPublicAppDto(
+                    board.Id,
+                    hostname,
+                    $"https://{hostname}",
+                    resources.Namespace,
+                    resources.Name,
+                    "Queued",
+                    candidate.Item.Id,
+                    candidate.Source.Preview.Id,
+                    candidate.Source.Run?.Id,
+                    candidate.Source.Run?.PullRequestUrl ?? candidate.Item.PullRequestUrl,
+                    candidate.Source.Run?.Branch,
+                    candidate.Source.Run?.CommitSha,
+                    now,
+                    now,
+                    null,
+                    null,
+                    $"Production app deployment queued for {hostname}."));
+                AddTimelineEvent(board.Id, RepositoryIdForBoard(board.Id), candidate.Item.Id, "PublicAppQueued", hostname, $"Production app deployment queued for {hostname}.", "system", $"https://{hostname}", now);
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private bool IsBoardPublicAppBackfillCandidateWithoutLock(WorkItemRecord item)
+        {
+            if (string.Equals(item.Status, "Done", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (_development.Any(entry => entry.WorkItemId == item.Id && entry.Development.PullRequestApprovedAt is not null))
+            {
+                return true;
+            }
+
+            return _implementationRuns.Any(run =>
+                run.WorkItemId == item.Id &&
+                string.Equals(run.RunKind, "preview-promotion", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(run.Status, "Merged", StringComparison.OrdinalIgnoreCase));
         }
 
         private bool BackfillDemoSeedWithoutLock()
@@ -13039,7 +13603,8 @@ namespace Rosenvall.DevOps.Api
                 _boardGitOpsSettings.ToArray(),
                 _boardAiContexts.ToArray(),
                 _boardRepositoryProfiles.ToArray(),
-                _githubUserAuthorizations.ToArray());
+                _githubUserAuthorizations.ToArray(),
+                _boardPublicApps.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
             _lastSnapshotJsonBytes = Encoding.UTF8.GetByteCount(json);
 
@@ -13099,7 +13664,7 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardTeamAccessRecord(Guid BoardId, Guid TeamId, string Role);
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile);
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null, string? PublicHostname = null, string ImplementationWorkflow = "");
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);

@@ -226,6 +226,128 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Production_app_manifest_uses_stored_preview_source_and_board_hostname()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo Klocka", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        store.UpdateImplementationRun(run.Id, "PullRequestReady", "RDO_COMMIT=abc123\nRDO_PULL_REQUEST_URL=https://github.com/carnufex/clock-app/pull/2");
+
+        var app = store.QueueBoardPublicAppDeployment(item.Id, "crille")!;
+        var manifest = store.RenderBoardPublicAppManifest(board.Id)!;
+        var updatedBoard = store.MarkBoardPublicAppRunning(board.Id, "applied")!;
+
+        Assert.Equal("demo-klocka.rosenvall.se", app.Hostname);
+        Assert.Equal("https://demo-klocka.rosenvall.se", app.Url);
+        Assert.Equal("devops-app-demo-klocka", app.Namespace);
+        Assert.Equal(run.Id, app.SourceImplementationRunId);
+        Assert.Equal("Running", updatedBoard.PublicApp!.Status);
+        Assert.Equal("https://demo-klocka.rosenvall.se", updatedBoard.PublicApp.Url);
+        Assert.Contains("namespace: devops-app-demo-klocka", manifest);
+        Assert.Contains("app.kubernetes.io/part-of: rosenvall-devops-board-app", manifest);
+        Assert.Contains("- demo-klocka.rosenvall.se", manifest);
+        Assert.Contains("export default function App()", manifest);
+        Assert.DoesNotContain("app.kubernetes.io/part-of: rosenvall-devops-preview", manifest);
+        Assert.DoesNotContain("npm run build", manifest);
+        Assert.DoesNotContain("codex exec", manifest);
+    }
+
+    [Fact]
+    public void Board_cleanup_manifest_includes_production_app_resources()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo Klocka", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        store.UpdateImplementationRun(run.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/clock-app/pull/2");
+        store.QueueBoardPublicAppDeployment(item.Id, "crille");
+
+        var manifest = store.RenderBoardCleanupManifest(board.Id, new ConfigurationBuilder().Build())!;
+
+        Assert.Contains("name: devops-app-demo-klocka", manifest);
+        Assert.Contains("kind: Namespace", manifest);
+        Assert.Contains("kind: HTTPRoute", manifest);
+        Assert.Contains("kind: NetworkPolicy", manifest);
+        Assert.Contains("name: demo-klocka-source", manifest);
+        Assert.DoesNotContain("rosenvall-devops-codex-home", manifest);
+        Assert.DoesNotContain("kind: Repository", manifest);
+    }
+
+    [Fact]
+    public void Existing_previewable_board_backfills_public_app_from_stored_preview_source()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo Klocka", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Done", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        store.UpdateImplementationRun(run.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/clock-app/pull/2");
+        store.ApprovePullRequest(item.Id, "github");
+
+        var reopened = fixture.Reopen();
+        var upgraded = reopened.GetBoard(board.Id)!;
+        var manifest = reopened.RenderBoardPublicAppManifest(board.Id)!;
+
+        Assert.Equal("Queued", upgraded.PublicApp!.Status);
+        Assert.Equal("demo-klocka.rosenvall.se", upgraded.PublicApp.Hostname);
+        Assert.Contains("namespace: devops-app-demo-klocka", manifest);
+        Assert.Contains("export default function App()", manifest);
+    }
+
+    [Fact]
+    public void Active_review_preview_does_not_backfill_public_app_on_restart()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo Klocka", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Review", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        store.UpdateImplementationRun(run.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/clock-app/pull/2");
+
+        var reopened = fixture.Reopen();
+        var refreshed = reopened.GetBoard(board.Id)!;
+
+        Assert.Equal("NotDeployed", refreshed.PublicApp!.Status);
+        Assert.Null(reopened.RenderBoardPublicAppManifest(board.Id));
+        Assert.Single(reopened.GetPreviewPromotionRunsAwaitingPublicAppReconcile());
+    }
+
+    [Fact]
     public void Board_can_be_created_for_provider_neutral_repository()
     {
         using var fixture = DevOpsStoreFixture.Create();

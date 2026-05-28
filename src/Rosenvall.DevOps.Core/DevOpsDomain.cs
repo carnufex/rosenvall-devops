@@ -232,7 +232,8 @@ public sealed record PreviewResourceSet(
     string ParentGateway,
     string? StaticHtml,
     IReadOnlyList<PreviewSourceFile> SourceFiles,
-    bool IncludeNamespace)
+    bool IncludeNamespace,
+    string PartOf)
 {
     public static PreviewResourceSet Create(
         string key,
@@ -241,16 +242,19 @@ public sealed record PreviewResourceSet(
         string? staticHtml = null,
         string? namespaceOverride = null,
         bool includeNamespace = true,
-        IReadOnlyList<PreviewSourceFile>? sourceFiles = null)
+        IReadOnlyList<PreviewSourceFile>? sourceFiles = null,
+        string? hostnameOverride = null,
+        string namespacePrefix = "devops-preview",
+        string partOf = "rosenvall-devops-preview")
     {
         if (string.IsNullOrWhiteSpace(image))
         {
             throw new ArgumentException("Image is required.", nameof(image));
         }
 
-        var hostname = PreviewHostnames.ForWorkItem(key, title);
+        var hostname = string.IsNullOrWhiteSpace(hostnameOverride) ? PreviewHostnames.ForWorkItem(key, title) : hostnameOverride.Trim().ToLowerInvariant();
         var name = hostname.Split('.')[0];
-        var @namespace = string.IsNullOrWhiteSpace(namespaceOverride) ? $"devops-preview-{name}" : namespaceOverride.Trim();
+        var @namespace = string.IsNullOrWhiteSpace(namespaceOverride) ? $"{namespacePrefix}-{name}" : namespaceOverride.Trim();
         return new PreviewResourceSet(
             @namespace,
             name,
@@ -259,7 +263,8 @@ public sealed record PreviewResourceSet(
             "gateway/external",
             string.IsNullOrWhiteSpace(staticHtml) ? null : staticHtml.Trim(),
             sourceFiles ?? [],
-            includeNamespace);
+            includeNamespace,
+            string.IsNullOrWhiteSpace(partOf) ? "rosenvall-devops-preview" : partOf.Trim());
     }
 }
 
@@ -277,7 +282,7 @@ public static class PreviewManifestRenderer
             builder.AppendLine("metadata:");
             builder.AppendLine($"  name: {resources.Namespace}");
             builder.AppendLine("  labels:");
-            builder.AppendLine("    app.kubernetes.io/part-of: rosenvall-devops-preview");
+            builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
             builder.AppendLine("---");
         }
         if (resources.StaticHtml is not null)
@@ -287,6 +292,8 @@ public static class PreviewManifestRenderer
             builder.AppendLine("metadata:");
             builder.AppendLine($"  name: {resources.Name}-content");
             builder.AppendLine($"  namespace: {resources.Namespace}");
+            builder.AppendLine("  labels:");
+            builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
             builder.AppendLine("data:");
             builder.AppendLine("  index.html: |");
             builder.AppendLine(IndentBlock(resources.StaticHtml, 4));
@@ -299,6 +306,8 @@ public static class PreviewManifestRenderer
             builder.AppendLine("metadata:");
             builder.AppendLine($"  name: {resources.Name}-source");
             builder.AppendLine($"  namespace: {resources.Namespace}");
+            builder.AppendLine("  labels:");
+            builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
             builder.AppendLine("data:");
             foreach (var file in resources.SourceFiles)
             {
@@ -315,7 +324,7 @@ public static class PreviewManifestRenderer
         builder.AppendLine($"  namespace: {resources.Namespace}");
         builder.AppendLine("  labels:");
         builder.AppendLine($"    app.kubernetes.io/name: {resources.Name}");
-        builder.AppendLine("    app.kubernetes.io/part-of: rosenvall-devops-preview");
+        builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
         builder.AppendLine("spec:");
         builder.AppendLine("  replicas: 1");
         builder.AppendLine("  selector:");
@@ -325,7 +334,7 @@ public static class PreviewManifestRenderer
         builder.AppendLine("    metadata:");
         builder.AppendLine("      labels:");
         builder.AppendLine($"        app.kubernetes.io/name: {resources.Name}");
-        builder.AppendLine("        app.kubernetes.io/part-of: rosenvall-devops-preview");
+        builder.AppendLine($"        app.kubernetes.io/part-of: {resources.PartOf}");
         if (resources.SourceFiles.Count > 0)
         {
             builder.AppendLine("      annotations:");
@@ -424,6 +433,8 @@ public static class PreviewManifestRenderer
         builder.AppendLine("metadata:");
         builder.AppendLine($"  name: {resources.Name}");
         builder.AppendLine($"  namespace: {resources.Namespace}");
+        builder.AppendLine("  labels:");
+        builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
         builder.AppendLine("spec:");
         builder.AppendLine("  selector:");
         builder.AppendLine($"    app.kubernetes.io/name: {resources.Name}");
@@ -437,6 +448,8 @@ public static class PreviewManifestRenderer
         builder.AppendLine("metadata:");
         builder.AppendLine($"  name: {resources.Name}");
         builder.AppendLine($"  namespace: {resources.Namespace}");
+        builder.AppendLine("  labels:");
+        builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
         builder.AppendLine("spec:");
         builder.AppendLine("  parentRefs:");
         builder.AppendLine("    - name: external");
@@ -458,6 +471,8 @@ public static class PreviewManifestRenderer
         builder.AppendLine("metadata:");
         builder.AppendLine($"  name: {resources.Name}-deny-egress");
         builder.AppendLine($"  namespace: {resources.Namespace}");
+        builder.AppendLine("  labels:");
+        builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
         builder.AppendLine("spec:");
         builder.AppendLine("  podSelector:");
         builder.AppendLine("    matchLabels:");
