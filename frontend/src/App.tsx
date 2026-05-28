@@ -1,8 +1,8 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, safeMarkdownHref, type TimelineLane } from './boardChrome';
-import { implementationActionState, isImplementationRunPendingStatus, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
   Activity,
@@ -15,6 +15,7 @@ import {
   History,
   KeyRound,
   LayoutDashboard,
+  LogOut,
   Maximize2,
   PanelLeft,
   Play,
@@ -254,6 +255,11 @@ type ImplementationRunDto = {
   podName?: string | null;
   lastCondition?: string | null;
   lastEventSummary?: string | null;
+  runKind?: string | null;
+  pullRequestProvider?: string | null;
+  pullRequestNumber?: number | null;
+  pullRequestState?: string | null;
+  pullRequestMergedAt?: string | null;
 };
 
 type RepositoryCleanupRunDto = {
@@ -352,6 +358,7 @@ type GitHubIntegrationDto = {
   requiresUserAuthorizationForRepositoryCreation?: boolean;
   hasUserAuthorization?: boolean;
   authorizedGitHubLogin?: string | null;
+  repositoryCreationMessage?: string | null;
 };
 
 type BoardSecretDto = {
@@ -435,6 +442,12 @@ type DevelopmentDto = {
   checksStatus: string;
   pullRequestApprovedBy?: string | null;
   pullRequestApprovedAt?: string | null;
+  repositoryId?: string | null;
+  pullRequestProvider?: string | null;
+  pullRequestNumber?: number | null;
+  pullRequestState?: string | null;
+  pullRequestMergedAt?: string | null;
+  pullRequestFailure?: string | null;
 };
 
 type SettingsDto = {
@@ -465,6 +478,9 @@ type SettingsDto = {
     mode: string;
     apiBaseUrl: string;
     canCreateRepositories: boolean;
+    localGitEnabled?: boolean;
+    localGitAvailable?: boolean;
+    localGitMessage?: string | null;
   };
   authentik: {
     enabled: boolean;
@@ -521,8 +537,8 @@ type AssigneeDto = {
 
 type CreateBoardForm = {
   name: string;
-  repositoryProvider: 'GitHub' | 'GenericGit' | string;
-  providerMode: 'NoRepository' | 'GitHub' | 'CustomUrl';
+  repositoryProvider: 'GitHub' | 'LocalGit' | 'GenericGit' | string;
+  providerMode: 'NoRepository' | 'GitHub' | 'GitHubNew' | 'LocalGitNew' | 'CustomUrl';
   repositoryId?: string | null;
   repositoryOwner: string;
   repositoryRemoteUrl: string;
@@ -541,6 +557,40 @@ type CreateBoardForm = {
   capabilityTags: string;
   skillDrafts: RepositorySkillDraftDto[];
   askWhenUncertain: boolean;
+};
+
+type GitHubRepositoryOnboardingFileDto = {
+  path: string;
+  content: string;
+};
+
+type GitHubRepositoryOnboardingDraftDto = {
+  name: string;
+  description: string;
+  prompt: string;
+  repositoryProfile: RepositoryProfileDto;
+  aiContext: {
+    instructions?: string | null;
+    enabledSkills?: string[] | null;
+    askWhenUncertain?: boolean | null;
+  };
+  files: GitHubRepositoryOnboardingFileDto[];
+  source: string;
+  model?: string | null;
+};
+
+type GitHubRepositoryCreateResponse = {
+  repository: RepositoryDto;
+  repositoryProfile?: RepositoryProfileDto | null;
+  aiContext?: {
+    instructions?: string | null;
+    enabledSkills?: string[] | null;
+    askWhenUncertain?: boolean | null;
+  } | null;
+};
+
+type GitHubUserAuthorizationStartDto = {
+  authorizationUrl: string;
 };
 
 type GitHubRepositoryPickerDto = {
@@ -699,7 +749,7 @@ function App() {
     try {
       const workspaces = await api.get<Workspace[]>('/api/workspaces');
       const workspace = workspaces[0];
-      if (!workspace) throw new Error('No workspace returned by API');
+      if (!workspace) throw new Error('No workspace available for this account.');
       const boards = await api.get<Board[]>(`/api/workspaces/${workspace.id}/boards`);
       const board = boards.find((entry) => entry.id === (preferredBoardId ?? selectedBoardIdRef.current)) ?? boards[0];
       if (!board) throw new Error('No board returned by API');
@@ -894,7 +944,7 @@ function App() {
           publicHostname: hasRepository ? form.publicHostname || null : null,
           providerMode: form.providerMode,
           customRepositoryUrl: form.providerMode === 'CustomUrl' ? form.repositoryRemoteUrl : null,
-          gitHubRepositoryId: form.providerMode === 'GitHub' ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : null,
+          gitHubRepositoryId: form.providerMode === 'GitHub' || form.providerMode === 'GitHubNew' ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : null,
           teamIds: form.teamIds,
           gitOpsSettings: form.implementationProfile === 'gitops-homelab' ? {
             allowedPaths: linesFromTextarea(form.gitOpsAllowedPaths),
@@ -1023,6 +1073,12 @@ function App() {
       return runAction('Syncing GitHub installations', async () => {
         await api.post<GitHubIntegrationDto[]>('/api/integrations/github/sync', {});
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
+    authorizeGitHubUser: async (installationId) => {
+      return runAction('Opening GitHub authorization', async () => {
+        const authorization = await api.get<GitHubUserAuthorizationStartDto>(`/api/integrations/github/user-authorization/start?installationId=${installationId}`, { timeoutMs: 15000 });
+        window.location.href = authorization.authorizationUrl;
       });
     },
     syncBoardRepository: async (boardId, request) => {
@@ -1203,13 +1259,20 @@ function App() {
         onNewCard={() => setCreateStatus('Todo')}
       />
       <main className="main">
-        <Topbar query={query} onQueryChange={setQuery} userName={auth.status === 'ready' ? auth.userName : null} />
+        <Topbar
+          query={query}
+          onQueryChange={setQuery}
+          userName={auth.status === 'ready' ? auth.userName : null}
+          userEmail={auth.status === 'ready' ? auth.userEmail : undefined}
+          onLogout={auth.status === 'ready' ? auth.logout : undefined}
+        />
         {apiBanner && <div className="api-status-banner" role="alert">{apiBanner}</div>}
         {auth.status === 'checking' && <Loading message="Checking authentication..." />}
+        {auth.status === 'signedOut' && <SignedOutPanel onLogin={auth.login} />}
         {auth.status === 'error' && <ErrorPanel message={auth.message} onRetry={() => window.location.reload()} />}
-        {shell.status === 'loading' && <Loading />}
-        {shell.status === 'error' && <ErrorPanel message={shell.message} onRetry={loadShell} />}
-        {shell.status === 'ready' && board && (
+        {(auth.status === 'ready' || auth.status === 'disabled') && shell.status === 'loading' && <Loading />}
+        {(auth.status === 'ready' || auth.status === 'disabled') && shell.status === 'error' && <ErrorPanel message={shell.message} onRetry={loadShell} />}
+        {(auth.status === 'ready' || auth.status === 'disabled') && shell.status === 'ready' && board && (
           <>
             {activeView === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
             {activeView === 'board' && <BoardView board={board} actions={actions} onSyncBoard={() => setSyncBoardOpen(true)} />}
@@ -1252,6 +1315,8 @@ function App() {
         <CreateBoardModal
           teams={shell.teams}
           githubIntegrations={shell.githubIntegrations}
+          settings={shell.settings}
+          me={shell.me}
           actions={actions}
           onNotify={addToast}
           onCreate={actions.createBoard}
@@ -1276,11 +1341,27 @@ function App() {
 type AuthState =
   | { status: 'checking' }
   | { status: 'disabled' }
-  | { status: 'ready'; accessToken: string; userName: string; userEmail?: string; refreshAccessToken: () => Promise<string | null>; handleUnauthorized: () => Promise<void> }
+  | { status: 'signedOut'; login: () => Promise<void> }
+  | { status: 'ready'; accessToken: string; userName: string; userEmail?: string; refreshAccessToken: () => Promise<string | null>; handleUnauthorized: () => Promise<void>; logout: () => Promise<void> }
   | { status: 'error'; message: string };
 
 function useAuth(): AuthState {
   const [auth, setAuth] = React.useState<AuthState>(() => authSettings.enabled ? { status: 'checking' } : { status: 'disabled' });
+  const login = React.useCallback(async () => {
+    if (!userManager) return;
+    window.sessionStorage.removeItem(signedOutStorageKey);
+    await userManager.signinRedirect({ prompt: 'login' });
+  }, []);
+  const logout = React.useCallback(async () => {
+    if (!userManager) {
+      setAuth({ status: 'disabled' });
+      return;
+    }
+
+    await userManager.removeUser();
+    window.sessionStorage.setItem(signedOutStorageKey, 'true');
+    window.location.assign(authSettings.postLogoutRedirectUri);
+  }, []);
   const handleUnauthorized = React.useCallback(async () => {
     if (!userManager) return;
     await userManager.removeUser();
@@ -1291,20 +1372,25 @@ function useAuth(): AuthState {
     try {
       const renewed = await userManager.signinSilent();
       if (!renewed || renewed.expired) return null;
-      setAuth(toReadyAuthState(renewed, refreshAccessToken, handleUnauthorized));
+      setAuth(toReadyAuthState(renewed, refreshAccessToken, handleUnauthorized, logout));
       return renewed.access_token;
     } catch {
       await userManager.removeUser();
       return null;
     }
-  }, [handleUnauthorized]);
+  }, [handleUnauthorized, logout]);
 
   React.useEffect(() => {
     if (!authSettings.enabled) return;
+    if (window.sessionStorage.getItem(signedOutStorageKey) === 'true') {
+      setAuth({ status: 'signedOut', login });
+      return;
+    }
+
     let cancelled = false;
     const removeUserLoaded = userManager?.events.addUserLoaded((user) => {
       if (!cancelled) {
-        setAuth(toReadyAuthState(user, refreshAccessToken, handleUnauthorized));
+        setAuth(toReadyAuthState(user, refreshAccessToken, handleUnauthorized, logout));
       }
     });
     const removeAccessTokenExpiring = userManager?.events.addAccessTokenExpiring(() => {
@@ -1317,7 +1403,7 @@ function useAuth(): AuthState {
     initializeAuth()
       .then((user) => {
         if (!cancelled) {
-          setAuth(toReadyAuthState(user, refreshAccessToken, handleUnauthorized));
+          setAuth(toReadyAuthState(user, refreshAccessToken, handleUnauthorized, logout));
         }
       })
       .catch((error) => {
@@ -1330,12 +1416,12 @@ function useAuth(): AuthState {
       removeAccessTokenExpiring?.();
       removeAccessTokenExpired?.();
     };
-  }, [handleUnauthorized, refreshAccessToken]);
+  }, [handleUnauthorized, login, logout, refreshAccessToken]);
 
   return auth;
 }
 
-function toReadyAuthState(user: User, refreshAccessToken: () => Promise<string | null>, handleUnauthorized: () => Promise<void>): AuthState {
+function toReadyAuthState(user: User, refreshAccessToken: () => Promise<string | null>, handleUnauthorized: () => Promise<void>, logout: () => Promise<void>): AuthState {
   const userEmail = typeof user.profile.email === 'string' ? user.profile.email : undefined;
   return {
     status: 'ready',
@@ -1343,7 +1429,8 @@ function toReadyAuthState(user: User, refreshAccessToken: () => Promise<string |
     userName: user.profile.name || user.profile.preferred_username || userEmail || 'Authenticated',
     userEmail,
     refreshAccessToken,
-    handleUnauthorized
+    handleUnauthorized,
+    logout
   };
 }
 
@@ -1361,11 +1448,36 @@ const authSettings = {
   authority: import.meta.env.VITE_AUTH_AUTHORITY as string | undefined,
   clientId: import.meta.env.VITE_AUTH_CLIENT_ID as string | undefined,
   redirectUri: (import.meta.env.VITE_AUTH_REDIRECT_URI as string | undefined) ?? `${window.location.origin}/auth/callback`,
-  postLogoutRedirectUri: (import.meta.env.VITE_AUTH_POST_LOGOUT_REDIRECT_URI as string | undefined) ?? window.location.origin
+  postLogoutRedirectUri: (import.meta.env.VITE_AUTH_POST_LOGOUT_REDIRECT_URI as string | undefined) ?? window.location.origin,
+  proxyPrefix: import.meta.env.VITE_AUTH_PROXY_PREFIX as string | undefined
 };
+
+const signedOutStorageKey = 'rosenvall-devops-signed-out';
+
+function localAuthMetadata() {
+  if (!authSettings.proxyPrefix || !authSettings.authority) return undefined;
+
+  const proxyPrefix = authSettings.proxyPrefix.replace(/\/+$/, '');
+  const authority = authSettings.authority.endsWith('/') ? authSettings.authority : `${authSettings.authority}/`;
+  const authorityUrl = new URL(authority);
+  const issuerPath = authorityUrl.pathname;
+  const providerBasePath = issuerPath.replace(/[^/]+\/$/, '');
+  const proxiedProviderBase = `${window.location.origin}${proxyPrefix}${providerBasePath}`;
+
+  return {
+    issuer: authority,
+    authorization_endpoint: `${authorityUrl.origin}${providerBasePath}authorize/`,
+    token_endpoint: `${proxiedProviderBase}token/`,
+    userinfo_endpoint: `${proxiedProviderBase}userinfo/`,
+    end_session_endpoint: `${authority}end-session/`,
+    jwks_uri: `${window.location.origin}${proxyPrefix}${issuerPath}jwks/`,
+    revocation_endpoint: `${proxiedProviderBase}revoke/`
+  };
+}
 
 const userManager = authSettings.enabled ? new UserManager({
   authority: authSettings.authority ?? '',
+  metadata: localAuthMetadata(),
   client_id: authSettings.clientId ?? '',
   redirect_uri: authSettings.redirectUri,
   post_logout_redirect_uri: authSettings.postLogoutRedirectUri,
@@ -1432,6 +1544,7 @@ type BoardActions = {
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<string | null>;
   addGitHubIntegration(): Promise<boolean>;
   syncGitHubIntegration(): Promise<boolean>;
+  authorizeGitHubUser(installationId: number): Promise<boolean>;
   syncBoardRepository(boardId: string, request: SyncBoardRepositoryRequest): Promise<boolean>;
   adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<boolean>;
   createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<boolean>;
@@ -1540,14 +1653,66 @@ function NavButton({ active, icon, label, onClick }: { active: boolean; icon: Re
   );
 }
 
-function Topbar({ query, onQueryChange, userName }: { query: string; onQueryChange: (query: string) => void; userName: string | null }) {
+function Topbar({ query, onQueryChange, userName, userEmail, onLogout }: {
+  query: string;
+  onQueryChange: (query: string) => void;
+  userName: string | null;
+  userEmail?: string;
+  onLogout?: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const menuRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (!menuOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    return () => document.removeEventListener('mousedown', closeOnOutsideClick);
+  }, [menuOpen]);
+
   return (
     <header className="topbar">
       <label className="search">
         <Search size={18} />
         <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search work items..." />
       </label>
-      <div className="avatar">{userName ? initials(userName) : 'CR'}</div>
+      <div className="user-menu" ref={menuRef}>
+        <button
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          className="avatar avatar-button"
+          onClick={() => setMenuOpen((current) => !current)}
+          type="button"
+        >
+          {userName ? initials(userName) : 'CR'}
+        </button>
+        {menuOpen && (
+          <div className="user-menu-popover" role="menu">
+            <div className="user-menu-identity">
+              <strong>{userName ?? 'Local user'}</strong>
+              {userEmail && <span>{userEmail}</span>}
+            </div>
+            {onLogout && (
+              <button
+                className="user-menu-action"
+                onClick={() => {
+                  setMenuOpen(false);
+                  void onLogout();
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <LogOut size={16} />
+                Log out
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </header>
   );
 }
@@ -1556,11 +1721,24 @@ function Loading({ message = 'Loading Rosenvall DevOps...' }: { message?: string
   return <section className="page"><div className="panel state-panel">{message}</div></section>;
 }
 
-function ErrorPanel({ message, onRetry }: { message: string; onRetry: () => void }) {
+function SignedOutPanel({ onLogin }: { onLogin: () => Promise<void> }) {
   return (
     <section className="page">
       <div className="panel state-panel">
-        <h2>API unavailable</h2>
+        <h2>Signed out</h2>
+        <p>You are signed out locally. Log in again to choose an Authentik account.</p>
+        <button className="primary-action narrow" onClick={() => void onLogin()}>Log in</button>
+      </div>
+    </section>
+  );
+}
+
+function ErrorPanel({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const isWorkspaceAccessIssue = message.toLowerCase().includes('no workspace available');
+  return (
+    <section className="page">
+      <div className="panel state-panel">
+        <h2>{isWorkspaceAccessIssue ? 'No workspace available' : 'API unavailable'}</h2>
         <p>{message}</p>
         <button className="primary-action narrow" onClick={onRetry}>Retry</button>
       </div>
@@ -2116,12 +2294,16 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
         <aside className="modal-side">
           {detail.development && (
             <section className="panel compact-panel">
-              <PanelHeader icon={<Github size={20} />} title="Development" />
+              <PanelHeader icon={isLocalGitDevelopmentRecord(detail.development) ? <GitPullRequest size={20} /> : <Github size={20} />} title={isLocalGitDevelopmentRecord(detail.development) ? 'Local development' : 'Development'} />
               <p className="repo">{detail.development.repository}<br />{detail.development.branch}</p>
-              {detail.development.pullRequestUrl && <SafeExternalLink className="url-box" href={detail.development.pullRequestUrl}>Pull request <ExternalLink size={16} /></SafeExternalLink>}
+              {detail.development.pullRequestUrl && isLocalGitDevelopmentRecord(detail.development) && (
+                <div className="url-box local-url-box">{pullRequestDisplayLabel(detail.development)}<span>{detail.development.pullRequestState ?? 'open'}</span></div>
+              )}
+              {detail.development.pullRequestUrl && !isLocalGitDevelopmentRecord(detail.development) && <SafeExternalLink className="url-box" href={detail.development.pullRequestUrl}>Pull request <ExternalLink size={16} /></SafeExternalLink>}
               <p className="status-line"><span />{developmentStatusText(detail.development)}</p>
+              {detail.development.pullRequestFailure && <p className="failure-reason">{detail.development.pullRequestFailure}</p>}
               {detail.development.pullRequestUrl && !detail.development.pullRequestApprovedAt && (
-                <button className="primary-action side-action" disabled={busy} onClick={() => void actions.approvePullRequest(detail.item.id)}><CheckCircle2 size={16} />Approve PR</button>
+                <button className="primary-action side-action" disabled={busy} onClick={() => void actions.approvePullRequest(detail.item.id)}><CheckCircle2 size={16} />{approvePullRequestActionLabel(detail.development)}</button>
               )}
               {detail.development.pullRequestApprovedAt && (
                 <p className="approval-note">Approved by {detail.development.pullRequestApprovedBy} {relativeTime(detail.development.pullRequestApprovedAt)}.</p>
@@ -2168,7 +2350,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   const repositoryProfile = targetRepository?.implementationProfile ?? board?.repository?.implementationProfile ?? 'react-preview';
   const implementationWorkflow = workflowForRepositoryProfile(repositoryProfile, targetRepository?.implementationWorkflow ?? board?.implementationWorkflow ?? board?.repository?.implementationWorkflow ?? null);
   const isRepositoryImplementation = implementationWorkflow === 'direct-pr';
-  const repositoryCanRunImplementation = !isRepositoryImplementation || targetRepository?.repository.provider === 'GitHub';
+  const repositoryCanRunImplementation = !isRepositoryImplementation || targetRepository?.repository.provider === 'GitHub' || targetRepository?.repository.provider === 'LocalGit';
   const gitOpsSettingsReady = repositoryProfile !== 'gitops-homelab' || !!board?.gitOpsSettings;
   const previewBusy = ['Implementing', 'Applying', 'Provisioning'].includes(detail.preview?.status ?? '');
   const previewRunning = detail.preview?.status === 'Running';
@@ -2353,11 +2535,13 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
   const pending = isImplementationRunPendingStatus(run.status);
   const failed = run.status === 'Failed';
   const ready = run.status === 'PullRequestReady';
-  const steps = implementationRunSteps(run.status);
+  const isLocalGit = run.pullRequestProvider?.toLowerCase() === 'localgit';
+  const presentation = repositoryRunPresentation(run.status, run.runKind);
+  const steps = presentation.steps;
   return (
     <section className="panel compact-panel implementation-panel">
-      <PanelHeader icon={<GitPullRequest size={20} />} title="Implementation run" />
-      <ol className="preview-stepper implementation-stepper" aria-label="Repository implementation lifecycle">
+      <PanelHeader icon={<GitPullRequest size={20} />} title={presentation.title} />
+      <ol className="preview-stepper implementation-stepper" aria-label={presentation.ariaLabel}>
         {steps.map((step, index) => (
           <li className={`stepper-item ${step.state}`} key={step.key}>
             <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
@@ -2367,7 +2551,8 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
       </ol>
       <p className="namespace-note">Branch: <code>{run.branch}</code></p>
       {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
-      {ready && run.pullRequestUrl && <SafeExternalLink className="url-box" href={run.pullRequestUrl}>Open pull request <ExternalLink size={16} /></SafeExternalLink>}
+      {ready && run.pullRequestUrl && isLocalGit && <div className="url-box local-url-box">Local pull request{run.pullRequestNumber ? ` #${run.pullRequestNumber}` : ''}<span>{run.pullRequestState ?? 'open'}</span></div>}
+      {ready && run.pullRequestUrl && !isLocalGit && <SafeExternalLink className="url-box" href={run.pullRequestUrl}>Open pull request <ExternalLink size={16} /></SafeExternalLink>}
       {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
       {(run.jobName || run.podName || run.lastCondition || run.lastEventSummary) && (
         <div className="cleanup-diagnostics">
@@ -2377,7 +2562,7 @@ function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
           {run.lastEventSummary && <p>Last event: {run.lastEventSummary}</p>}
         </div>
       )}
-      <PreviewTerminal lines={run.terminalLines ?? []} active={pending} />
+      <PreviewTerminal lines={run.terminalLines ?? []} active={pending} title={presentation.terminalTitle} />
       <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
     </section>
   );
@@ -2387,7 +2572,7 @@ function RepositoryCleanupRunPanel({ run, workItemId, busy = false, onAdopt, pro
   const pending = isImplementationRunPendingStatus(run.status);
   const failed = run.status === 'Failed';
   const ready = run.status === 'PullRequestReady' || run.status === 'Merged';
-  const steps = implementationRunSteps(run.status);
+  const steps = repositoryRunPresentation(run.status).steps;
   return (
     <section className={prominent ? 'panel cleanup-panel prominent-cleanup-panel' : 'panel compact-panel cleanup-panel'}>
       <PanelHeader icon={<Trash2 size={20} />} title="Cleanup run" />
@@ -2592,38 +2777,6 @@ function TerminalLog({ lines, expanded = false, resetKey }: { lines: PreviewTerm
   );
 }
 
-function implementationRunSteps(status: string) {
-  const steps = [
-    ['Cloning', 'Clone repository', 'The runner checks out the linked repository and creates a task branch.'],
-    ['Inspecting', 'Inspect repository', 'The runner records repository state before Codex starts.'],
-    ['Implementing', 'Implement with Codex', 'Codex edits the repository according to the selected plan.'],
-    ['Validating', 'Validate scope', 'Changed files are checked against the board allowed paths.'],
-    ['Testing', 'Run checks', 'The runner executes lightweight tests or builds when they are discoverable.'],
-    ['Pushing', 'Push branch', 'Changes are committed and pushed to GitHub.'],
-    ['PullRequestReady', 'Pull request ready', 'A GitHub pull request is available for review.']
-  ] as const;
-  const current = status === 'Queued'
-    ? 0
-    : status === 'Failed'
-      ? Math.max(0, steps.findIndex(([key]) => key === 'Implementing'))
-      : Math.max(0, steps.findIndex(([key]) => key === status));
-
-  return steps.map(([key, title, description], index) => ({
-    key,
-    title,
-    description,
-    state: status === 'PullRequestReady'
-      ? 'done'
-      : status === 'Failed' && index === current
-        ? 'blocked'
-        : index < current
-          ? 'done'
-          : index === current
-            ? 'active'
-            : 'pending'
-  }));
-}
-
 function terminalStreamLabel(stream: string) {
   const normalized = stream.toLowerCase();
   if (normalized === 'stderr') return 'agent';
@@ -2639,6 +2792,10 @@ function developmentStatusText(development: DevelopmentDto) {
   if (development.repository === 'local/vite-react-tailwind' &&
       development.checksStatus.toLowerCase().includes('preview ready')) {
     return 'Local React/Tailwind source generated';
+  }
+
+  if (isLocalGitDevelopmentRecord(development) && development.pullRequestApprovedAt) {
+    return 'Local pull request merged and deployed';
   }
 
   return development.checksStatus;
@@ -2723,16 +2880,31 @@ function ToastStack({ busyAction, toasts, onDismiss }: {
   );
 }
 
-function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCreate, onClose }: {
+function CreateBoardModal({ teams, githubIntegrations, settings, me, actions, onNotify, onCreate, onClose }: {
   teams: TeamDto[];
   githubIntegrations: GitHubIntegrationDto[];
+  settings: SettingsDto;
+  me: UserDto;
   actions: BoardActions;
   onNotify: (kind: ToastMessage['kind'], message: string) => void;
   onCreate: (form: CreateBoardForm) => Promise<boolean>;
   onClose: () => void;
 }) {
   const defaultTeamIds = React.useMemo(() => teams.filter((team) => team.members.some((member) => ['Owner', 'Admin', 'Member'].includes(member.role))).slice(0, 1).map((team) => team.id), [teams]);
-  const [form, setForm] = React.useState<CreateBoardForm>({ ...emptyBoardForm, teamIds: defaultTeamIds });
+  const isDemoUser = me.email?.toLowerCase() === 'demo@rosenvall.local';
+  const localGitState = localGitProviderState(settings.repositories);
+  const localGitEnabled = localGitState.visible;
+  const localGitAvailable = localGitState.available;
+  const localGitMessage = localGitState.message;
+  const initialProviderMode: CreateBoardForm['providerMode'] = isDemoUser && localGitEnabled ? 'LocalGitNew' : emptyBoardForm.providerMode;
+  const [form, setForm] = React.useState<CreateBoardForm>({
+    ...emptyBoardForm,
+    providerMode: initialProviderMode,
+    repositoryProvider: initialProviderMode === 'LocalGitNew' ? 'LocalGit' : emptyBoardForm.repositoryProvider,
+    implementationProfile: initialProviderMode === 'LocalGitNew' ? 'react-preview' : emptyBoardForm.implementationProfile,
+    implementationWorkflow: initialProviderMode === 'LocalGitNew' ? 'preview-then-pr' : emptyBoardForm.implementationWorkflow,
+    teamIds: defaultTeamIds
+  });
   const [githubRepos, setGithubRepos] = React.useState<RepositoryDto[]>([]);
   const [githubStatus, setGithubStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'empty' | 'error'>('idle');
   const [githubError, setGithubError] = React.useState<string | null>(null);
@@ -2741,17 +2913,32 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
   const [profileStatus, setProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [aiProfileStatus, setAiProfileStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [profileError, setProfileError] = React.useState<string | null>(null);
+  const [newRepoName, setNewRepoName] = React.useState('');
+  const [newRepoDescription, setNewRepoDescription] = React.useState('');
+  const [newRepoPrivate, setNewRepoPrivate] = React.useState(true);
+  const [newRepoPrompt, setNewRepoPrompt] = React.useState('');
+  const [newRepoInstallationId, setNewRepoInstallationId] = React.useState<number | null>(null);
+  const [onboardingDraft, setOnboardingDraft] = React.useState<GitHubRepositoryOnboardingDraftDto | null>(null);
+  const [onboardingStatus, setOnboardingStatus] = React.useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  const [onboardingError, setOnboardingError] = React.useState<string | null>(null);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [publicHostnameTouched, setPublicHostnameTouched] = React.useState(false);
   const profileRequestRef = React.useRef(0);
   const normalizedName = form.name.trim();
   const usesGitHub = form.providerMode === 'GitHub';
+  const usesGitHubNew = form.providerMode === 'GitHubNew';
+  const usesLocalGitNew = form.providerMode === 'LocalGitNew';
   const usesCustomUrl = form.providerMode === 'CustomUrl';
   const usesNoRepository = form.providerMode === 'NoRepository';
+  const selectedInstallationId = newRepoInstallationId ?? githubInstallationId ?? githubIntegrations[0]?.installationId ?? null;
+  const selectedNewRepoIntegration = githubIntegrations.find((integration) => integration.installationId === selectedInstallationId) ?? null;
+  const createPermissionMessage = usesGitHubNew ? repositoryCreatePermissionMessage(selectedNewRepoIntegration) : usesLocalGitNew && !localGitAvailable ? localGitMessage : null;
   const canCreate = normalizedName.length > 0 && profileStatus !== 'loading' && (
     usesNoRepository ||
     (usesGitHub ? form.repositoryRemoteUrl.trim().length > 0 : false) ||
+    (usesGitHubNew ? normalizeRepositoryNameInput(newRepoName || form.name).length > 0 && !!onboardingDraft && !!selectedInstallationId && canCreateRepositoryInInstallation(selectedNewRepoIntegration) : false) ||
+    (usesLocalGitNew ? normalizeRepositoryNameInput(newRepoName || form.name).length > 0 && !!onboardingDraft && localGitAvailable : false) ||
     (usesCustomUrl ? isPublicGitUrl(form.repositoryRemoteUrl) : false)
   );
 
@@ -2807,6 +2994,132 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
       skillDrafts: profile.skillDrafts ?? [],
       askWhenUncertain: implementationProfile === 'gitops-homelab' ? true : current.askWhenUncertain
     }));
+  }
+
+  function applyOnboardingDraft(draft: GitHubRepositoryOnboardingDraftDto) {
+    setOnboardingDraft(draft);
+    setNewRepoName(draft.name);
+    setNewRepoDescription(draft.description);
+    setNewRepoPrompt(draft.prompt);
+    applyRepositoryProfile(draft.repositoryProfile);
+    setForm((current) => ({
+      ...current,
+      name: current.name || draft.name,
+      aiInstructions: draft.aiContext.instructions ?? draft.repositoryProfile.instructions,
+      enabledSkills: (draft.aiContext.enabledSkills ?? draft.repositoryProfile.enabledSkills ?? []).join('\n'),
+      askWhenUncertain: draft.aiContext.askWhenUncertain ?? current.askWhenUncertain
+    }));
+  }
+
+  async function generateOnboardingDraft() {
+    setOnboardingStatus('loading');
+    setOnboardingError(null);
+    setSubmitError(null);
+    try {
+      const draft = await api.post<GitHubRepositoryOnboardingDraftDto>('/api/repositories/github/onboarding-draft', {
+        name: normalizeRepositoryNameInput(newRepoName || form.name),
+        description: newRepoDescription,
+        prompt: newRepoPrompt,
+        implementationProfile: form.implementationProfile
+      }, { timeoutMs: 60000 });
+      applyOnboardingDraft(draft);
+      setOnboardingStatus('loaded');
+    } catch (error) {
+      setOnboardingStatus('error');
+      setOnboardingError(error instanceof Error ? error.message : 'Could not generate onboarding draft');
+    }
+  }
+
+  async function authorizeGitHubUser(installationId: number) {
+    try {
+      const response = await api.get<GitHubUserAuthorizationStartDto>(`/api/integrations/github/user-authorization/start?installationId=${installationId}`, { timeoutMs: 15000 });
+      window.location.href = response.authorizationUrl;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not start GitHub user authorization';
+      setSubmitError(message);
+      onNotify('error', message);
+    }
+  }
+
+  async function createNewGitHubRepositoryFromDraft() {
+    if (!onboardingDraft || !selectedInstallationId) {
+      throw new Error('Generate an onboarding draft and select a GitHub installation before creating the board.');
+    }
+    if (!canCreateRepositoryInInstallation(selectedNewRepoIntegration)) {
+      throw new Error(createPermissionMessage ?? 'You do not have permission to create repositories for this GitHub installation.');
+    }
+
+    const response = await api.post<GitHubRepositoryCreateResponse>('/api/repositories/github', {
+      installationId: selectedInstallationId,
+      name: normalizeRepositoryNameInput(newRepoName || form.name),
+      private: newRepoPrivate,
+      description: newRepoDescription,
+      implementationProfile: form.implementationProfile,
+      implementationWorkflow: form.implementationWorkflow,
+      onboardingPrompt: newRepoPrompt,
+      files: onboardingDraft.files,
+      repositoryProfile: repositoryProfileFromForm(form, onboardingDraft.repositoryProfile),
+      aiContext: {
+        instructions: form.aiInstructions,
+        enabledSkills: linesFromTextarea(form.enabledSkills),
+        askWhenUncertain: form.askWhenUncertain
+      }
+    }, { timeoutMs: 60000 });
+
+    const repository = response.repository;
+    const implementationProfile = normalizeImplementationProfile(repository.implementationProfile);
+    return {
+      ...form,
+      repositoryId: repository.id,
+      providerMode: 'GitHubNew' as const,
+      repositoryProvider: 'GitHub',
+      repositoryOwner: repository.owner ?? '',
+      repositoryRemoteUrl: repository.remoteUrl,
+      repositoryWebUrl: repository.webUrl ?? '',
+      repositoryDefaultBranch: repository.defaultBranch || 'main',
+      implementationProfile,
+      implementationWorkflow: workflowForRepositoryProfile(implementationProfile, repository.implementationWorkflow)
+    };
+  }
+
+  async function createNewLocalGitRepositoryFromDraft() {
+    if (!onboardingDraft) {
+      throw new Error('Generate an onboarding draft before creating the local Git board.');
+    }
+    if (!localGitAvailable) {
+      throw new Error(localGitMessage);
+    }
+
+    const response = await api.post<GitHubRepositoryCreateResponse>('/api/repositories/local', {
+      name: normalizeRepositoryNameInput(newRepoName || form.name),
+      private: newRepoPrivate,
+      description: newRepoDescription,
+      implementationProfile: form.implementationProfile,
+      implementationWorkflow: form.implementationWorkflow,
+      onboardingPrompt: newRepoPrompt,
+      files: onboardingDraft.files,
+      repositoryProfile: repositoryProfileFromForm(form, onboardingDraft.repositoryProfile),
+      aiContext: {
+        instructions: form.aiInstructions,
+        enabledSkills: linesFromTextarea(form.enabledSkills),
+        askWhenUncertain: form.askWhenUncertain
+      }
+    }, { timeoutMs: 60000 });
+
+    const repository = response.repository;
+    const implementationProfile = normalizeImplementationProfile(repository.implementationProfile);
+    return {
+      ...form,
+      repositoryId: repository.id,
+      providerMode: 'LocalGitNew' as const,
+      repositoryProvider: 'LocalGit',
+      repositoryOwner: repository.owner ?? '',
+      repositoryRemoteUrl: repository.remoteUrl,
+      repositoryWebUrl: repository.webUrl ?? '',
+      repositoryDefaultBranch: repository.defaultBranch || 'main',
+      implementationProfile,
+      implementationWorkflow: workflowForRepositoryProfile(implementationProfile, repository.implementationWorkflow)
+    };
   }
 
   const loadRepositoryProfile = React.useCallback(async (repository: RepositoryDto) => {
@@ -2879,14 +3192,20 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
         if (!canCreate || submitting) return;
         setSubmitting(true);
         setSubmitError(null);
-        const submitForm = Promise.resolve({ ...form, name: normalizedName });
+        const submitForm = usesGitHubNew
+          ? createNewGitHubRepositoryFromDraft().then((repoForm) => ({ ...repoForm, name: normalizedName }))
+          : usesLocalGitNew
+            ? createNewLocalGitRepositoryFromDraft().then((repoForm) => ({ ...repoForm, name: normalizedName }))
+            : Promise.resolve({ ...form, name: normalizedName });
         void submitForm
           .then((nextForm) => onCreate(nextForm))
           .then((saved) => {
             if (saved) onClose();
           })
           .catch((error) => {
-            const message = error instanceof Error ? error.message : 'Could not create GitHub repository';
+            const message = error instanceof Error ? error.message : 'Could not create repository';
+            setOnboardingStatus('error');
+            setOnboardingError(message);
             setSubmitError(message);
             onNotify('error', message);
           })
@@ -2899,22 +3218,29 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
             setForm({
               ...form,
               providerMode,
-              repositoryProvider: providerMode === 'GitHub' ? 'GitHub' : providerMode === 'NoRepository' ? '' : 'GenericGit',
+              repositoryProvider: providerMode === 'GitHub' || providerMode === 'GitHubNew' ? 'GitHub' : providerMode === 'LocalGitNew' ? 'LocalGit' : providerMode === 'NoRepository' ? '' : 'GenericGit',
               repositoryId: null,
               repositoryRemoteUrl: '',
               repositoryWebUrl: '',
               repositoryOwner: '',
-              implementationProfile: providerMode === 'GitHub' ? 'code-repo' : form.implementationProfile
+              implementationProfile: providerMode === 'LocalGitNew' ? 'react-preview' : providerMode === 'GitHub' || providerMode === 'GitHubNew' ? 'code-repo' : form.implementationProfile,
+              implementationWorkflow: providerMode === 'LocalGitNew' ? 'preview-then-pr' : form.implementationWorkflow
             });
             setRepositoryProfile(null);
             setProfileStatus('idle');
             setAiProfileStatus('idle');
             setProfileError(null);
+            setOnboardingDraft(null);
+            setOnboardingStatus('idle');
+            setOnboardingError(null);
             if (providerMode === 'GitHub') setGithubStatus('idle');
+            if (providerMode === 'GitHubNew' || providerMode === 'LocalGitNew') setNewRepoName(normalizeRepositoryNameInput(form.name));
           }}>
             <option value="NoRepository">No repository</option>
-            <option value="GitHub">GitHub existing repository</option>
-            <option value="CustomUrl">Custom URL</option>
+            {!isDemoUser && <option value="GitHub">GitHub existing repository</option>}
+            {!isDemoUser && <option value="GitHubNew">GitHub new repository</option>}
+            {localGitEnabled && <option value="LocalGitNew">Local Git new repository</option>}
+            {!isDemoUser && <option value="CustomUrl">Custom URL</option>}
           </select></label>
           {usesGitHub && (
             <label>GitHub repository<select value={form.repositoryOwner && form.repositoryRemoteUrl ? `${form.repositoryOwner}/${repositoryNameFromRemote(form.repositoryRemoteUrl, form.name)}` : ''} onChange={(event) => selectGitHubRepository(event.target.value)}>
@@ -2931,6 +3257,30 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
           )}
         </div>
         {usesNoRepository && <p className="provider-status">This board starts preview-only. You can sync it to GitHub later from the board header.</p>}
+        {(usesGitHubNew || usesLocalGitNew) && (
+          <NewRepositoryOnboardingPanel
+            form={form}
+            localGitMode={usesLocalGitNew}
+            installationId={selectedInstallationId}
+            integrations={githubIntegrations}
+            repoName={newRepoName || normalizeRepositoryNameInput(form.name)}
+            selectedInstallationId={selectedInstallationId}
+            description={newRepoDescription}
+            isPrivate={newRepoPrivate}
+            prompt={newRepoPrompt}
+            draft={onboardingDraft}
+            error={onboardingError}
+            onInstallationChange={setNewRepoInstallationId}
+            onRepoNameChange={setNewRepoName}
+            onDescriptionChange={setNewRepoDescription}
+            onPrivateChange={setNewRepoPrivate}
+            onPromptChange={setNewRepoPrompt}
+            onDraftChange={setOnboardingDraft}
+            onAuthorize={authorizeGitHubUser}
+            createPermissionMessage={createPermissionMessage}
+            localGitMessage={localGitMessage}
+          />
+        )}
         {usesGitHub && form.repositoryRemoteUrl && (
           <RepositoryProfileEditor
             form={form}
@@ -2978,12 +3328,101 @@ function CreateBoardModal({ teams, githubIntegrations, actions, onNotify, onCrea
         )}
         {usesCustomUrl && form.repositoryRemoteUrl && !isPublicGitUrl(form.repositoryRemoteUrl) && <p className="provider-status">Custom URL supports public HTTP(S) clone URLs only in v1.</p>}
         {submitError && <p className="failure-reason submit-error">{submitError}</p>}
+        {createPermissionMessage && <p className="failure-reason submit-error">{createPermissionMessage}</p>}
         <div className="modal-actions">
+          {(usesGitHubNew || usesLocalGitNew) && (
+            <button type="button" className="secondary" disabled={onboardingStatus === 'loading' || normalizeRepositoryNameInput(newRepoName || form.name).length === 0} onClick={() => void generateOnboardingDraft()}>
+              <Sparkles size={16} />{onboardingStatus === 'loading' ? 'Generating draft...' : onboardingDraft ? 'Regenerate draft' : 'Generate draft'}
+            </button>
+          )}
           <button className="primary-action" disabled={!canCreate || submitting}><Plus size={16} />Create board</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
     </ModalFrame>
+  );
+}
+
+function NewRepositoryOnboardingPanel({ form, localGitMode = false, installationId, integrations, repoName, selectedInstallationId, description, isPrivate, prompt, draft, error, createPermissionMessage, localGitMessage, onInstallationChange, onRepoNameChange, onDescriptionChange, onPrivateChange, onPromptChange, onDraftChange, onAuthorize }: {
+  form: CreateBoardForm;
+  localGitMode?: boolean;
+  installationId: number | null;
+  integrations: GitHubIntegrationDto[];
+  repoName: string;
+  selectedInstallationId: number | null;
+  description: string;
+  isPrivate: boolean;
+  prompt: string;
+  draft: GitHubRepositoryOnboardingDraftDto | null;
+  error: string | null;
+  createPermissionMessage: string | null;
+  localGitMessage?: string | null;
+  onInstallationChange: (value: number | null) => void;
+  onRepoNameChange: (value: string) => void;
+  onDescriptionChange: (value: string) => void;
+  onPrivateChange: (value: boolean) => void;
+  onPromptChange: (value: string) => void;
+  onDraftChange: React.Dispatch<React.SetStateAction<GitHubRepositoryOnboardingDraftDto | null>>;
+  onAuthorize: (installationId: number) => Promise<void>;
+}) {
+  const selectedIntegration = integrations.find((integration) => integration.installationId === selectedInstallationId) ?? null;
+  const updateFile = (index: number, patch: Partial<GitHubRepositoryOnboardingFileDto>) => {
+    onDraftChange((current) => current ? { ...current, files: current.files.map((file, fileIndex) => fileIndex === index ? { ...file, ...patch } : file) } : current);
+  };
+
+  return (
+    <section className="repository-profile-panel">
+      <div className="panel-heading-row">
+        <div>
+          <h3>{localGitMode ? 'Local Git repository onboarding' : 'New repository onboarding'}</h3>
+          <p>Codex drafts editable guidance files only. App code and deployment manifests start from later cards.</p>
+        </div>
+      </div>
+      <div className="form-grid two">
+        <label>Repository name<input value={repoName} onChange={(event) => onRepoNameChange(event.target.value)} onBlur={(event) => onRepoNameChange(normalizeRepositoryNameInput(event.target.value))} placeholder={normalizeRepositoryNameInput(form.name) || 'new-repository'} /></label>
+        <label>Visibility<select value={isPrivate ? 'private' : 'public'} onChange={(event) => onPrivateChange(event.target.value === 'private')}>
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select></label>
+        {!localGitMode && <label className="full-width">GitHub installation<select value={selectedInstallationId ?? ''} onChange={(event) => onInstallationChange(event.target.value ? Number(event.target.value) : null)}>
+          <option value="">Select installation...</option>
+          {integrations.map((integration) => <option key={integration.installationId} value={integration.installationId}>{integration.accountLogin} ({integration.accountType})</option>)}
+        </select></label>}
+        <label className="full-width">Description<input value={description} onChange={(event) => onDescriptionChange(event.target.value)} placeholder={`Repository for ${form.name || 'this board'}.`} /></label>
+        <label className="full-width">What should this repository be for?<textarea value={prompt} onChange={(event) => onPromptChange(event.target.value)} placeholder="Describe the repo purpose, stack, operating model, and any conventions Codex should encode as guidance." /></label>
+      </div>
+      {!localGitMode && !installationId && <p className="failure-reason">No GitHub App installation is available for creating a repository.</p>}
+      {localGitMode && <p className={createPermissionMessage ? 'provider-status warning' : 'provider-status ready'}>{localGitMessage ?? 'Local Git repository: RDO will create a private Forgejo repository inside the DevOps namespace. Demo users do not need GitHub.'}</p>}
+      {!localGitMode && selectedIntegration && <p className="provider-status">GitHub installation: {selectedIntegration.accountLogin}. New repositories are private by default.</p>}
+      {!localGitMode && selectedIntegration?.requiresUserAuthorizationForRepositoryCreation && (
+        <div className="provider-status with-actions">
+          <span>{selectedIntegration.repositoryCreationMessage ?? `Authorize GitHub user access before creating repositories under ${selectedIntegration.accountLogin}.`}</span>
+          <button type="button" className="secondary compact" onClick={() => void onAuthorize(selectedIntegration.installationId)}><Github size={14} />Authorize GitHub user</button>
+        </div>
+      )}
+      {!localGitMode && selectedIntegration?.hasUserAuthorization && selectedIntegration.authorizedGitHubLogin && !selectedIntegration.canCreateRepositories && (
+        <p className="failure-reason">Connected as {selectedIntegration.authorizedGitHubLogin}, but this installation belongs to {selectedIntegration.accountLogin}. Repository creation is only allowed under your own GitHub login.</p>
+      )}
+      {createPermissionMessage && <p className="failure-reason">{createPermissionMessage}</p>}
+      <p className="provider-status">Repository names are normalized to kebab-case, for example <code>date-site</code>.</p>
+      {error && <p className="failure-reason">{error}</p>}
+      {draft && (
+        <div className="settings-list skill-drafts-list">
+          <div className="settings-row">
+            <div>
+              <strong>Draft source</strong>
+              <p>{draft.source}{draft.model ? ` / ${draft.model}` : ''} - {draft.repositoryProfile.displayName}</p>
+            </div>
+          </div>
+          {draft.files.map((file, index) => (
+            <div className="settings-row vertical" key={`${file.path}-${index}`}>
+              <label>Path<input value={file.path} onChange={(event) => updateFile(index, { path: event.target.value })} /></label>
+              <label>Content<textarea value={file.content} onChange={(event) => updateFile(index, { content: event.target.value })} /></label>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -3400,6 +3839,7 @@ function SettingsView({ scope, settings, board, me, teams, repositories, boardSe
                   <GitHubIntegrationStatus
                     integration={integration}
                     key={integration.id}
+                    onAuthorize={actions.authorizeGitHubUser}
                   />
                 ))}
               </div>
@@ -3544,16 +3984,21 @@ function BoardHostingForm({ board, actions }: { board: Board; actions: BoardActi
   );
 }
 
-function GitHubIntegrationStatus({ integration }: { integration: GitHubIntegrationDto }) {
+function GitHubIntegrationStatus({ integration, onAuthorize }: { integration: GitHubIntegrationDto; onAuthorize: (installationId: number) => Promise<boolean> }) {
+  const canCreate = canCreateRepositoryInInstallation(integration);
+  const needsAuthorization = integration.requiresUserAuthorizationForRepositoryCreation && !canCreate;
   return (
     <div className="settings-row">
       <div>
         <strong>{integration.accountLogin}</strong>
         <p>{integration.accountType} - {integration.repositoriesCount} repositories - installed by {integration.installedBy}</p>
+        <p>{integration.repositoryCreationMessage ?? (canCreate ? 'Repository creation permission granted.' : 'Existing repositories can still be linked.')}</p>
       </div>
       <div className="status-badges">
         <span className={integration.status === 'Active' ? 'state-good' : 'state-muted'}>{integration.status}</span>
-        <span className="state-muted">Existing repos only</span>
+        <span className={canCreate ? 'state-good' : 'state-muted'}>{canCreate ? 'Can create repos' : 'Existing repos only'}</span>
+        {integration.hasUserAuthorization && <span className="state-good">User authorized{integration.authorizedGitHubLogin ? `: ${integration.authorizedGitHubLogin}` : ''}</span>}
+        {needsAuthorization && <button type="button" className="secondary compact" onClick={() => void onAuthorize(integration.installationId)}><Github size={14} />Authorize GitHub user</button>}
       </div>
     </div>
   );
@@ -3590,10 +4035,10 @@ function BoardDangerZone({ board, actions }: { board: Board; actions: BoardActio
       <div className="settings-row vertical">
         <div>
           <strong>Delete board and clean up</strong>
-          <p>Kubernetes preview namespaces, runner jobs, per-run token secrets, pipeline jobs and board-owned environment secrets are deleted. GitHub repositories, branches, pull requests and shared platform credentials are not deleted automatically.</p>
+          <p>Kubernetes preview namespaces, runner jobs, per-run token secrets, pipeline jobs, board-owned environment secrets and board-owned Local Git repositories are deleted. GitHub repositories, branches, pull requests and shared platform credentials are not deleted automatically.</p>
         </div>
         <label>Type board name to confirm<input value={confirmText} onChange={(event) => setConfirmText(event.target.value)} placeholder={expected} /></label>
-        <button className="danger-button" type="button" disabled={!canDelete} onClick={() => canDelete && confirm(`Delete ${board.name} and clean Kubernetes runtime resources? GitHub repositories and PRs will remain.`) && void actions.deleteBoard(board.id)}><Trash2 size={16} />Delete board and clean up</button>
+        <button className="danger-button" type="button" disabled={!canDelete} onClick={() => canDelete && confirm(boardDeleteCleanupMessage(board.name)) && void actions.deleteBoard(board.id)}><Trash2 size={16} />Delete board and clean up</button>
       </div>
     </div>
   );
@@ -4271,6 +4716,16 @@ function uniqueRepositories(repositories: RepositoryDto[]) {
 function slugFromText(value: string) {
   const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').replace(/--+/g, '-');
   return slug || 'new-board';
+}
+
+function normalizeRepositoryNameInput(value: string) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/--+/g, '-');
+  return normalized || 'new-repository';
 }
 
 function looksLikeWebsiteText(value: string) {

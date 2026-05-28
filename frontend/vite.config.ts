@@ -10,6 +10,12 @@ export default defineConfig({
       '/hubs': {
         target: 'http://localhost:5088',
         ws: true
+      },
+      '/authentik': {
+        target: 'https://authentik.rosenvall.se',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/authentik/, '')
       }
     }
   }

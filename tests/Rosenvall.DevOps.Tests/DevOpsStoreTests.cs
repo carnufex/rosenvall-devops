@@ -208,12 +208,14 @@ public sealed class DevOpsStoreTests
         Assert.Equal("preview-promotion", run.RunKind);
         Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
         Assert.Contains("RDO_PULL_REQUEST_URL", manifest);
+        Assert.Contains("RDO_STEP=WritingPreviewSource", manifest);
         Assert.Contains("git status --porcelain", manifest);
         Assert.Contains("git commit -m", manifest);
         Assert.Contains("git push --set-upstream origin", manifest);
         Assert.Contains("ROSENVALL_PUBLIC_HOSTNAME", manifest);
         Assert.Contains("Production hostname:", manifest);
         Assert.DoesNotContain("codex exec", manifest);
+        Assert.DoesNotContain("RDO_STEP=Implementing", manifest);
         Assert.DoesNotContain("RDO_STEP=Testing", manifest);
         Assert.DoesNotContain("npm test", manifest);
         Assert.DoesNotContain("npm run build", manifest);
@@ -223,6 +225,264 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("/opt/rosenvall-preview", manifest);
         Assert.DoesNotContain("rm -rf dist", manifest);
         Assert.Equal("Running", store.GetWorkItemDetail(item.Id)!.Preview!.Status);
+    }
+
+    [Fact]
+    public void Local_git_preview_promotion_uses_forgejo_pr_api_without_codex_or_builds()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "clock-app",
+            "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/clock-app.git",
+            "main",
+            null,
+            "rdo",
+            "react-preview",
+            "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:ApiBaseUrl"] = "http://localhost:3001/api/v1",
+                ["LocalGit:RunnerApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo"
+            })
+            .Build(), "repository-token")!;
+
+        Assert.Contains("ROSENVALL_REPOSITORY_PROVIDER", manifest);
+        Assert.Contains("value: \"LocalGit\"", manifest);
+        Assert.Contains("ROSENVALL_FORGEJO_API_BASE_URL", manifest);
+        Assert.Contains("value: \"http://forgejo.local/api/v1\"", manifest);
+        Assert.DoesNotContain("value: \"http://localhost:3001/api/v1\"", manifest);
+        Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
+        Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("-H \"Authorization: Basic $forgejo_auth\"", manifest);
+        Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
+        Assert.DoesNotContain("name: GITHUB_TOKEN", manifest);
+        Assert.DoesNotContain("codex exec", manifest);
+        Assert.DoesNotContain("npm run build", manifest);
+        Assert.DoesNotContain("npm test", manifest);
+    }
+
+    [Fact]
+    public void Local_git_implementation_run_clones_pushes_and_creates_forgejo_pull_request()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "demo-app",
+            "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/demo-app.git",
+            "main",
+            null,
+            "rdo",
+            "code-repo",
+            "direct-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo app", repository.Id, null, null, null, null, null, ImplementationProfile: "code-repo", ImplementationWorkflow: "direct-pr"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Implement app", "Build the app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build implementation.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+
+        var run = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:ApiBaseUrl"] = "http://localhost:3001/api/v1",
+                ["LocalGit:RunnerApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo"
+            })
+            .Build(), "repository-token")!;
+
+        Assert.Contains("value: \"LocalGit\"", manifest);
+        Assert.Contains("value: \"http://forgejo.local/api/v1\"", manifest);
+        Assert.DoesNotContain("value: \"http://localhost:3001/api/v1\"", manifest);
+        Assert.Contains("ROSENVALL_GIT_TOKEN", manifest);
+        Assert.Contains("codex exec", manifest);
+        Assert.Contains("git push --set-upstream origin", manifest);
+        Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
+        Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("-H \"Authorization: Basic $forgejo_auth\"", manifest);
+        Assert.DoesNotContain("name: GITHUB_TOKEN", manifest);
+    }
+
+    [Fact]
+    public void Local_git_settings_distinguish_enabled_from_available()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var ready = fixture.Store.GetSettings(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:Enabled"] = "true",
+                ["LocalGit:ApiBaseUrl"] = "http://localhost:3001/api/v1",
+                ["LocalGit:RunnerApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Password"] = "service-token"
+            })
+            .Build());
+        var unavailable = fixture.Store.GetSettings(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:Enabled"] = "true",
+                ["LocalGit:ApiBaseUrl"] = "http://localhost:3001/api/v1",
+                ["LocalGit:Password"] = "service-token",
+                ["LocalGit:UnavailableReason"] = "Forgejo is not deployed."
+            })
+            .Build());
+
+        Assert.Equal("LocalGit", ready.Repositories.Provider);
+        Assert.Equal("http://localhost:3001/api/v1", ready.Repositories.ApiBaseUrl);
+        Assert.True(ready.Repositories.LocalGitEnabled);
+        Assert.True(ready.Repositories.LocalGitAvailable);
+        Assert.True(ready.Repositories.CanCreateRepositories);
+
+        Assert.True(unavailable.Repositories.LocalGitEnabled);
+        Assert.False(unavailable.Repositories.LocalGitAvailable);
+        Assert.False(unavailable.Repositories.CanCreateRepositories);
+        Assert.Equal("Forgejo is not deployed.", unavailable.Repositories.LocalGitMessage);
+    }
+
+    [Fact]
+    public void Local_git_pull_request_metadata_is_stored_on_run_and_development()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "demo-app",
+            "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/demo-app.git",
+            "main",
+            null,
+            "rdo",
+            "react-preview",
+            "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Implement app", "Build the app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build implementation.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        var updated = store.UpdateImplementationRun(run.Id, "PullRequestReady", "RDO_COMMIT=abc123\nRDO_PULL_REQUEST_URL=http://forgejo.local/rdo/demo-app/pulls/7\nRDO_PULL_REQUEST_NUMBER=7\nRDO_PULL_REQUEST_STATE=open")!;
+        var detail = store.GetWorkItemDetail(item.Id)!;
+
+        Assert.Equal("LocalGit", updated.PullRequestProvider);
+        Assert.Equal(7, updated.PullRequestNumber);
+        Assert.Equal("open", updated.PullRequestState);
+        Assert.Equal("LocalGit", detail.Development!.PullRequestProvider);
+        Assert.Equal(repository.Id, detail.Development.RepositoryId);
+        Assert.Equal(7, detail.Development.PullRequestNumber);
+        Assert.Equal("Local pull request ready", detail.Development.ChecksStatus);
+    }
+
+    [Fact]
+    public void Local_git_pull_request_merge_state_is_preserved_when_pr_is_approved()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "demo-app",
+            "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/demo-app.git",
+            "main",
+            null,
+            "rdo",
+            "react-preview",
+            "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Implement app", "Build the app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build implementation.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        store.UpdateImplementationRun(run.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=http://forgejo.local/rdo/demo-app/pulls/7\nRDO_PULL_REQUEST_NUMBER=7\nRDO_PULL_REQUEST_STATE=open");
+
+        Assert.False(store.IsPullRequestApproved(item.Id));
+
+        store.MarkPullRequestMergeState(item.Id, "merged", true);
+        var approved = store.ApprovePullRequest(item.Id, "crille")!;
+
+        Assert.Equal("Done", approved.Item.Status);
+        Assert.True(store.IsPullRequestApproved(item.Id));
+        Assert.Equal("merged", approved.Development!.PullRequestState);
+        Assert.NotNull(approved.Development.PullRequestMergedAt);
+        Assert.Equal("crille", approved.Development.PullRequestApprovedBy);
+        Assert.Null(approved.Development.PullRequestFailure);
+    }
+
+    [Fact]
+    public void Board_owned_local_git_repositories_are_identified_for_cleanup()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var localRepository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview", "preview-then-pr"));
+        var sharedRepository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "shared-app", "http://forgejo/rdo/shared-app.git", "main", null, "rdo", "react-preview", "preview-then-pr"));
+        var githubRepository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "github-app", "https://github.com/carnufex/github-app.git", "main", "https://github.com/carnufex/github-app", "carnufex", "react-preview", "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo app", localRepository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var otherBoard = store.CreateBoard(workspace.Id, new CreateBoardRequest("Other app", sharedRepository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        store.CreateBoard(workspace.Id, new CreateBoardRequest("Shared app", sharedRepository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"));
+        store.CreateBoard(workspace.Id, new CreateBoardRequest("GitHub app", githubRepository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"));
+        store.LinkRepositoryToBoard(board.Id, new LinkBoardRepositoryRequest(githubRepository.Id, false, "react-preview"));
+        store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("LOCAL_TOKEN", "value", localRepository.Id));
+        store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("GITHUB_TOKEN", "value", githubRepository.Id));
+
+        var owned = store.GetBoardOwnedLocalGitRepositories(board.Id);
+        var shared = store.GetBoardOwnedLocalGitRepositories(otherBoard.Id);
+
+        Assert.Contains(owned, repository => repository.Id == localRepository.Id);
+        Assert.DoesNotContain(owned, repository => repository.Id == githubRepository.Id);
+        Assert.Empty(shared);
+
+        store.DeleteRepositoryMetadata(owned.Select(repository => repository.Id));
+
+        Assert.DoesNotContain(store.GetRepositories(), repository => repository.Id == localRepository.Id);
+        Assert.Contains(store.GetRepositories(), repository => repository.Id == sharedRepository.Id);
+        Assert.Contains(store.GetRepositories(), repository => repository.Id == githubRepository.Id);
+        Assert.DoesNotContain(store.GetBoardSecrets(board.Id), secret => secret.RepositoryId == localRepository.Id);
+        Assert.Contains(store.GetBoardSecrets(board.Id), secret => secret.RepositoryId == githubRepository.Id);
+    }
+
+    [Fact]
+    public void Preview_promotion_writing_source_status_is_pending()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("index", "index.html", "<div id=\"root\"></div>"),
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        store.UpdateImplementationRun(run.Id, "WritingPreviewSource", "RDO_STEP=WritingPreviewSource");
+
+        Assert.Equal(run.Id, store.GetPendingImplementationRun(item.Id)!.Id);
     }
 
     [Fact]
@@ -598,6 +858,7 @@ public sealed class DevOpsStoreTests
                 ["Repositories:Mode"] = "LinkExistingFirst",
                 ["Repositories:Forgejo:ApiBaseUrl"] = "https://git.rosenvall.se/api/v1",
                 ["Repositories:Forgejo:CanCreateRepositories"] = "true",
+                ["Repositories:Forgejo:Password"] = "service-token",
                 ["Authentik:Authority"] = "https://authentik.rosenvall.se",
                 ["Authentik:UsersEndpoint"] = "https://authentik.rosenvall.se/api/v3/core/users/"
             })
@@ -605,9 +866,11 @@ public sealed class DevOpsStoreTests
 
         var settings = fixture.Store.GetSettings(configuration);
 
-        Assert.Equal("Forgejo", settings.Repositories.Provider);
-        Assert.Equal("LinkExistingFirst", settings.Repositories.Mode);
-        Assert.False(settings.Repositories.CanCreateRepositories);
+        Assert.Equal("LocalGit", settings.Repositories.Provider);
+        Assert.Equal("InternalForgejo", settings.Repositories.Mode);
+        Assert.True(settings.Repositories.CanCreateRepositories);
+        Assert.True(settings.Repositories.LocalGitEnabled);
+        Assert.True(settings.Repositories.LocalGitAvailable);
         Assert.Equal("https://git.rosenvall.se/api/v1", settings.Repositories.ApiBaseUrl);
         Assert.True(settings.Authentik.Enabled);
         Assert.Equal("https://authentik.rosenvall.se/api/v3/core/users/", settings.Authentik.UsersEndpoint);
@@ -1028,7 +1291,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("mountPath: /app/codex-home", manifest);
         Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
         Assert.Contains("unset GITHUB_TOKEN", manifest);
-        Assert.Contains("GITHUB_TOKEN=\"$github_token_for_runner\"", manifest);
+        Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         Assert.Contains("git remote set-url origin \"$auth_remote\"", manifest);
         Assert.DoesNotContain("name: codex-home\n                             persistentVolumeClaim:", manifest);
         Assert.Contains("codex exec", manifest);
@@ -1290,7 +1553,35 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void GitHub_repository_creation_policy_allows_owner_and_granted_team_members()
+    public void Demo_user_bootstrap_is_restricted_to_demo_sandbox()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var realWorkspace = store.CreateWorkspace("Real Workspace", "Production", "local", owner.Subject);
+        var ownerIntegration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(9001, "carnufex", "User", owner.Subject));
+        var visibleWorkspaces = store.GetWorkspacesForUser(new UserIdentityRequest("authentik|demo", "Demo", "demo@rosenvall.local"));
+        var demo = store.GetOrCreateUserWithDemoSandbox(new UserIdentityRequest("authentik|demo", "Demo", "demo@rosenvall.local"));
+        var demoIntegration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(9002, "demo-user", "User", demo.Subject));
+        var githubRepository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "demo-user/web", "https://github.com/demo-user/web.git", "main", "https://github.com/demo-user/web", "demo-user", "react-preview", "preview-then-pr"));
+        var localRepository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-web", "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/demo-web.git", "main", null, "rdo", "react-preview", "preview-then-pr"));
+        var demoWorkspace = visibleWorkspaces.Single(workspace => workspace.Name == "Demo Sandbox");
+
+        Assert.DoesNotContain(visibleWorkspaces, workspace => workspace.Id == realWorkspace.Id);
+        Assert.False(store.CanCreateWorkspace(demo.Subject));
+        Assert.True(store.CanCreateBoardInWorkspace(demoWorkspace.Id, demo.Subject));
+        Assert.False(store.CanCreateBoardInWorkspace(realWorkspace.Id, demo.Subject));
+        Assert.NotNull(store.CreateBoard(demoWorkspace.Id, new CreateBoardRequest("Demo Website", null, null, null, null, null, null), demo.Subject));
+        Assert.NotNull(store.CreateBoard(demoWorkspace.Id, new CreateBoardRequest("Demo LocalGit Website", localRepository.Id, "LocalGit", "rdo/demo-web", localRepository.RemoteUrl, null, "main", ImplementationProfile: "react-preview", ImplementationWorkflow: "preview-then-pr"), demo.Subject));
+        Assert.Null(store.CreateBoard(demoWorkspace.Id, new CreateBoardRequest("Blocked GitHub Website", githubRepository.Id, "GitHub", "demo-user/web", githubRepository.RemoteUrl, githubRepository.WebUrl, "main", ImplementationProfile: "react-preview", ImplementationWorkflow: "preview-then-pr"), demo.Subject));
+        Assert.Null(store.CreateBoard(realWorkspace.Id, new CreateBoardRequest("Not Allowed", null, null, null, null, null, null), demo.Subject));
+        Assert.False(store.CanUseGitHubInstallation(ownerIntegration.InstallationId, demo.Subject));
+        Assert.False(store.CanUseGitHubInstallation(demoIntegration.InstallationId, demo.Subject));
+        Assert.Empty(store.GetGitHubIntegrations(demo.Subject));
+    }
+
+    [Fact]
+    public void GitHub_organization_repository_creation_policy_does_not_enable_v1_creation()
     {
         using var fixture = DevOpsStoreFixture.Create();
         var store = fixture.Store;
@@ -1301,17 +1592,17 @@ public sealed class DevOpsStoreTests
         store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
         var integration = store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(1234, "rosenvall-corp", "Organization", owner.Subject));
 
-        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
         Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
         Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, guest.Subject));
 
         var saved = store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), owner.Subject);
 
         Assert.NotNull(saved);
-        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
-        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
         Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, guest.Subject));
-        Assert.Contains(store.GetGitHubIntegrations(member.Subject), entry => entry.InstallationId == integration.InstallationId && !entry.CanCreateRepositories);
+        Assert.DoesNotContain(store.GetGitHubIntegrations(member.Subject), entry => entry.InstallationId == integration.InstallationId);
         Assert.Contains(store.GetGitHubIntegrations(owner.Subject), entry => entry.InstallationId == integration.InstallationId && entry.CanManageRepositoryCreationPolicy);
     }
 
@@ -1332,7 +1623,7 @@ public sealed class DevOpsStoreTests
             entry.InstallationId == integration.InstallationId &&
             entry.HasUserAuthorization &&
             !entry.RequiresUserAuthorizationForRepositoryCreation &&
-            !entry.CanCreateRepositories);
+            entry.CanCreateRepositories);
     }
 
     [Fact]
@@ -1349,6 +1640,8 @@ public sealed class DevOpsStoreTests
         var saved = store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), owner.Subject);
 
         Assert.NotNull(saved);
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
+        store.UpsertGitHubUserAuthorization(new GitHubUserAuthorizationDto(Guid.NewGuid(), owner.Subject, integration.InstallationId, integration.AccountLogin, "carnufex", "Connected", "github-user-token-owner", DateTimeOffset.UtcNow));
         Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, owner.Subject));
         Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
     }
@@ -1367,7 +1660,7 @@ public sealed class DevOpsStoreTests
 
         var reopened = fixture.Reopen();
 
-        Assert.True(reopened.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
+        Assert.False(reopened.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
         Assert.Contains(reopened.GetGitHubIntegrations(owner.Subject), entry =>
             entry.InstallationId == integration.InstallationId &&
             entry.RepositoryCreatorTeamIds.Contains(team.Id));
@@ -1392,7 +1685,7 @@ public sealed class DevOpsStoreTests
         var saved = store.UpsertGitHubRepositoryCreationPolicy(integration.InstallationId, new UpdateGitHubRepositoryCreationPolicyRequest([team.Id]), admin.Subject);
 
         Assert.NotNull(saved);
-        Assert.True(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
+        Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, member.Subject));
         Assert.False(store.CanCreateGitHubRepository(integration.InstallationId, guest.Subject));
     }
 
@@ -2431,6 +2724,73 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Forgejo_client_reads_merges_closes_comments_and_deletes_repositories()
+    {
+        var requests = new List<(HttpMethod Method, string Path, string Body)>();
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            var body = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? "";
+            requests.Add((request.Method, request.RequestUri!.PathAndQuery, body));
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/pulls/7", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"number":7,"state":"open","merged":false,"html_url":"http://forgejo.local/rdo/demo-app/pulls/7","head":{"ref":"rdo/task-1"}}""");
+            }
+
+            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/pulls/7/merge", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            }
+
+            if (request.Method.Method == "PATCH" && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/pulls/7", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"number":7,"state":"closed","merged":false,"html_url":"http://forgejo.local/rdo/demo-app/pulls/7"}""");
+            }
+
+            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/issues/7/comments", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"html_url":"http://forgejo.local/rdo/demo-app/pulls/7#issuecomment-1"}""");
+            }
+
+            if (request.Method == HttpMethod.Delete && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{}") };
+        }))
+        {
+            BaseAddress = new Uri("http://forgejo.local")
+        };
+        var forgejo = new ForgejoRepositoryClient(httpClient, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:ApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo",
+                ["LocalGit:Password"] = "demo-token"
+            })
+            .Build());
+        var repository = new RepositoryDto(Guid.NewGuid(), "LocalGit", "demo-app", "http://forgejo.local/rdo/demo-app.git", null, "main", DateTimeOffset.UtcNow, "rdo");
+
+        var pullRequest = await forgejo.GetPullRequestAsync(repository, "http://forgejo.local/rdo/demo-app/pulls/7", CancellationToken.None);
+        var merged = await forgejo.MergePullRequestAsync(pullRequest!, CancellationToken.None);
+        var commented = await forgejo.AddPullRequestCommentAsync(pullRequest!, "Closed by cleanup.", CancellationToken.None);
+        var closed = await forgejo.ClosePullRequestAsync(pullRequest!, CancellationToken.None);
+        var deleted = await forgejo.DeleteRepositoryAsync(repository, CancellationToken.None);
+
+        Assert.NotNull(pullRequest);
+        Assert.Equal(7, pullRequest.Number);
+        Assert.Equal("open", pullRequest.State);
+        Assert.Equal("rdo/task-1", pullRequest.HeadRef);
+        Assert.True(merged);
+        Assert.True(commented);
+        Assert.True(closed);
+        Assert.True(deleted);
+        Assert.Contains(requests, request => request.Method == HttpMethod.Post && request.Path.EndsWith("/pulls/7/merge", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.Method.Method == "PATCH" && request.Body.Contains("\"state\":\"closed\"", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.Method == HttpMethod.Delete && request.Path.EndsWith("/repos/rdo/demo-app", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task GitHub_client_creates_private_repository_with_readme_initialization()
     {
         var requests = new List<(HttpMethod Method, string Path, string Body)>();
@@ -2684,7 +3044,7 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void GitHub_integrations_are_filtered_by_installer_when_requested()
+    public void GitHub_integrations_include_personal_accounts_for_authorization_but_not_creation()
     {
         using var fixture = DevOpsStoreFixture.Create();
         fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(111, "crille", "User", "authentik|crille", 3));
@@ -2694,11 +3054,12 @@ public sealed class DevOpsStoreTests
         var crilleIntegrations = fixture.Store.GetGitHubIntegrations("authentik|crille");
 
         Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 111);
-        Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 333);
-        Assert.DoesNotContain(crilleIntegrations, entry => entry.InstallationId == 222);
+        Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 222);
+        Assert.DoesNotContain(crilleIntegrations, entry => entry.InstallationId == 333);
         Assert.True(fixture.Store.CanUseGitHubInstallation(111, "authentik|crille"));
-        Assert.True(fixture.Store.CanUseGitHubInstallation(333, "authentik|crille"));
-        Assert.False(fixture.Store.CanUseGitHubInstallation(222, "authentik|crille"));
+        Assert.True(fixture.Store.CanUseGitHubInstallation(222, "authentik|crille"));
+        Assert.False(fixture.Store.CanUseGitHubInstallation(333, "authentik|crille"));
+        Assert.False(fixture.Store.CanCreateGitHubRepository(222, "authentik|crille"));
         Assert.NotEqual(222, fixture.Store.GetDefaultGitHubInstallationId("authentik|crille"));
     }
 
@@ -2994,6 +3355,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("in-process", script);
         Assert.Contains("Preview__KubeconfigPath", script);
         Assert.Contains("Pipelines__KubeconfigPath", script);
+        Assert.Contains("svc/rosenvall-devops-forgejo", script);
+        Assert.Contains("LocalGit__ApiBaseUrl", script);
+        Assert.Contains("LocalGit__RunnerApiBaseUrl", script);
+        Assert.Contains("LocalGit__UnavailableReason", script);
     }
 
     [Fact]
@@ -3052,6 +3417,42 @@ public sealed class DevOpsStoreTests
 
         Assert.Contains("memory: 1Gi", deployment);
         Assert.Contains("memory: 3Gi", deployment);
+    }
+
+    [Fact]
+    public void Homelab_rosenvall_devops_declares_internal_forgejo_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var appPath = Path.Combine(root.Parent?.FullName ?? "", "Rosenvalls-Homelab", "kubernetes", "applications", "rosenvall-devops");
+        if (!Directory.Exists(appPath))
+        {
+            return;
+        }
+
+        var kustomization = File.ReadAllText(Path.Combine(appPath, "kustomization.yaml"));
+        var configMap = File.ReadAllText(Path.Combine(appPath, "configmap.yaml"));
+        var deployment = File.ReadAllText(Path.Combine(appPath, "api-deployment.yaml"));
+        var forgejoDeployment = File.ReadAllText(Path.Combine(appPath, "forgejo-deployment.yaml"));
+        var forgejoPvc = File.ReadAllText(Path.Combine(appPath, "forgejo-pvc.yaml"));
+        var forgejoService = File.ReadAllText(Path.Combine(appPath, "forgejo-service.yaml"));
+        var forgejoCredentials = File.ReadAllText(Path.Combine(appPath, "forgejo-credentials.yaml"));
+
+        Assert.Contains("forgejo-deployment.yaml", kustomization);
+        Assert.Contains("forgejo-service.yaml", kustomization);
+        Assert.Contains("forgejo-credentials.yaml", kustomization);
+        Assert.Contains("LocalGit__Enabled: \"true\"", configMap);
+        Assert.Contains("LocalGit__ApiBaseUrl: http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/api/v1", configMap);
+        Assert.Contains("LocalGit__RunnerApiBaseUrl: http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/api/v1", configMap);
+        Assert.Contains("LocalGit__Password", deployment);
+        Assert.Contains("name: rosenvall-devops-forgejo-admin", deployment);
+        Assert.Contains("name: rosenvall-devops-forgejo", forgejoDeployment);
+        Assert.Contains("codeberg.org/forgejo/forgejo", forgejoDeployment);
+        Assert.Contains("FORGEJO__DEFAULT__APP_NAME", forgejoDeployment);
+        Assert.Contains("DISABLE_REGISTRATION", forgejoDeployment);
+        Assert.Contains("DISABLE_SSH", forgejoDeployment);
+        Assert.Contains("storageClassName: longhorn", forgejoPvc);
+        Assert.Contains("type: ClusterIP", forgejoService);
+        Assert.Contains("name: rosenvall-devops-forgejo-admin-password", forgejoCredentials);
     }
 
     [Fact]

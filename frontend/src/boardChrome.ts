@@ -22,10 +22,12 @@ export type BoardChromeBoard = {
 export type GitHubRepositoryCreationIntegration = {
   installationId: number;
   accountLogin?: string | null;
+  accountType?: string | null;
   canCreateRepositories?: boolean | null;
   requiresUserAuthorizationForRepositoryCreation?: boolean | null;
   hasUserAuthorization?: boolean | null;
   authorizedGitHubLogin?: string | null;
+  repositoryCreationMessage?: string | null;
 };
 
 export type TimelineChromeEvent = {
@@ -95,6 +97,24 @@ export type ActivityCommentChrome = {
   createdAt?: string | null;
 };
 
+export type DevelopmentChrome = {
+  repository: string;
+  branch: string;
+  pullRequestUrl?: string | null;
+  checksStatus: string;
+  pullRequestProvider?: string | null;
+  pullRequestNumber?: number | null;
+  pullRequestState?: string | null;
+  pullRequestApprovedAt?: string | null;
+};
+
+export type RepositoryHostingChrome = {
+  canCreateRepositories?: boolean | null;
+  localGitEnabled?: boolean | null;
+  localGitAvailable?: boolean | null;
+  localGitMessage?: string | null;
+};
+
 const previewLifecycleDefinitions = [
   ['Implementing', 'Implementing preview source', 'Codex generates the React/Tailwind files.'],
   ['Applying', 'Applying Kubernetes resources', 'The API submits namespace, ConfigMap, Deployment, Service and route.'],
@@ -117,6 +137,33 @@ export function boardSyncLabel(board: BoardChromeBoard): string {
 
 export function boardRepositoryUrl(board: BoardChromeBoard): string | null {
   return board.repository?.webUrl?.trim() || null;
+}
+
+export function isLocalGitDevelopmentRecord(development: DevelopmentChrome): boolean {
+  return development.pullRequestProvider?.trim().toLowerCase() === 'localgit';
+}
+
+export function pullRequestDisplayLabel(development: DevelopmentChrome): string {
+  if (!isLocalGitDevelopmentRecord(development)) return 'Pull request';
+  return `Local pull request${development.pullRequestNumber ? ` #${development.pullRequestNumber}` : ''}`;
+}
+
+export function approvePullRequestActionLabel(development: DevelopmentChrome): string {
+  return isLocalGitDevelopmentRecord(development) ? 'Merge local PR and deploy app' : 'Approve PR';
+}
+
+export function boardDeleteCleanupMessage(boardName: string): string {
+  return `Delete ${boardName}, clean Kubernetes runtime resources, and delete board-owned Local Git repositories? GitHub repositories and PRs will remain.`;
+}
+
+export function localGitProviderState(repositories: RepositoryHostingChrome): { visible: boolean; available: boolean; message: string } {
+  const visible = repositories.localGitEnabled === true;
+  const available = visible && (repositories.localGitAvailable ?? repositories.canCreateRepositories) === true;
+  const message = repositories.localGitMessage?.trim() ||
+    (available
+      ? 'Local Git is ready.'
+      : 'Local Git is enabled, but Forgejo is not available yet.');
+  return { visible, available, message };
 }
 
 export function boardPublicAppUrl(board: BoardChromeBoard): string | null {
@@ -258,11 +305,20 @@ export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {
 }
 
 export function canCreateRepositoryInInstallation(integration: GitHubRepositoryCreationIntegration | null | undefined): boolean {
-  return false;
+  return Boolean(integration?.canCreateRepositories && (!integration.requiresUserAuthorizationForRepositoryCreation || integration.hasUserAuthorization));
 }
 
 export function repositoryCreatePermissionMessage(integration: GitHubRepositoryCreationIntegration | null | undefined): string | null {
-  return 'GitHub repository creation is disabled. Link an existing repository instead.';
+  if (!integration) return 'Select a GitHub installation before creating a repository.';
+  if (integration.canCreateRepositories) return null;
+  if (integration.repositoryCreationMessage) return integration.repositoryCreationMessage;
+  if (integration.requiresUserAuthorizationForRepositoryCreation && !integration.hasUserAuthorization) {
+    return `Authorize GitHub user access before creating repositories under ${integration.accountLogin ?? 'this account'}.`;
+  }
+  if (integration.hasUserAuthorization && integration.authorizedGitHubLogin && integration.accountLogin && integration.authorizedGitHubLogin.toLowerCase() !== integration.accountLogin.toLowerCase()) {
+    return `Connected as ${integration.authorizedGitHubLogin}; repository creation under ${integration.accountLogin} is blocked.`;
+  }
+  return 'You do not have permission to create repositories for this GitHub installation.';
 }
 
 export type GitHubUserAuthorizationResult = {
