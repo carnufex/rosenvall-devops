@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isPreviewTerminalLive, previewDisplayMessage, previewStatusMessage, publicApplicationUrls, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -60,6 +60,13 @@ test('public app link is shown only when board app is running', () => {
     name: 'Demo Klocka',
     publicHostname: 'demo-klocka.rosenvall.se'
   }), 'App not deployed');
+});
+
+test('stopped preview is shown as historical and not live', () => {
+  assert.equal(isPreviewTerminalLive('Stopped'), false);
+  assert.equal(previewStatusMessage('Stopped'), 'Preview is stopped. The reviewed source is kept so it can be recreated.');
+  assert.equal(previewDisplayMessage('Stopped', 'Deployment is available and at least one preview pod is ready.', 'Ready'), 'Preview is stopped. The reviewed source is kept so it can be recreated.');
+  assert.deepEqual(buildPreviewLifecycleSteps('Stopped').map((step) => step.state), ['done', 'done', 'done', 'done']);
 });
 
 test('repo-less board can sync only when provider capability allows it', () => {

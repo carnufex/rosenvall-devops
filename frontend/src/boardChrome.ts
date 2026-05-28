@@ -52,6 +52,22 @@ export type TimelineFlowRow = {
 
 export const timelineLanes: TimelineLane[] = ['Card', 'Implementation PR', 'Cleanup', 'Preview', 'Pipeline'];
 
+export type PreviewLifecycleStepState = 'done' | 'active' | 'pending' | 'blocked';
+
+export type PreviewLifecycleStep = {
+  key: string;
+  title: string;
+  description: string;
+  state: PreviewLifecycleStepState;
+};
+
+const previewLifecycleDefinitions = [
+  ['Implementing', 'Implementing preview source', 'Codex generates the React/Tailwind files.'],
+  ['Applying', 'Applying Kubernetes resources', 'The API submits namespace, ConfigMap, Deployment, Service and route.'],
+  ['Provisioning', 'Waiting for pod readiness', 'Kubernetes starts the preview pod and health checks it.'],
+  ['Running', 'Running', 'The deployment is available and the demo link is enabled.']
+] as const;
+
 export function boardSyncLabel(board: BoardChromeBoard): string {
   if (board.repositorySyncState) return board.repositorySyncState;
   if (!board.repository) return 'Preview only';
@@ -74,6 +90,51 @@ export function boardPublicAppStatusLabel(board: BoardChromeBoard): string | nul
   if (status === 'Deploying' || status === 'Queued') return 'App deploying';
   if (status === 'Failed') return 'App failed';
   return 'App not deployed';
+}
+
+export function isPreviewTerminalLive(status: string | null | undefined): boolean {
+  return ['Queued', 'Implementing', 'Applying', 'Provisioning'].includes((status ?? '').trim());
+}
+
+export function previewStatusMessage(status: string | null | undefined): string {
+  if (status === 'Running') return 'Preview is healthy and ready.';
+  if (status === 'Failed') return 'Preview setup failed. Review the reason below and retry after fixing the issue.';
+  if (status === 'Implementing') return 'Codex is generating React/Tailwind source from the approved plan.';
+  if (status === 'Applying') return 'Applying Kubernetes resources.';
+  if (status === 'Stopped') return 'Preview is stopped. The reviewed source is kept so it can be recreated.';
+  return 'Kubernetes resources are applied. Waiting for a healthy preview pod.';
+}
+
+export function previewDisplayMessage(status: string | null | undefined, message?: string | null, phase?: string | null): string {
+  if (status === 'Stopped') return previewStatusMessage(status);
+  return message?.trim() || phase?.trim() || previewStatusMessage(status);
+}
+
+export function buildPreviewLifecycleSteps(status: string | null | undefined, failureReason?: string | null): PreviewLifecycleStep[] {
+  const normalizedStatus = (status ?? '').trim();
+  const failedIndex = ['ImplementationFailed', 'ServerRestart', 'ManifestMissing'].includes(failureReason ?? '')
+    ? 0
+    : failureReason === 'ApplyFailed'
+      ? 1
+      : 2;
+  const current = normalizedStatus === 'Failed'
+    ? failedIndex
+    : Math.max(0, previewLifecycleDefinitions.findIndex(([key]) => key === normalizedStatus));
+
+  return previewLifecycleDefinitions.map(([key, title, description], index) => ({
+    key,
+    title,
+    description,
+    state: normalizedStatus === 'Running' || normalizedStatus === 'Stopped'
+      ? 'done'
+      : normalizedStatus === 'Failed' && index === current
+        ? 'blocked'
+        : index < current
+          ? 'done'
+          : index === current
+            ? 'active'
+            : 'pending'
+  }));
 }
 
 export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {
