@@ -2443,6 +2443,7 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
   const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : stopped ? 'Preview stopped' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
   const retryLabel = stopped ? 'Recreate preview' : failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
   const steps = previewLifecycleSteps(preview);
+  const runtimeDiagnostic = previewRuntimeDiagnostic(preview);
   return (
     <section className="panel compact-panel preview-panel">
       <PanelHeader icon={<ExternalLink size={20} />} title="Preview environment" />
@@ -2463,6 +2464,7 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
       </ol>
       {preview.namespace && <p className="namespace-note">Namespace: <code>{preview.namespace}</code></p>}
       <p className="preview-message">{previewDisplayMessage(preview.status, preview.message, preview.phase)}</p>
+      {runtimeDiagnostic && <p className="failure-reason">{runtimeDiagnostic}</p>}
       {preview.podName && <p className="namespace-note">Pod: <code>{preview.podName}</code></p>}
       {preview.lastCheckedAt && <p className="namespace-note">Last checked {relativeTime(preview.lastCheckedAt)}.</p>}
       <PreviewTerminal lines={preview.terminalLines ?? []} active={isPreviewTerminalLive(status)} />
@@ -2473,6 +2475,25 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
       {failed && !canRetrySetup && <p className="namespace-note">Source generation did not finish, so there is no Kubernetes preview manifest to retry.</p>}
     </section>
   );
+}
+
+function previewRuntimeDiagnostic(preview: PreviewDto): string | null {
+  const text = [
+    preview.message,
+    preview.failureReason,
+    preview.failureLog,
+    ...(preview.terminalLines ?? []).slice(-12).map((line) => line.message)
+  ].filter(Boolean).join('\n').toLowerCase();
+  if (text.includes('oomkilled') || text.includes('exit code: 137')) {
+    return 'API or Kubernetes reported OOMKilled. The previous operation exceeded its memory limit.';
+  }
+  if (text.includes('memory pressured')) {
+    return 'API memory pressure blocked this operation before starting more work.';
+  }
+  if (text.includes('reattach') || text.includes('reusing it instead of starting codex again')) {
+    return 'The API recovered after a restart and is reusing the existing preview source job/result.';
+  }
+  return null;
 }
 
 type PreviewHistoryEntry = {
