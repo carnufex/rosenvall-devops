@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildPreviewLifecycleSteps, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, safeMarkdownHref, timelineLaneForKind } from './boardChrome.ts';
+import { readFileSync } from 'node:fs';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemModalTabs } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -79,6 +80,165 @@ test('local git development copy stays internal to RDO', () => {
   assert.equal(approvePullRequestActionLabel({ ...localDevelopment, pullRequestProvider: 'GitHub' }), 'Approve PR');
 });
 
+test('work item modal tabs are stable and focused', () => {
+  assert.deepEqual(workItemModalTabs.map((tab) => tab.key), ['overview', 'ai', 'preview', 'pull-request', 'logs']);
+  assert.deepEqual(workItemModalTabs.map((tab) => tab.label), ['Overview', 'AI', 'Preview', 'Pull request', 'Logs']);
+});
+
+test('work item autosave status copy is compact and action oriented', () => {
+  assert.equal(workItemAutosaveStatusLabel('idle'), 'All changes saved');
+  assert.equal(workItemAutosaveStatusLabel('dirty'), 'Unsaved changes');
+  assert.equal(workItemAutosaveStatusLabel('saving'), 'Saving...');
+  assert.equal(workItemAutosaveStatusLabel('saved'), 'Saved');
+  assert.equal(workItemAutosaveStatusLabel('error'), 'Autosave failed');
+});
+
+test('ai plan review blocks are stable paragraph and list anchors', () => {
+  const blocks = splitAiPlanReviewBlocks(`# Implementation Plan
+
+1. Inspect repository
+- Keep Swedish copy compact.
+
+Validate with preview.
+`);
+
+  assert.deepEqual(blocks.map((block) => [block.anchorKey, block.kind, block.text]), [
+    ['block-1', 'heading', 'Implementation Plan'],
+    ['block-2', 'list-item', '1. Inspect repository'],
+    ['block-3', 'list-item', 'Keep Swedish copy compact.'],
+    ['block-4', 'paragraph', 'Validate with preview.']
+  ]);
+});
+
+test('ai plan review comments count unresolved comments by run and block approval', () => {
+  const comments = [
+    { aiRunId: 'plan-1', status: 'open' },
+    { aiRunId: 'plan-1', status: 'resolved' },
+    { aiRunId: 'plan-2', status: 'open' }
+  ];
+
+  assert.equal(unresolvedAiPlanReviewCommentCount(comments, 'plan-1'), 1);
+  assert.equal(canApproveAiPlanWithComments('plan-1', comments), false);
+  assert.equal(canApproveAiPlanWithComments('plan-1', comments.map((comment) => ({ ...comment, status: 'resolved' }))), true);
+  assert.deepEqual(planReviewCommentCountsByRun(comments), {
+    'plan-1': { total: 2, unresolved: 1 },
+    'plan-2': { total: 1, unresolved: 1 }
+  });
+});
+
+test('ai plan review uses the collapsible markdown surface', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(appSource, /<CommentBody\s+body=\{selectedPlan\.plan\}/);
+  assert.match(appSource, /review=\{\{/);
+  assert.match(styles, /\.plan-markdown/);
+  assert.match(styles, /\.markdown-review-block/);
+  assert.doesNotMatch(appSource, /AnnotatedPlanBlockText|annotated-plan-markdown|ai-plan-body|plan-review-document|plan-review-block-group|plan-review-composer/);
+  assert.doesNotMatch(styles, /\.annotated-plan|\.ai-plan-body|\.plan-review-document|\.plan-review-block-group|\.plan-review-composer/);
+});
+
+test('overview delivery summary is compact and keeps delivery links grouped', () => {
+  const summary = buildOverviewDeliverySummary({
+    board: {
+      id: 'demo',
+      name: 'Demo app',
+      repository: { provider: 'LocalGit', webUrl: null },
+      publicHostname: 'demo.rosenvall.se',
+      publicApp: { status: 'Running', url: 'https://demo.rosenvall.se' }
+    },
+    preview: { status: 'Stopped', message: 'Ready' },
+    development: {
+      repository: 'demo-app',
+      branch: 'rdo/task-1',
+      pullRequestUrl: 'http://forgejo.local/rdo/demo-app/pulls/1',
+      checksStatus: 'Local pull request merged and deployed',
+      pullRequestProvider: 'LocalGit',
+      pullRequestNumber: 1,
+      pullRequestState: 'closed',
+      pullRequestApprovedAt: '2026-05-29T10:00:00Z'
+    }
+  });
+
+  assert.deepEqual(summary.map((item) => item.key), ['app', 'repository', 'preview', 'pull-request', 'logs']);
+  assert.equal(summary[0].value, 'App running');
+  assert.equal(summary[1].actionLabel, 'RDO managed');
+  assert.equal(summary[3].value, 'Local pull request #1 merged');
+});
+
+test('overview delete action shares the comment action row', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /className="comment-actions"[\s\S]*delete-action-inline/);
+  assert.doesNotMatch(appSource, /overview-danger-actions/);
+});
+
+test('continuous pull request diff parser exposes file sections and commentable lines', () => {
+  const parsed = parseUnifiedDiffForContinuousReview(`diff --git a/src/App.tsx b/src/App.tsx
+index 111..222 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,2 +1,3 @@
+ import React from 'react';
+-const mode = 'light';
++const mode = 'dark';
++const saved = true;
+diff --git a/src/main.tsx b/src/main.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/main.tsx
+@@ -0,0 +1 @@
++console.log('ready');
+`, [
+    { path: 'src/App.tsx', status: 'modified', additions: 2, deletions: 1 },
+    { path: 'src/main.tsx', status: 'added', additions: 1, deletions: 0 }
+  ]);
+
+  assert.deepEqual(parsed.sections.map((section) => section.path), ['src/App.tsx', 'src/main.tsx']);
+  assert.equal(parsed.sections[0].lines.find((line) => line.text.includes("mode = 'dark'"))?.newLine, 2);
+  assert.equal(parsed.sections[0].lines.find((line) => line.text.includes("mode = 'light'"))?.oldLine, 2);
+  assert.equal(parsed.sections[1].lines.find((line) => line.text.includes('ready'))?.side, 'new');
+});
+
+test('review comment helpers count unresolved comments by file and gate approval', () => {
+  const comments = [
+    { id: '1', filePath: 'src/App.tsx', status: 'open' },
+    { id: '2', filePath: 'src/App.tsx', status: 'resolved' },
+    { id: '3', filePath: 'src/main.tsx', status: 'open' }
+  ];
+
+  assert.equal(unresolvedReviewCommentCount(comments), 2);
+  assert.equal(canApprovePullRequestWithComments(comments), false);
+  assert.equal(canApprovePullRequestWithComments(comments.map((comment) => ({ ...comment, status: 'resolved' }))), true);
+  assert.deepEqual(reviewCommentCountsByFile(comments), {
+    'src/App.tsx': { total: 2, unresolved: 1 },
+    'src/main.tsx': { total: 1, unresolved: 1 }
+  });
+});
+
+test('local pull request approval state blocks merged closed and commented prs', () => {
+  assert.deepEqual(buildLocalPullRequestApprovalState({ state: 'open', unresolvedComments: 0 }).canApprove, true);
+
+  const merged = buildLocalPullRequestApprovalState({
+    state: 'closed',
+    pullRequestApprovedAt: '2026-05-29T10:00:00Z',
+    pullRequestApprovedBy: 'Demo'
+  });
+  assert.equal(merged.status, 'merged');
+  assert.equal(merged.canApprove, false);
+  assert.match(merged.message, /Merged and deployed by Demo/);
+
+  const closed = buildLocalPullRequestApprovalState({ state: 'closed', unresolvedComments: 0 });
+  assert.equal(closed.status, 'blocked');
+  assert.equal(closed.canApprove, false);
+  assert.match(closed.message, /closed/);
+
+  const commented = buildLocalPullRequestApprovalState({ state: 'open', unresolvedComments: 2 });
+  assert.equal(commented.status, 'blocked');
+  assert.equal(commented.canApprove, false);
+  assert.match(commented.message, /Resolve 2 review comments/);
+});
+
 test('board delete confirmation includes board-owned local git cleanup but excludes github deletion', () => {
   const message = boardDeleteCleanupMessage('Demo app');
 
@@ -154,16 +314,24 @@ test('legacy preview logs fall back to source terminal history', () => {
   assert.match(steps[0].terminalLines[0].message, /Legacy combined log/);
 });
 
-test('activity comments dedupe exact generated Rosenvall AI results only', () => {
+test('activity comments dedupe generated Rosenvall AI plan results only', () => {
   const comments = dedupeGeneratedActivityComments([
     { workItemId: 'task-1', author: 'Rosenvall AI', kind: 'Result', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:00:00Z' },
     { workItemId: 'task-1', author: 'Rosenvall AI', kind: 'Result', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:01:00Z' },
+    { workItemId: 'task-1', author: 'Rosenvall AI', kind: 'Result', body: 'Created plan #1: Implementation Plan.', createdAt: '2026-05-28T10:01:30Z' },
     { workItemId: 'task-1', author: 'Christopher', kind: 'Comment', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:02:00Z' },
     { workItemId: 'task-1', author: 'Christopher', kind: 'Comment', body: 'Created plan #1: Implementation Plan', createdAt: '2026-05-28T10:03:00Z' }
   ]);
 
   assert.equal(comments.length, 3);
   assert.equal(comments.filter((comment) => comment.author === 'Christopher').length, 2);
+});
+
+test('activity renders plan references only for actual plan creation results', () => {
+  assert.equal(shouldRenderPlanReferenceActivity({ kind: 'Result', body: 'Created plan #1: Implementation Plan' }), true);
+  assert.equal(shouldRenderPlanReferenceActivity({ kind: 'Result', body: 'AI needs input for plan #2: Missing scope.' }), true);
+  assert.equal(shouldRenderPlanReferenceActivity({ kind: 'Result', body: 'Implementing plan #1 with Codex preview source generation.' }), false);
+  assert.equal(shouldRenderPlanReferenceActivity({ kind: 'Plan', body: 'Legacy plan body' }), true);
 });
 
 test('repo-less board can sync only when provider capability allows it', () => {

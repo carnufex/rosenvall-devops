@@ -27,11 +27,100 @@ public sealed class DevOpsStoreTests
         Assert.NotNull(updated);
         Assert.NotNull(moved);
         Assert.Equal("Updated title", updated.Title);
-        Assert.Equal("Bug", updated.Type);
+        Assert.Equal("Task", updated.Type);
+        Assert.True(updated.IsBug);
         Assert.Equal("High", updated.Priority);
         Assert.Equal("Crille", updated.Assignee);
         Assert.Equal("In Progress", moved.Status);
         Assert.Equal(item.Id, refreshedBoard.Columns.Single(column => column.Name == "In Progress").Items.First().Id);
+    }
+
+    [Fact]
+    public void Work_items_support_hierarchy_and_bug_marker()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var epic = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Epic", "Build planner", "Coordinate child work.", "Todo", "High", null))!;
+        var feature = store.CreateChildWorkItem(epic.Id, new CreateChildWorkItemRequest("Feature", "Plan review", "Review plans in RDO.", "Todo", "Medium", null, false))!;
+        var bug = store.CreateChildWorkItem(feature.Id, new CreateChildWorkItemRequest("Task", "Fix duplicate activity", "Created plan appears twice.", "Todo", "High", null, true))!;
+
+        var detail = store.GetWorkItemDetail(epic.Id)!;
+        var bugDetail = store.GetWorkItemDetail(bug.Id)!;
+
+        Assert.Equal("Epic", epic.Type);
+        Assert.False(epic.IsBug);
+        Assert.Equal(epic.Id, feature.ParentWorkItemId);
+        Assert.Equal(epic.Id, feature.RootWorkItemId);
+        Assert.Equal(feature.Id, bug.ParentWorkItemId);
+        Assert.Equal(epic.Id, bug.RootWorkItemId);
+        Assert.True(bug.IsBug);
+        Assert.Equal("Task", bug.Type);
+        Assert.Single(detail.Children);
+        Assert.Equal(feature.Id, detail.Children[0].Id);
+        Assert.Contains("Build planner", bugDetail.Item.HierarchyPath);
+        Assert.Equal(2, detail.Item.ChildCount);
+        Assert.Equal(0, detail.Item.DoneChildCount);
+    }
+
+    [Fact]
+    public void Work_item_hierarchy_rejects_cross_board_parent_cycles_and_invalid_levels()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var otherBoard = store.CreateBoard(workspace.Id, new CreateBoardRequest("Other board", null, null, null, null, null, null))!;
+        var epic = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Epic", "Epic", "Root.", "Todo", "Medium", null))!;
+        var feature = store.CreateChildWorkItem(epic.Id, new CreateChildWorkItemRequest("Feature", "Feature", "Child.", "Todo", "Medium", null, false))!;
+        var task = store.CreateChildWorkItem(feature.Id, new CreateChildWorkItemRequest("Task", "Task", "Leaf.", "Todo", "Medium", null, false))!;
+        var otherEpic = store.CreateWorkItem(new CreateWorkItemRequest(otherBoard.Id, "Epic", "Other", "Root.", "Todo", "Medium", null))!;
+
+        Assert.Null(store.UpdateWorkItemHierarchy(epic.Id, new UpdateWorkItemHierarchyRequest(task.Id)));
+        Assert.Null(store.UpdateWorkItemHierarchy(feature.Id, new UpdateWorkItemHierarchyRequest(otherEpic.Id)));
+        Assert.Null(store.CreateChildWorkItem(task.Id, new CreateChildWorkItemRequest("Feature", "Invalid feature", "Cannot nest feature under task.", "Todo", "Medium", null, false)));
+        Assert.Null(store.UpdateWorkItem(epic.Id, new UpdateWorkItemRequest("Epic", "Root.", "Task", "Todo", "Medium", null, null, false)));
+    }
+
+    [Fact]
+    public void Legacy_bug_work_items_are_restored_as_task_bug_marker()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var legacy = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Bug", "Legacy bug", "Old type.", "Todo", "High", null))!;
+
+        var reopened = fixture.Reopen();
+        var restored = reopened.GetWorkItemDetail(legacy.Id)!.Item;
+
+        Assert.Equal("Task", restored.Type);
+        Assert.True(restored.IsBug);
+    }
+
+    [Fact]
+    public void Epic_run_and_goal_track_child_feature_agents()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var epic = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Epic", "Redesign RDO", "Coordinate a larger product change.", "Todo", "High", null))!;
+        var featureA = store.CreateChildWorkItem(epic.Id, new CreateChildWorkItemRequest("Feature", "Hierarchy", "Add parent/child cards.", "Todo", "High", null))!;
+        var featureB = store.CreateChildWorkItem(epic.Id, new CreateChildWorkItemRequest("Feature", "Goal runner", "Drive the epic.", "Todo", "Medium", null))!;
+        store.CreateChildWorkItem(featureA.Id, new CreateChildWorkItemRequest("Task", "Backend", "Add APIs.", "Todo", "Medium", null));
+
+        var run = store.StartEpicRun(epic.Id, "crille")!;
+        var goal = store.StartEpicGoal(epic.Id, "crille")!;
+
+        Assert.Equal(epic.Id, run.RootWorkItemId);
+        Assert.Equal("Running", run.Status);
+        Assert.Equal(2, run.Children.Count);
+        Assert.Contains(run.Children, child => child.WorkItemId == featureA.Id && child.AgentRole == "Feature agent");
+        Assert.Contains(run.Children, child => child.WorkItemId == featureB.Id && child.Status == "Queued");
+        Assert.Equal(run.Id, goal.EpicRunId);
+        Assert.Equal("Running", goal.Status);
+
+        var cancelled = store.CancelEpicGoal(goal.Id, "crille")!;
+        Assert.Equal("Cancelled", cancelled.Status);
     }
 
     [Fact]
@@ -209,11 +298,13 @@ public sealed class DevOpsStoreTests
         Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
         Assert.Contains("RDO_PULL_REQUEST_URL", manifest);
         Assert.Contains("RDO_STEP=WritingPreviewSource", manifest);
+        Assert.Contains("git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
         Assert.Contains("git status --porcelain", manifest);
         Assert.Contains("git commit -m", manifest);
         Assert.Contains("git push --set-upstream origin", manifest);
         Assert.Contains("ROSENVALL_PUBLIC_HOSTNAME", manifest);
         Assert.Contains("Production hostname:", manifest);
+        AssertPreviewPromotionRunnerSecurityContextIsWellFormed(manifest);
         Assert.DoesNotContain("codex exec", manifest);
         Assert.DoesNotContain("RDO_STEP=Implementing", manifest);
         Assert.DoesNotContain("RDO_STEP=Testing", manifest);
@@ -268,8 +359,12 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("value: \"http://localhost:3001/api/v1\"", manifest);
         Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
         Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("pr_base_url=\"${ROSENVALL_FORGEJO_API_BASE_URL%/api/v1}\"", manifest);
+        Assert.Contains("pr_url=\"$pr_base_url/$ROSENVALL_REPOSITORY/pulls/$pr_number\"", manifest);
         Assert.Contains("-H \"Authorization: Basic $forgejo_auth\"", manifest);
         Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
+        Assert.Contains("git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
+        AssertPreviewPromotionRunnerSecurityContextIsWellFormed(manifest);
         Assert.DoesNotContain("name: GITHUB_TOKEN", manifest);
         Assert.DoesNotContain("codex exec", manifest);
         Assert.DoesNotContain("npm run build", manifest);
@@ -310,10 +405,13 @@ public sealed class DevOpsStoreTests
         Assert.Contains("value: \"http://forgejo.local/api/v1\"", manifest);
         Assert.DoesNotContain("value: \"http://localhost:3001/api/v1\"", manifest);
         Assert.Contains("ROSENVALL_GIT_TOKEN", manifest);
+        Assert.Contains("git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
         Assert.Contains("codex exec", manifest);
         Assert.Contains("git push --set-upstream origin", manifest);
         Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
         Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("pr_base_url=\"${ROSENVALL_FORGEJO_API_BASE_URL%/api/v1}\"", manifest);
+        Assert.Contains("pr_url=\"$pr_base_url/$ROSENVALL_REPOSITORY/pulls/$pr_number\"", manifest);
         Assert.Contains("-H \"Authorization: Basic $forgejo_auth\"", manifest);
         Assert.DoesNotContain("name: GITHUB_TOKEN", manifest);
     }
@@ -391,6 +489,147 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Local_git_pull_request_review_comments_are_persisted_and_scoped_to_current_pr()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var (_, item, _) = CreateLocalGitPreviewPullRequest(store);
+
+        var comment = store.AddPullRequestReviewComment(item.Id, new CreatePullRequestReviewCommentRequest(
+            "src/App.tsx",
+            "new",
+            42,
+            "+ const title = 'Demo';",
+            "Use Swedish product wording here."), "crille")!;
+
+        var comments = store.GetPullRequestReviewComments(item.Id, "LocalGit", 7);
+
+        Assert.Single(comments);
+        Assert.Equal(comment.Id, comments[0].Id);
+        Assert.Equal("open", comments[0].Status);
+        Assert.Equal("crille", comments[0].Author);
+        Assert.True(store.HasUnresolvedPullRequestReviewComments(item.Id));
+
+        var reopened = fixture.Reopen();
+        var reopenedComment = reopened.GetPullRequestReviewComments(item.Id, "LocalGit", 7).Single();
+        var resolved = reopened.UpdatePullRequestReviewComment(item.Id, reopenedComment.Id, new UpdatePullRequestReviewCommentRequest(Status: "resolved"), "crille")!;
+
+        Assert.Equal("resolved", resolved.Status);
+        Assert.False(reopened.HasUnresolvedPullRequestReviewComments(item.Id));
+        Assert.Empty(reopened.GetPullRequestReviewComments(item.Id, "LocalGit", 8));
+    }
+
+    [Fact]
+    public void Ai_plan_review_comments_are_persisted_and_scoped_to_the_selected_plan()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Plan review", "Create a focused demo.", "Todo", "Medium", null));
+        var firstPlan = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Build the app.\n2. Add tests.")!;
+        var secondPlan = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Revised app.")!;
+
+        var comment = store.AddAiPlanReviewComment(item.Id, firstPlan.Id, new CreateAiPlanReviewCommentRequest(
+            "block-1",
+            "1. Build the app.",
+            "Clarify the production hostname before implementation."), "crille")!;
+
+        var comments = store.GetAiPlanReviewComments(item.Id, firstPlan.Id);
+
+        Assert.Single(comments);
+        Assert.Equal(comment.Id, comments[0].Id);
+        Assert.Equal("open", comments[0].Status);
+        Assert.Equal("crille", comments[0].Author);
+        Assert.Equal("block-1", comments[0].AnchorKey);
+        Assert.True(store.HasUnresolvedAiPlanReviewComments(firstPlan.Id));
+        Assert.Empty(store.GetAiPlanReviewComments(item.Id, secondPlan.Id));
+
+        var reopened = fixture.Reopen();
+        var reopenedComment = reopened.GetAiPlanReviewComments(item.Id, firstPlan.Id).Single();
+        var resolved = reopened.UpdateAiPlanReviewComment(item.Id, firstPlan.Id, reopenedComment.Id, new UpdateAiPlanReviewCommentRequest(Status: "resolved"), "crille")!;
+
+        Assert.Equal("resolved", resolved.Status);
+        Assert.Equal("crille", resolved.ResolvedBy);
+        Assert.False(reopened.HasUnresolvedAiPlanReviewComments(firstPlan.Id));
+        Assert.True(reopened.DeleteAiPlanReviewComment(item.Id, firstPlan.Id, reopenedComment.Id));
+        Assert.Empty(reopened.GetAiPlanReviewComments(item.Id, firstPlan.Id));
+    }
+
+    [Fact]
+    public void Ai_plan_review_comments_block_preview_and_direct_repository_implementation_until_resolved()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var previewBoard = store.GetBoards(workspace.Id).First();
+        var previewItem = store.CreateWorkItem(new CreateWorkItemRequest(previewBoard.Id, "Feature", "Preview plan", "Create a page.", "Todo", "Medium", null));
+        var previewPlan = store.StartAiPlan(previewItem.Id, "codex", "gpt-5.5", "Plan:\n1. Build preview.")!;
+        store.AddAiPlanReviewComment(previewItem.Id, previewPlan.Id, new CreateAiPlanReviewCommentRequest("block-1", "1. Build preview.", "Answer this first."), "crille");
+
+        var previewFailure = Assert.Throws<InvalidOperationException>(() => store.ApproveAiRun(previewPlan.Id, "crille"));
+
+        Assert.Contains("Resolve all AI plan review comments", previewFailure.Message);
+
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo.local/rdo/demo-app.git", "main", null, "rdo", "code-repo", "direct-pr"));
+        var directBoard = store.CreateBoard(workspace.Id, new CreateBoardRequest("Direct repo", repository.Id, null, null, null, null, null, ImplementationProfile: "code-repo", ImplementationWorkflow: "direct-pr"))!;
+        var directItem = store.CreateWorkItem(new CreateWorkItemRequest(directBoard.Id, "Feature", "Direct plan", "Change repo files.", "Todo", "Medium", null));
+        var directPlan = store.StartAiPlan(directItem.Id, "codex", "gpt-5.5", "Plan:\n1. Edit source.")!;
+        store.AddAiPlanReviewComment(directItem.Id, directPlan.Id, new CreateAiPlanReviewCommentRequest("block-1", "1. Edit source.", "Clarify scope."), "crille");
+
+        var directFailure = Assert.Throws<InvalidOperationException>(() => store.StartImplementationRun(directItem.Id, new StartImplementationRunRequest(directPlan.Id, "crille", repository.Id)));
+
+        Assert.Contains("Resolve all AI plan review comments", directFailure.Message);
+        Assert.Empty(store.GetImplementationRuns(directItem.Id));
+    }
+
+    [Fact]
+    public void Local_git_pull_request_approval_is_blocked_while_review_comments_are_unresolved()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var (_, item, _) = CreateLocalGitPreviewPullRequest(store);
+        store.AddPullRequestReviewComment(item.Id, new CreatePullRequestReviewCommentRequest("src/App.tsx", "new", 12, "+ <main />", "Fix this before merge."), "crille");
+
+        var failure = Assert.Throws<InvalidOperationException>(() => store.ApprovePullRequest(item.Id, "crille"));
+
+        Assert.Contains("Resolve all review comments", failure.Message);
+        Assert.Equal("Review", store.GetWorkItemDetail(item.Id)!.Item.Status);
+    }
+
+    [Fact]
+    public void Local_git_pr_review_fix_run_reuses_existing_pull_request_branch_and_comments()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var (repository, item, _) = CreateLocalGitPreviewPullRequest(store);
+        store.AddPullRequestReviewComment(item.Id, new CreatePullRequestReviewCommentRequest("src/App.tsx", "new", 12, "+ const mode = 'light';", "Add dark mode handling."), "crille");
+
+        var run = store.StartPullRequestReviewFixRun(item.Id, new StartPullRequestReviewFixRequest("crille", "high"))!;
+        var developmentBranch = store.GetWorkItemDetail(item.Id)!.Development!.Branch;
+        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:RunnerApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo"
+            })
+            .Build(), "repository-token")!;
+
+        Assert.Equal("pr-review-fix", run.RunKind);
+        Assert.Equal(repository.Id, run.RepositoryId);
+        Assert.Equal(developmentBranch, run.Branch);
+        var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_PROMPT_B64");
+        Assert.Contains("RDO_STEP=FixingReviewComments", manifest);
+        Assert.Contains("Add dark mode handling.", prompt);
+        Assert.Contains("git clone --depth 1 --branch \"$ROSENVALL_BRANCH\"", manifest);
+        Assert.Contains("git push origin \"$ROSENVALL_BRANCH\"", manifest);
+        Assert.Contains("name: ROSENVALL_PULL_REQUEST_NUMBER", manifest);
+        Assert.Contains("value: \"7\"", manifest);
+        Assert.Contains("RDO_PULL_REQUEST_NUMBER=$ROSENVALL_PULL_REQUEST_NUMBER", manifest);
+        Assert.DoesNotContain("/pulls\" -H", manifest);
+        Assert.DoesNotContain("npm install", manifest);
+    }
+
+    [Fact]
     public void Local_git_pull_request_merge_state_is_preserved_when_pr_is_approved()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -427,6 +666,46 @@ public sealed class DevOpsStoreTests
         Assert.NotNull(approved.Development.PullRequestMergedAt);
         Assert.Equal("crille", approved.Development.PullRequestApprovedBy);
         Assert.Null(approved.Development.PullRequestFailure);
+    }
+
+    [Fact]
+    public void Local_git_pull_request_approval_state_blocks_after_rdo_approval()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var (_, item, _) = CreateLocalGitPreviewPullRequest(store);
+
+        store.MarkPullRequestMergeState(item.Id, "merged", true);
+        store.ApprovePullRequest(item.Id, "Demo");
+
+        var state = store.GetLocalPullRequestApprovalState(item.Id, "closed");
+
+        Assert.False(state.CanApprove);
+        Assert.Equal("merged", state.Status);
+        Assert.Contains("Merged and deployed by Demo", state.Message);
+        Assert.NotNull(state.PullRequestApprovedAt);
+        Assert.Equal("Demo", state.PullRequestApprovedBy);
+    }
+
+    [Fact]
+    public void Local_git_pull_request_approval_state_blocks_closed_unapproved_prs_and_unresolved_comments()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var (_, item, _) = CreateLocalGitPreviewPullRequest(store);
+
+        var closed = store.GetLocalPullRequestApprovalState(item.Id, "closed");
+
+        Assert.False(closed.CanApprove);
+        Assert.Equal("blocked", closed.Status);
+        Assert.Contains("closed", closed.Message, StringComparison.OrdinalIgnoreCase);
+
+        store.AddPullRequestReviewComment(item.Id, new CreatePullRequestReviewCommentRequest("src/App.tsx", "new", 12, "+ <main />", "Fix this before merge."), "crille");
+        var commented = store.GetLocalPullRequestApprovalState(item.Id, "open");
+
+        Assert.False(commented.CanApprove);
+        Assert.Equal("blocked", commented.Status);
+        Assert.Contains("Resolve 1 review comment", commented.Message);
     }
 
     [Fact]
@@ -2093,6 +2372,39 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Planning_prompt_includes_human_discussion_and_unresolved_plan_review_comments_without_system_result_spam()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Plan revision", "Create a clock app.", "Todo", "Medium", null));
+        var firstPlan = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan:\n1. Build a clock.\n2. Add a preview.")!;
+        store.AddComment(item.Id, "Christopher", "Comment", "Use Swedish wording and keep the interface compact.");
+        store.AddAiPlanReviewComment(item.Id, firstPlan.Id, new CreateAiPlanReviewCommentRequest("block-2", "2. Add a preview.", "Mention the public hostname in the plan."), "Christopher");
+        var context = store.GetWorkItemDetail(item.Id)!;
+        var promptCapture = Path.Combine(Path.GetTempPath(), $"codex-prompt-{Guid.NewGuid():N}.md");
+        var fakeCodex = CreateFakeCodexScript(exitCode: 0, plan: "Revised plan from fake Codex.", promptCapturePath: promptCapture);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:Path"] = fakeCodex,
+                ["Ai:Codex:Home"] = Path.Combine(Path.GetTempPath(), $"codex-home-{Guid.NewGuid():N}")
+            })
+            .Build();
+        var provider = new CodexCliPlanProvider(configuration, NullLogger<CodexCliPlanProvider>.Instance);
+
+        await provider.GeneratePlanAsync("gpt-5.5", context, CancellationToken.None);
+
+        var prompt = await File.ReadAllTextAsync(promptCapture);
+        Assert.Contains("Work item discussion:", prompt);
+        Assert.Contains("Christopher: Use Swedish wording and keep the interface compact.", prompt);
+        Assert.Contains("Unresolved plan review comments:", prompt);
+        Assert.Contains("Plan #1 block-2", prompt);
+        Assert.Contains("Mention the public hostname in the plan.", prompt);
+        Assert.DoesNotContain("Created plan #1", prompt);
+    }
+
+    [Fact]
     public void Implementation_manifest_prompt_includes_board_context_and_allowed_path_validation()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -2733,7 +3045,20 @@ public sealed class DevOpsStoreTests
             requests.Add((request.Method, request.RequestUri!.PathAndQuery, body));
             if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/pulls/7", StringComparison.Ordinal))
             {
-                return JsonResponse("""{"number":7,"state":"open","merged":false,"html_url":"http://forgejo.local/rdo/demo-app/pulls/7","head":{"ref":"rdo/task-1"}}""");
+                return JsonResponse("""{"number":7,"state":"open","merged":false,"html_url":"http://forgejo.local/rdo/demo-app/pulls/7","base":{"ref":"main"},"head":{"ref":"rdo/task-1"}}""");
+            }
+
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/pulls/7/files", StringComparison.Ordinal))
+            {
+                return JsonResponse("""[{"filename":"src/App.tsx","status":"modified","additions":12,"deletions":3},{"filename":"README.md","status":"added","additions":4,"deletions":0}]""");
+            }
+
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/pulls/7.diff", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("diff --git a/src/App.tsx b/src/App.tsx\n+hello\n", Encoding.UTF8, "text/plain")
+                };
             }
 
             if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.EndsWith("/repos/rdo/demo-app/pulls/7/merge", StringComparison.Ordinal))
@@ -2772,6 +3097,9 @@ public sealed class DevOpsStoreTests
         var repository = new RepositoryDto(Guid.NewGuid(), "LocalGit", "demo-app", "http://forgejo.local/rdo/demo-app.git", null, "main", DateTimeOffset.UtcNow, "rdo");
 
         var pullRequest = await forgejo.GetPullRequestAsync(repository, "http://forgejo.local/rdo/demo-app/pulls/7", CancellationToken.None);
+        var pullRequestFromNumber = await forgejo.GetPullRequestAsync(repository, 7, "http://forgejo.local/rdo/demo-app", CancellationToken.None);
+        var files = await forgejo.GetPullRequestFilesAsync(pullRequest!, CancellationToken.None);
+        var diff = await forgejo.GetPullRequestDiffAsync(pullRequest!, CancellationToken.None);
         var merged = await forgejo.MergePullRequestAsync(pullRequest!, CancellationToken.None);
         var commented = await forgejo.AddPullRequestCommentAsync(pullRequest!, "Closed by cleanup.", CancellationToken.None);
         var closed = await forgejo.ClosePullRequestAsync(pullRequest!, CancellationToken.None);
@@ -2780,12 +3108,22 @@ public sealed class DevOpsStoreTests
         Assert.NotNull(pullRequest);
         Assert.Equal(7, pullRequest.Number);
         Assert.Equal("open", pullRequest.State);
+        Assert.Equal("main", pullRequest.BaseRef);
         Assert.Equal("rdo/task-1", pullRequest.HeadRef);
+        Assert.NotNull(pullRequestFromNumber);
+        Assert.Equal(7, pullRequestFromNumber!.Number);
+        Assert.Equal("http://forgejo.local/rdo/demo-app/pulls/7", pullRequestFromNumber.HtmlUrl);
+        Assert.NotNull(files);
+        Assert.Equal(2, files!.Count);
+        Assert.Contains(files, file => file.Path == "src/App.tsx" && file.Additions == 12 && file.Deletions == 3);
+        Assert.Contains("diff --git", diff);
         Assert.True(merged);
         Assert.True(commented);
         Assert.True(closed);
         Assert.True(deleted);
         Assert.Contains(requests, request => request.Method == HttpMethod.Post && request.Path.EndsWith("/pulls/7/merge", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.Method == HttpMethod.Get && request.Path.EndsWith("/pulls/7/files?limit=200", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.Method == HttpMethod.Get && request.Path.EndsWith("/pulls/7.diff", StringComparison.Ordinal));
         Assert.Contains(requests, request => request.Method.Method == "PATCH" && request.Body.Contains("\"state\":\"closed\"", StringComparison.Ordinal));
         Assert.Contains(requests, request => request.Method == HttpMethod.Delete && request.Path.EndsWith("/repos/rdo/demo-app", StringComparison.Ordinal));
     }
@@ -3346,11 +3684,49 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Preview_source_provider_adopts_result_configmap_that_appears_at_timeout()
+    {
+        var fakeKubectl = CreateDelayedPreviewSourceResultKubectl();
+        try
+        {
+            using var fixture = DevOpsStoreFixture.Create();
+            var board = fixture.Store.GetWorkspaces().SelectMany(workspace => fixture.Store.GetBoards(workspace.Id)).First();
+            var item = fixture.Store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "build a clock page", "Todo", "Medium", null));
+            var run = fixture.Store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Build the preview.")!;
+            run.Approve("crille");
+            var context = fixture.Store.GetWorkItemDetail(item.Id)!;
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Pipelines:KubectlPath"] = fakeKubectl.Path,
+                    ["Pipelines:KubeconfigPath"] = "",
+                    ["Ai:Codex:PreviewSourceJobTimeoutSeconds"] = "0"
+                })
+                .Build();
+            var jobs = new PipelineJobOrchestrator(configuration, NullLogger<PipelineJobOrchestrator>.Instance);
+            var provider = new KubernetesPreviewSourceProvider(jobs, configuration, NullLogger<KubernetesPreviewSourceProvider>.Instance);
+
+            var files = await provider.GenerateSourceAsync("gpt-5.4", "high", run, context, null, CancellationToken.None);
+
+            var commands = File.ReadAllText(fakeKubectl.ArgumentsPath);
+            Assert.Contains(files, file => file.Path == "src/App.tsx" && file.Content.Contains("Timeout adopted", StringComparison.Ordinal));
+            Assert.Contains("apply -f", commands);
+            Assert.Contains("get configmap", commands);
+        }
+        finally
+        {
+            fakeKubectl.Directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void Local_start_script_sets_preview_source_mode_from_kubeconfig_availability()
     {
         var script = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "start-local-demo.ps1"));
 
         Assert.Contains("Ai__Codex__PreviewSourceMode", script);
+        Assert.Contains("Ai__Codex__PreviewSourceJobTimeoutSeconds", script);
+        Assert.Contains("Ai__Codex__KubernetesRunnerImage", script);
         Assert.Contains("kubernetes-job", script);
         Assert.Contains("in-process", script);
         Assert.Contains("Preview__KubeconfigPath", script);
@@ -3772,6 +4148,26 @@ public sealed class DevOpsStoreTests
         store.ApproveAiRun(run.Id, "crille");
         store.BeginPreviewImplementation(item.Id, "codex");
         store.RecordPreviewFailure(item.Id, "ServerRestart", "system", "Preview implementation was interrupted by an API restart.");
+
+        var restored = fixture.Reopen().GetWorkItemDetail(item.Id)!;
+
+        Assert.Equal("Implementing", restored.Preview?.Status);
+        Assert.Null(restored.Preview?.FailureReason);
+        Assert.Contains(restored.Preview!.TerminalLines!, line => line.Message.Contains("reattaching", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(restored.PreviewImplementationRunsAwaitingRecovery!, pending => pending.Id == run.Id);
+    }
+
+    [Fact]
+    public void Previously_failed_preview_source_timeout_is_requeued_after_restart()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "klocka", "build a clock page with a button that switches between digital and analog clock modes", "Todo", "Medium", null));
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.4", "Implement a Swedish clock page with a digital/analog toggle.")!;
+        store.ApproveAiRun(run.Id, "crille");
+        store.BeginPreviewImplementation(item.Id, "codex");
+        store.RecordPreviewFailure(item.Id, "ImplementationFailed", "system", "Preview source job preview-source-task-4829-example timed out after 300 seconds; no preview was deployed.");
 
         var restored = fixture.Reopen().GetWorkItemDetail(item.Id)!;
 
@@ -4554,6 +4950,31 @@ public sealed class DevOpsStoreTests
         Assert.Contains(store.GetPreviewEvents(), entry => entry.WorkItemId == item.Id && entry.EventType == "Started");
     }
 
+    private static (RepositoryDto Repository, WorkItemSummaryDto Item, ImplementationRunDto Run) CreateLocalGitPreviewPullRequest(DevOpsStore store)
+    {
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "demo-app",
+            "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/demo-app.git",
+            "main",
+            null,
+            "rdo",
+            "react-preview",
+            "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Demo app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "utveckling", "Build a time app.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        store.UpdateImplementationRun(run.Id, "PullRequestReady", "RDO_COMMIT=abc123\nRDO_PULL_REQUEST_URL=http://forgejo.local/rdo/demo-app/pulls/7\nRDO_PULL_REQUEST_NUMBER=7\nRDO_PULL_REQUEST_STATE=open");
+        return (repository, item, run);
+    }
+
     private sealed class DevOpsStoreFixture : IDisposable
     {
         private readonly string _databasePath;
@@ -4704,7 +5125,9 @@ public sealed class DevOpsStoreTests
             .First(comment =>
                 string.Equals(comment["author"]?.GetValue<string>(), "Rosenvall AI", StringComparison.Ordinal) &&
                 string.Equals(comment["kind"]?.GetValue<string>(), "Result", StringComparison.Ordinal));
-        comments.Add(firstSystemResult.DeepClone());
+        var duplicate = firstSystemResult.DeepClone().AsObject();
+        duplicate["body"] = $"{duplicate["body"]!.GetValue<string>().TrimEnd('.')}.";
+        comments.Add(duplicate);
         return root.ToJsonString();
     }
 
@@ -4735,6 +5158,34 @@ public sealed class DevOpsStoreTests
             {
                 Assert.Equal(listIndent + 2, LeadingSpaces(line));
             }
+        }
+    }
+
+    private static void AssertPreviewPromotionRunnerSecurityContextIsWellFormed(string manifest)
+    {
+        var lines = manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        var runnerIndex = Array.FindIndex(lines, line => line.Trim() == "- name: runner");
+        var securityContextIndex = Array.FindIndex(lines, runnerIndex + 1, line => line.Trim() == "securityContext:");
+        var envIndex = Array.FindIndex(lines, securityContextIndex + 1, line => line.Trim() == "env:");
+
+        Assert.True(runnerIndex >= 0, "Manifest should include the preview-promotion runner container.");
+        Assert.True(securityContextIndex > runnerIndex, "Runner container should include securityContext.");
+        Assert.True(envIndex > securityContextIndex, "Runner securityContext should be followed by env.");
+
+        var entries = new[]
+        {
+            "runAsNonRoot: true",
+            "runAsUser: 1000",
+            "runAsGroup: 1000",
+            "allowPrivilegeEscalation: false",
+            "capabilities:"
+        };
+        var expectedIndent = LeadingSpaces(lines[securityContextIndex]) + 2;
+        foreach (var entry in entries)
+        {
+            var line = lines[(securityContextIndex + 1)..envIndex].SingleOrDefault(candidate => candidate.Trim() == entry);
+            Assert.False(string.IsNullOrWhiteSpace(line), $"Runner securityContext should include '{entry}'.");
+            Assert.Equal(expectedIndent, LeadingSpaces(line!));
         }
     }
 
@@ -4942,6 +5393,81 @@ if %errorlevel%==0 (
 )
 echo unexpected kubectl command: %* 1>&2
 exit /b 1
+""");
+        return new FakeKubectl(directory, windowsScriptPath, argumentsPath);
+    }
+
+    private static FakeKubectl CreateDelayedPreviewSourceResultKubectl()
+    {
+        var directory = Directory.CreateTempSubdirectory("fake-preview-source-delayed-kubectl-");
+        var argumentsPath = Path.Combine(directory.FullName, "arguments.txt");
+        var countPath = Path.Combine(directory.FullName, "configmap-count.txt");
+        var resultPath = Path.Combine(directory.FullName, "result.json");
+        File.WriteAllText(resultPath, """
+            {
+              "data": {
+                "result.json": "{\"files\":[{\"key\":\"src-app-tsx\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return <main>Timeout adopted</main>; }\"}]}"
+              }
+            }
+            """);
+        if (!OperatingSystem.IsWindows())
+        {
+            var scriptPath = Path.Combine(directory.FullName, "kubectl");
+            File.WriteAllText(scriptPath, $$"""
+#!/usr/bin/env sh
+printf '%s\n' "$*" >> '{{argumentsPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}'
+case "$*" in
+  *"get configmap"*)
+    count=0
+    if [ -f '{{countPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}' ]; then
+      count=$(cat '{{countPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}')
+    fi
+    count=$((count + 1))
+    printf '%s' "$count" > '{{countPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}'
+    if [ "$count" -ge 2 ]; then
+      cat '{{resultPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}'
+      exit 0
+    fi
+    echo "not found" >&2
+    exit 1
+    ;;
+  *"get job"*)
+    echo "not found" >&2
+    exit 1
+    ;;
+esac
+cat >/dev/null
+exit 0
+""");
+            File.SetUnixFileMode(scriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return new FakeKubectl(directory, scriptPath, argumentsPath);
+        }
+
+        var windowsScriptPath = Path.Combine(directory.FullName, "kubectl.cmd");
+        File.WriteAllText(windowsScriptPath, $$"""
+@echo off
+setlocal enabledelayedexpansion
+echo %* >> "{{argumentsPath}}"
+echo %* | findstr /C:"get configmap" > nul
+if %errorlevel%==0 (
+  set count=0
+  if exist "{{countPath}}" set /p count=<"{{countPath}}"
+  set /a count=!count!+1
+  > "{{countPath}}" echo !count!
+  if !count! GEQ 2 (
+    type "{{resultPath}}"
+    exit /b 0
+  )
+  echo not found 1>&2
+  exit /b 1
+)
+echo %* | findstr /C:"get job" > nul
+if %errorlevel%==0 (
+  echo not found 1>&2
+  exit /b 1
+)
+more > nul
+exit /b 0
 """);
         return new FakeKubectl(directory, windowsScriptPath, argumentsPath);
     }

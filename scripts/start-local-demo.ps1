@@ -28,6 +28,8 @@ $homelabKubeconfig = Join-Path (Split-Path $repoRoot -Parent) "Rosenvalls-Homela
 $previousPreviewKubeconfig = $env:Preview__KubeconfigPath
 $previousPipelinesKubeconfig = $env:Pipelines__KubeconfigPath
 $previousPreviewSourceMode = $env:Ai__Codex__PreviewSourceMode
+$previousPreviewSourceJobTimeoutSeconds = $env:Ai__Codex__PreviewSourceJobTimeoutSeconds
+$previousCodexKubernetesRunnerImage = $env:Ai__Codex__KubernetesRunnerImage
 $previousStorageSqlitePath = $env:Storage__SqlitePath
 $previousGitHubToken = $env:GitHub__Token
 $previousGitHubAppId = $env:GitHub__AppId
@@ -96,6 +98,35 @@ function Get-KubernetesSecretValue {
     return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($property.Value))
 }
 
+function Get-KubernetesConfigMapValue {
+    param(
+        [string]$Name,
+        [string]$Key,
+        [string[]]$KubectlBaseArgs
+    )
+
+    if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+        return $null
+    }
+
+    try {
+        $json = & kubectl @KubectlBaseArgs -n rosenvall-devops get configmap $Name -o json 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+            return $null
+        }
+    } catch {
+        return $null
+    }
+
+    $configMap = $json | ConvertFrom-Json
+    $property = $configMap.data.PSObject.Properties[$Key]
+    if ($null -eq $property -or [string]::IsNullOrWhiteSpace($property.Value)) {
+        return $null
+    }
+
+    return $property.Value
+}
+
 function Test-KubernetesResource {
     param(
         [string[]]$KubectlBaseArgs,
@@ -152,6 +183,7 @@ if (Test-Path -LiteralPath $homelabKubeconfig) {
     Set-EnvIfBlank "Preview__KubeconfigPath" $resolvedHomelabKubeconfig
     Set-EnvIfBlank "Pipelines__KubeconfigPath" $resolvedHomelabKubeconfig
     Set-EnvIfBlank "Ai__Codex__PreviewSourceMode" "kubernetes-job"
+    Set-EnvIfBlank "Ai__Codex__PreviewSourceJobTimeoutSeconds" "600"
 } else {
     Set-EnvIfBlank "Ai__Codex__PreviewSourceMode" "in-process"
     Write-Warning "Homelab kubeconfig was not found at $homelabKubeconfig. Kubernetes preview-source jobs are disabled for this local run."
@@ -162,6 +194,10 @@ if ([string]::IsNullOrWhiteSpace($env:Storage__SqlitePath)) {
 }
 
 $kubectlBaseArgs = Get-KubectlBaseArgs
+if (Test-Path -LiteralPath $homelabKubeconfig) {
+    Set-EnvIfBlank "Ai__Codex__KubernetesRunnerImage" (Get-KubernetesConfigMapValue "rosenvall-devops-config" "Ai__Codex__KubernetesRunnerImage" $kubectlBaseArgs)
+}
+
 if (-not $SkipClusterSecrets -and $ApiMode -eq "Local") {
     Set-EnvIfBlank "GitHub__Token" (Get-KubernetesSecretValue "rosenvall-devops-github" "token" $kubectlBaseArgs)
     Set-EnvIfBlank "GitHub__AppId" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "app-id" $kubectlBaseArgs)
@@ -256,6 +292,8 @@ if ($ApiMode -eq "ClusterPortForward") {
 $env:Preview__KubeconfigPath = $previousPreviewKubeconfig
 $env:Pipelines__KubeconfigPath = $previousPipelinesKubeconfig
 $env:Ai__Codex__PreviewSourceMode = $previousPreviewSourceMode
+$env:Ai__Codex__PreviewSourceJobTimeoutSeconds = $previousPreviewSourceJobTimeoutSeconds
+$env:Ai__Codex__KubernetesRunnerImage = $previousCodexKubernetesRunnerImage
 $env:Storage__SqlitePath = $previousStorageSqlitePath
 $env:GitHub__Token = $previousGitHubToken
 $env:GitHub__AppId = $previousGitHubAppId

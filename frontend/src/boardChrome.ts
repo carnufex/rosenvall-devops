@@ -1,5 +1,8 @@
 export type BoardChromeRepository = {
   provider: string;
+  name?: string | null;
+  owner?: string | null;
+  defaultBranch?: string | null;
   webUrl?: string | null;
   implementationProfile?: string | null;
 };
@@ -52,7 +55,42 @@ export type TimelineFlowRow = {
   nodes: TimelineFlowNode[];
 };
 
+export type WorkItemTabKey = 'overview' | 'ai' | 'preview' | 'pull-request' | 'logs';
+
+export type WorkItemModalTab = {
+  key: WorkItemTabKey;
+  label: string;
+};
+
+export type WorkItemAutosaveStatus = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+
+export function workItemAutosaveStatusLabel(status: WorkItemAutosaveStatus) {
+  switch (status) {
+    case 'dirty': return 'Unsaved changes';
+    case 'saving': return 'Saving...';
+    case 'saved': return 'Saved';
+    case 'error': return 'Autosave failed';
+    default: return 'All changes saved';
+  }
+}
+
+export type WorkItemTabRun = {
+  id: string;
+  title: string;
+  status?: string | null;
+  updatedAt?: string | null;
+  steps: PreviewStepDisplay[];
+};
+
 export const timelineLanes: TimelineLane[] = ['Card', 'Implementation PR', 'Cleanup', 'Preview', 'Pipeline'];
+
+export const workItemModalTabs: WorkItemModalTab[] = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'ai', label: 'AI' },
+  { key: 'preview', label: 'Preview' },
+  { key: 'pull-request', label: 'Pull request' },
+  { key: 'logs', label: 'Logs' }
+];
 
 export type PreviewLifecycleStepState = 'done' | 'active' | 'pending' | 'blocked';
 
@@ -106,6 +144,9 @@ export type DevelopmentChrome = {
   pullRequestNumber?: number | null;
   pullRequestState?: string | null;
   pullRequestApprovedAt?: string | null;
+  pullRequestApprovedBy?: string | null;
+  pullRequestMergedAt?: string | null;
+  pullRequestFailure?: string | null;
 };
 
 export type RepositoryHostingChrome = {
@@ -113,6 +154,76 @@ export type RepositoryHostingChrome = {
   localGitEnabled?: boolean | null;
   localGitAvailable?: boolean | null;
   localGitMessage?: string | null;
+};
+
+export type PullRequestDiffFileChrome = {
+  path: string;
+  status?: string | null;
+  additions?: number | null;
+  deletions?: number | null;
+};
+
+export type PullRequestReviewCommentChrome = {
+  id: string;
+  filePath: string;
+  status: string;
+  side?: string | null;
+  lineNumber?: number | null;
+};
+
+export type AiPlanReviewCommentChrome = {
+  id?: string | null;
+  aiRunId: string;
+  anchorKey?: string | null;
+  status: string;
+};
+
+export type AiPlanReviewBlock = {
+  anchorKey: string;
+  kind: 'heading' | 'paragraph' | 'list-item';
+  text: string;
+};
+
+export type OverviewPreviewChrome = {
+  status?: string | null;
+  message?: string | null;
+  phase?: string | null;
+};
+
+export type OverviewDeliverySummaryItem = {
+  key: 'app' | 'repository' | 'preview' | 'pull-request' | 'logs';
+  label: string;
+  value: string;
+  actionLabel: string;
+  href?: string | null;
+  tab?: WorkItemTabKey | null;
+  disabled?: boolean;
+};
+
+export type LocalPullRequestApprovalStateChrome = {
+  canApprove: boolean;
+  status: 'reviewable' | 'merged' | 'blocked' | 'failed' | 'approving';
+  message: string;
+};
+
+export type ContinuousDiffLine = {
+  id: string;
+  text: string;
+  kind: 'meta' | 'hunk' | 'context' | 'add' | 'delete';
+  oldLine?: number | null;
+  newLine?: number | null;
+  side?: 'old' | 'new' | 'both' | null;
+  commentable: boolean;
+};
+
+export type ContinuousDiffSection = {
+  path: string;
+  file: PullRequestDiffFileChrome | null;
+  lines: ContinuousDiffLine[];
+};
+
+export type ContinuousDiff = {
+  sections: ContinuousDiffSection[];
 };
 
 const previewLifecycleDefinitions = [
@@ -139,6 +250,28 @@ export function boardRepositoryUrl(board: BoardChromeBoard): string | null {
   return board.repository?.webUrl?.trim() || null;
 }
 
+export function boardRepositorySummary(board: BoardChromeBoard): string {
+  const repository = board.repository;
+  if (!repository) return 'No repository linked';
+  const owner = repository.owner?.trim();
+  const name = repository.name?.trim();
+  const repositoryName = owner && name ? `${owner}/${name}` : name || repository.provider;
+  const branch = repository.defaultBranch?.trim();
+  const profile = repository.implementationProfile?.trim();
+  return [
+    `${repository.provider} / ${repositoryName}`,
+    branch || null,
+    profile ? profileLabel(profile) : null
+  ].filter(Boolean).join(' - ');
+}
+
+function profileLabel(profile: string): string {
+  if (profile === 'react-preview') return 'React preview';
+  if (profile === 'gitops-homelab') return 'GitOps';
+  if (profile === 'code-repo') return 'Code repository';
+  return profile;
+}
+
 export function isLocalGitDevelopmentRecord(development: DevelopmentChrome): boolean {
   return development.pullRequestProvider?.trim().toLowerCase() === 'localgit';
 }
@@ -150,6 +283,270 @@ export function pullRequestDisplayLabel(development: DevelopmentChrome): string 
 
 export function approvePullRequestActionLabel(development: DevelopmentChrome): string {
   return isLocalGitDevelopmentRecord(development) ? 'Merge local PR and deploy app' : 'Approve PR';
+}
+
+export function unresolvedReviewCommentCount(comments: readonly Pick<PullRequestReviewCommentChrome, 'status'>[]): number {
+  return comments.filter((comment) => comment.status?.toLowerCase() !== 'resolved').length;
+}
+
+export function canApprovePullRequestWithComments(comments: readonly Pick<PullRequestReviewCommentChrome, 'status'>[]): boolean {
+  return unresolvedReviewCommentCount(comments) === 0;
+}
+
+export function reviewCommentCountsByFile(comments: readonly Pick<PullRequestReviewCommentChrome, 'filePath' | 'status'>[]): Record<string, { total: number; unresolved: number }> {
+  return comments.reduce<Record<string, { total: number; unresolved: number }>>((counts, comment) => {
+    const key = comment.filePath;
+    counts[key] ??= { total: 0, unresolved: 0 };
+    counts[key].total += 1;
+    if (comment.status?.toLowerCase() !== 'resolved') {
+      counts[key].unresolved += 1;
+    }
+    return counts;
+  }, {});
+}
+
+export function splitAiPlanReviewBlocks(plan: string | null | undefined): AiPlanReviewBlock[] {
+  const blocks: AiPlanReviewBlock[] = [];
+  for (const rawLine of (plan ?? '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    const listItem = line.match(/^((?:[-*]\s+)|(?:\d+\.\s+))(.+)$/);
+    blocks.push({
+      anchorKey: `block-${blocks.length + 1}`,
+      kind: heading ? 'heading' : listItem ? 'list-item' : 'paragraph',
+      text: heading ? heading[1].trim() : listItem ? (listItem[1].trim().match(/^\d+\.$/) ? `${listItem[1]}${listItem[2]}`.trim() : listItem[2].trim()) : line
+    });
+  }
+
+  return blocks;
+}
+
+export function unresolvedAiPlanReviewCommentCount(comments: readonly Pick<AiPlanReviewCommentChrome, 'aiRunId' | 'status'>[], aiRunId?: string | null): number {
+  return comments.filter((comment) =>
+    (!aiRunId || comment.aiRunId === aiRunId) &&
+    comment.status?.toLowerCase() !== 'resolved').length;
+}
+
+export function canApproveAiPlanWithComments(aiRunId: string | null | undefined, comments: readonly Pick<AiPlanReviewCommentChrome, 'aiRunId' | 'status'>[]): boolean {
+  return !!aiRunId && unresolvedAiPlanReviewCommentCount(comments, aiRunId) === 0;
+}
+
+export function planReviewCommentCountsByRun(comments: readonly Pick<AiPlanReviewCommentChrome, 'aiRunId' | 'status'>[]): Record<string, { total: number; unresolved: number }> {
+  return comments.reduce<Record<string, { total: number; unresolved: number }>>((counts, comment) => {
+    const key = comment.aiRunId;
+    counts[key] ??= { total: 0, unresolved: 0 };
+    counts[key].total += 1;
+    if (comment.status?.toLowerCase() !== 'resolved') {
+      counts[key].unresolved += 1;
+    }
+    return counts;
+  }, {});
+}
+
+export function buildOverviewDeliverySummary({ board, development, preview }: {
+  board: BoardChromeBoard | null;
+  development?: DevelopmentChrome | null;
+  preview?: OverviewPreviewChrome | null;
+}): OverviewDeliverySummaryItem[] {
+  const appUrl = board ? boardPublicAppUrl(board) : null;
+  const repositoryUrl = board ? boardRepositoryUrl(board) : null;
+  const pullRequestLabel = development?.pullRequestUrl ? pullRequestDisplayLabel(development) : 'No pull request';
+  const pullRequestState = development
+    ? isLocalGitDevelopmentRecord(development) && development.pullRequestApprovedAt
+      ? 'merged'
+      : development.pullRequestState ?? 'open'
+    : null;
+
+  return [
+    {
+      key: 'app',
+      label: 'App',
+      value: board ? appUrl ? 'App running' : boardPublicAppStatusLabel(board) ?? 'App not deployed' : 'No board loaded',
+      actionLabel: appUrl ? 'Go to app' : 'Not deployed',
+      href: appUrl,
+      disabled: !appUrl
+    },
+    {
+      key: 'repository',
+      label: 'Repository',
+      value: board ? boardRepositorySummary(board) : 'No repository',
+      actionLabel: repositoryUrl ? 'Go to repository' : 'RDO managed',
+      href: repositoryUrl,
+      disabled: !repositoryUrl
+    },
+    {
+      key: 'preview',
+      label: 'Preview',
+      value: preview ? previewDisplayMessage(preview.status ?? '', preview.message, preview.phase) : 'No preview',
+      actionLabel: preview ? 'Open preview' : 'Not started',
+      tab: 'preview',
+      disabled: !preview
+    },
+    {
+      key: 'pull-request',
+      label: 'Pull request',
+      value: development?.pullRequestUrl ? `${pullRequestLabel}${pullRequestState ? ` ${pullRequestState}` : ''}` : 'No pull request',
+      actionLabel: development?.pullRequestUrl ? 'Open PR' : 'Not created',
+      tab: 'pull-request',
+      disabled: !development?.pullRequestUrl
+    },
+    {
+      key: 'logs',
+      label: 'Logs',
+      value: 'Runner output',
+      actionLabel: 'Open logs',
+      tab: 'logs'
+    }
+  ];
+}
+
+export function buildLocalPullRequestApprovalState(source: {
+  state?: string | null;
+  pullRequestState?: string | null;
+  pullRequestApprovedAt?: string | null;
+  pullRequestApprovedBy?: string | null;
+  pullRequestMergedAt?: string | null;
+  pullRequestFailure?: string | null;
+  canApprove?: boolean | null;
+  approvalStatus?: string | null;
+  approvalMessage?: string | null;
+  unresolvedComments?: number | null;
+  pending?: boolean | null;
+}): LocalPullRequestApprovalStateChrome {
+  if (source.pending) {
+    return { canApprove: false, status: 'approving', message: 'Merging local PR and deploying app...' };
+  }
+
+  const backendStatus = normalizeApprovalStatus(source.approvalStatus);
+  if (source.pullRequestApprovedAt || backendStatus === 'merged') {
+    const actor = source.pullRequestApprovedBy || 'RDO';
+    return { canApprove: false, status: 'merged', message: source.approvalMessage || `Merged and deployed by ${actor}.` };
+  }
+
+  const unresolved = source.unresolvedComments ?? 0;
+  if (unresolved > 0) {
+    return {
+      canApprove: false,
+      status: 'blocked',
+      message: `Resolve ${unresolved} review comment${unresolved === 1 ? '' : 's'} before approving PR.`
+    };
+  }
+
+  if (source.approvalMessage || backendStatus) {
+    return {
+      canApprove: !!source.canApprove,
+      status: backendStatus ?? (source.canApprove ? 'reviewable' : 'blocked'),
+      message: source.approvalMessage || (source.canApprove ? 'Ready to merge and deploy.' : 'Pull request cannot be approved.')
+    };
+  }
+
+  const state = (source.state ?? source.pullRequestState ?? 'open').trim().toLowerCase();
+  if (source.pullRequestMergedAt || state === 'merged') {
+    return {
+      canApprove: false,
+      status: 'failed',
+      message: source.pullRequestFailure
+        ? `Local pull request was merged, but deployment failed: ${source.pullRequestFailure}`
+        : 'Local pull request is merged, but RDO has not marked the app as deployed.'
+    };
+  }
+
+  if (state !== 'open') {
+    return {
+      canApprove: false,
+      status: 'blocked',
+      message: `Local pull request is ${state} in Forgejo and cannot be approved by RDO.`
+    };
+  }
+
+  return { canApprove: true, status: 'reviewable', message: 'Ready to merge and deploy.' };
+}
+
+function normalizeApprovalStatus(value: string | null | undefined): LocalPullRequestApprovalStateChrome['status'] | null {
+  const normalized = (value ?? '').trim().toLowerCase();
+  return normalized === 'reviewable' || normalized === 'merged' || normalized === 'blocked' || normalized === 'failed' || normalized === 'approving'
+    ? normalized
+    : null;
+}
+
+export function shouldRenderPlanReferenceActivity(comment: Pick<ActivityCommentChrome, 'kind' | 'body'>): boolean {
+  if (comment.kind === 'Plan') return true;
+  if (!comment.kind || comment.kind.toLowerCase() !== 'result') return false;
+  const normalized = comment.body.trim().replace(/\s+/g, ' ');
+  return /^Created plan #\d+:/i.test(normalized) || /^AI needs input for plan #\d+:/i.test(normalized);
+}
+
+export function parseUnifiedDiffForContinuousReview(diff: string, files: readonly PullRequestDiffFileChrome[]): ContinuousDiff {
+  const fileByPath = new Map(files.map((file) => [file.path, file]));
+  const sections: ContinuousDiffSection[] = [];
+  let current: ContinuousDiffSection | null = null;
+  let oldLine: number | null = null;
+  let newLine: number | null = null;
+
+  const ensureSection = (path: string) => {
+    current = { path, file: fileByPath.get(path) ?? null, lines: [] };
+    sections.push(current);
+  };
+
+  const linePath = (line: string) => {
+    const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    return match?.[2] ?? null;
+  };
+
+  diff.replace(/\r\n/g, '\n').split('\n').forEach((line, index) => {
+    const nextPath = linePath(line);
+    if (nextPath) {
+      ensureSection(nextPath);
+      oldLine = null;
+      newLine = null;
+    }
+
+    if (!current) {
+      ensureSection(files[0]?.path ?? 'diff');
+    }
+
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      current!.lines.push({ id: `${current!.path}:${index}`, text: line, kind: 'hunk', commentable: false });
+      return;
+    }
+
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      const renderedLine = newLine;
+      current!.lines.push({ id: `${current!.path}:new:${renderedLine ?? index}`, text: line, kind: 'add', newLine: renderedLine, side: 'new', commentable: renderedLine !== null });
+      if (newLine !== null) newLine += 1;
+      return;
+    }
+
+    if (line.startsWith('-') && !line.startsWith('---')) {
+      const renderedLine = oldLine;
+      current!.lines.push({ id: `${current!.path}:old:${renderedLine ?? index}`, text: line, kind: 'delete', oldLine: renderedLine, side: 'old', commentable: renderedLine !== null });
+      if (oldLine !== null) oldLine += 1;
+      return;
+    }
+
+    if (oldLine !== null && newLine !== null && (line.startsWith(' ') || line === '')) {
+      const renderedOldLine = oldLine;
+      const renderedNewLine = newLine;
+      current!.lines.push({ id: `${current!.path}:both:${renderedNewLine}:${index}`, text: line, kind: 'context', oldLine: renderedOldLine, newLine: renderedNewLine, side: 'both', commentable: true });
+      oldLine += 1;
+      newLine += 1;
+      return;
+    }
+
+    current!.lines.push({ id: `${current!.path}:${index}`, text: line, kind: 'meta', commentable: false });
+  });
+
+  for (const file of files) {
+    if (!sections.some((section) => section.path === file.path)) {
+      sections.push({ path: file.path, file, lines: [] });
+    }
+  }
+
+  return { sections };
 }
 
 export function boardDeleteCleanupMessage(boardName: string): string {
@@ -281,11 +678,18 @@ export function dedupeGeneratedActivityComments<T extends ActivityCommentChrome>
       return true;
     }
 
-    const key = `${comment.workItemId}\n${comment.author}\n${comment.kind}\n${comment.body}`;
+    const key = `${comment.workItemId}\n${comment.author.toLowerCase()}\n${comment.kind.toLowerCase()}\n${normalizedGeneratedActivityBody(comment.body)}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
+
+function normalizedGeneratedActivityBody(body: string): string {
+  const normalized = body.trim().replace(/\s+/g, ' ');
+  const plan = normalized.match(/^Created plan #(\d+):\s*(.+?)\.?$/i);
+  if (plan) return `created-plan:${plan[1]}:${plan[2].trim().replace(/\.$/, '').toLowerCase()}`;
+  return normalized;
 }
 
 function normalizePreviewStepKey(value: string | null | undefined): string {

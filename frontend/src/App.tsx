@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildTimelineFlow, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, safeMarkdownHref, type TimelineLane } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemModalTabs, type AiPlanReviewBlock, type ContinuousDiffLine, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -167,6 +167,16 @@ type WorkItemSummary = {
   pullRequestUrl?: string | null;
   sortOrder: number;
   previewUrl?: string | null;
+  parentWorkItemId?: string | null;
+  parentKey?: string | null;
+  rootWorkItemId?: string | null;
+  rootKey?: string | null;
+  hierarchyPath?: string | null;
+  isBug?: boolean;
+  childCount?: number;
+  doneChildCount?: number;
+  blockedChildCount?: number;
+  openPullRequestChildCount?: number;
 };
 
 type WorkItemDetail = {
@@ -180,6 +190,13 @@ type WorkItemDetail = {
   aiSession?: AiSessionDto | null;
   previewEvents?: PreviewEventDto[] | null;
   previewImplementationRunsAwaitingRecovery?: AiRun[] | null;
+  aiPlanReviewComments?: AiPlanReviewCommentDto[] | null;
+  parent?: WorkItemSummary | null;
+  children?: WorkItemSummary[] | null;
+  ancestors?: WorkItemSummary[] | null;
+  descendants?: WorkItemSummary[] | null;
+  epicRuns?: EpicRunDto[] | null;
+  epicGoalRuns?: EpicGoalRunDto[] | null;
   boardContext?: {
     boardId: string;
     repositoryProfile: string;
@@ -188,6 +205,44 @@ type WorkItemDetail = {
     implementationWorkflow?: ImplementationWorkflow | string | null;
     publicHostname?: string | null;
   } | null;
+};
+
+type EpicRunChildDto = {
+  workItemId: string;
+  workItemKey: string;
+  workItemTitle: string;
+  agentRole: string;
+  status: string;
+  aiRunId?: string | null;
+  implementationRunId?: string | null;
+  summary?: string | null;
+  updatedAt?: string | null;
+};
+
+type EpicRunDto = {
+  id: string;
+  rootWorkItemId: string;
+  rootWorkItemKey: string;
+  rootWorkItemTitle: string;
+  status: string;
+  actor: string;
+  createdAt: string;
+  updatedAt: string;
+  children: EpicRunChildDto[];
+  summary?: string | null;
+  failureReason?: string | null;
+};
+
+type EpicGoalRunDto = {
+  id: string;
+  rootWorkItemId: string;
+  epicRunId?: string | null;
+  status: string;
+  actor: string;
+  createdAt: string;
+  updatedAt: string;
+  summary?: string | null;
+  failureReason?: string | null;
 };
 
 type CommentDto = {
@@ -450,6 +505,73 @@ type DevelopmentDto = {
   pullRequestFailure?: string | null;
 };
 
+type PullRequestDiffFileDto = {
+  path: string;
+  status?: string | null;
+  additions?: number | null;
+  deletions?: number | null;
+  previousPath?: string | null;
+};
+
+type PullRequestReviewCommentDto = {
+  id: string;
+  workItemId: string;
+  pullRequestProvider: string;
+  pullRequestNumber: number;
+  filePath: string;
+  side: string;
+  lineNumber: number;
+  diffLine: string;
+  author: string;
+  body: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  resolvedBy?: string | null;
+  resolvedAt?: string | null;
+};
+
+type AiPlanReviewCommentDto = {
+  id: string;
+  workItemId: string;
+  aiRunId: string;
+  anchorKey: string;
+  quotedText: string;
+  author: string;
+  body: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  resolvedBy?: string | null;
+  resolvedAt?: string | null;
+  aiRunSequenceNumber?: number | null;
+};
+
+type PullRequestDiffDto = {
+  provider: string;
+  repository: string;
+  number: number;
+  state: string;
+  baseBranch?: string | null;
+  headBranch?: string | null;
+  pullRequestUrl?: string | null;
+  changedFiles: number;
+  additions: number;
+  deletions: number;
+  truncated: boolean;
+  message?: string | null;
+  files: PullRequestDiffFileDto[];
+  diff: string;
+  reviewComments?: PullRequestReviewCommentDto[] | null;
+  pullRequestApprovedBy?: string | null;
+  pullRequestApprovedAt?: string | null;
+  pullRequestMergedAt?: string | null;
+  pullRequestFailure?: string | null;
+  canApprove?: boolean | null;
+  approvalStatus?: string | null;
+  approvalMessage?: string | null;
+};
+
 type SettingsDto = {
   gitHub: {
     account: string;
@@ -520,6 +642,8 @@ type WorkItemForm = {
   status: string;
   priority: string;
   assignee: string;
+  parentWorkItemId: string;
+  isBug: boolean;
 };
 
 type AssigneeOption = {
@@ -633,8 +757,12 @@ const emptyForm: WorkItemForm = {
   type: 'Feature',
   status: 'Todo',
   priority: 'Medium',
-  assignee: ''
+  assignee: '',
+  parentWorkItemId: '',
+  isBug: false
 };
+
+const workItemTypeOptions = ['Epic', 'Feature', 'Task'] as const;
 
 const emptyBoardForm: CreateBoardForm = {
   name: '',
@@ -980,9 +1108,17 @@ function App() {
           description: form.description,
           status: form.status,
           priority: form.priority,
-          assignee: form.assignee || null
+          assignee: form.assignee || null,
+          parentWorkItemId: form.parentWorkItemId || null,
+          isBug: form.isBug
         });
         setCreateStatus(null);
+        await refreshAfterChange(created.id);
+      });
+    },
+    createChildCard: async (parentId, request) => {
+      return runAction('Creating child card', async () => {
+        const created = await api.post<WorkItemSummary>(`/api/work-items/${parentId}/children`, request);
         await refreshAfterChange(created.id);
       });
     },
@@ -994,8 +1130,35 @@ function App() {
           type: form.type,
           status: form.status,
           priority: form.priority,
-          assignee: form.assignee || null
+          assignee: form.assignee || null,
+          parentWorkItemId: form.parentWorkItemId || null,
+          isBug: form.isBug
         });
+        await refreshAfterChange(id);
+      });
+    },
+    autosaveCard: async (id, form) => {
+      try {
+        await api.patch<WorkItemSummary>(`/api/work-items/${id}`, {
+          title: form.title,
+          description: form.description,
+          type: form.type,
+          status: form.status,
+          priority: form.priority,
+          assignee: form.assignee || null,
+          parentWorkItemId: form.parentWorkItemId || null,
+          isBug: form.isBug
+        });
+        await refreshAfterChange(id);
+        return true;
+      } catch (error) {
+        addToast('error', error instanceof Error ? error.message : 'Autosave failed');
+        return false;
+      }
+    },
+    updateCardHierarchy: async (id, parentWorkItemId) => {
+      return runAction('Updating hierarchy', async () => {
+        await api.patch<WorkItemSummary>(`/api/work-items/${id}/hierarchy`, { parentWorkItemId: parentWorkItemId || null });
         await refreshAfterChange(id);
       });
     },
@@ -1029,6 +1192,38 @@ function App() {
           reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
         }, { timeoutMs: AI_PLAN_TIMEOUT_MS });
         await refreshAfterChange(id);
+      });
+    },
+    startEpicRun: async (workItemId) => {
+      return runAction('Starting epic implementation', async () => {
+        await api.post<EpicRunDto>(`/api/work-items/${workItemId}/epic-runs`, { actor });
+        await refreshAfterChange(workItemId);
+      });
+    },
+    startEpicGoal: async (workItemId) => {
+      return runAction('Starting epic goal', async () => {
+        await api.post<EpicGoalRunDto>(`/api/work-items/${workItemId}/epic-goals`, { actor });
+        await refreshAfterChange(workItemId);
+      });
+    },
+    cancelEpicGoal: async (goalId, workItemId) => {
+      return runAction('Cancelling epic goal', async () => {
+        await api.post<EpicGoalRunDto>(`/api/epic-goals/${goalId}/cancel`, { actor });
+        await refreshAfterChange(workItemId);
+      });
+    },
+    reviseAiPlan: async (workItemId, aiRunId, message) => {
+      return runAction('Revising AI plan', async () => {
+        if (shell.status !== 'ready') return;
+        const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
+        await api.post<AiRun>(`/api/work-items/${workItemId}/ai-plan/revise`, {
+          aiRunId,
+          message,
+          provider: provider.provider,
+          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
+          reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
+        }, { timeoutMs: AI_PLAN_TIMEOUT_MS });
+        await refreshAfterChange(workItemId);
       });
     },
     approvePlan: async (runId, workItemId) => {
@@ -1138,16 +1333,81 @@ function App() {
       });
     },
     approvePullRequest: async (workItemId) => {
-      return runAction('Approving PR and deploying app', async () => {
+      const currentDevelopment = selected.status === 'open' && selected.detail.item.id === workItemId
+        ? selected.detail.development
+        : null;
+      const label = currentDevelopment && isLocalGitDevelopmentRecord(currentDevelopment)
+        ? 'Merging local PR and deploying app'
+        : 'Approving PR and deploying app';
+      return runAction(label, async () => {
         await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: actor });
         await refreshAfterChange(workItemId);
       });
     },
     approvePreviewForPr: async (workItemId) => {
-      return runAction('Creating PR from approved preview', async () => {
+      return runAction('Creating pull request from approved preview', async () => {
         await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/preview/approve-for-pr`, { actor });
         await refreshAfterChange(workItemId);
         addToast('info', 'Pull request creation started from the approved preview.');
+      });
+    },
+    createPullRequestReviewComment: async (workItemId, request) => {
+      try {
+        const comment = await api.post<PullRequestReviewCommentDto>(`/api/work-items/${workItemId}/pull-request/comments`, request);
+        await refreshAfterChange(workItemId);
+        return comment;
+      } catch (error) {
+        addToast('error', error instanceof Error ? error.message : 'Could not save review comment');
+        return null;
+      }
+    },
+    updatePullRequestReviewComment: async (workItemId, commentId, request) => {
+      try {
+        const comment = await api.patch<PullRequestReviewCommentDto>(`/api/work-items/${workItemId}/pull-request/comments/${commentId}`, request);
+        await refreshAfterChange(workItemId);
+        return comment;
+      } catch (error) {
+        addToast('error', error instanceof Error ? error.message : 'Could not update review comment');
+        return null;
+      }
+    },
+    deletePullRequestReviewComment: async (workItemId, commentId) => {
+      return runAction('Deleting review comment', async () => {
+        await api.delete(`/api/work-items/${workItemId}/pull-request/comments/${commentId}`);
+        await refreshAfterChange(workItemId);
+      });
+    },
+    fixPullRequestReviewCommentsWithAi: async (workItemId) => {
+      return runAction('Fixing review comments with AI', async () => {
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/pull-request/ai-fix-comments`, { actor, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
+        await refreshAfterChange(workItemId);
+        addToast('info', 'AI review fix started on the existing pull request branch.');
+      });
+    },
+    createAiPlanReviewComment: async (workItemId, aiRunId, request) => {
+      try {
+        const comment = await api.post<AiPlanReviewCommentDto>(`/api/work-items/${workItemId}/ai-plans/${aiRunId}/comments`, request);
+        await refreshAfterChange(workItemId);
+        return comment;
+      } catch (error) {
+        addToast('error', error instanceof Error ? error.message : 'Could not save plan comment');
+        return null;
+      }
+    },
+    updateAiPlanReviewComment: async (workItemId, aiRunId, commentId, request) => {
+      try {
+        const comment = await api.patch<AiPlanReviewCommentDto>(`/api/work-items/${workItemId}/ai-plans/${aiRunId}/comments/${commentId}`, request);
+        await refreshAfterChange(workItemId);
+        return comment;
+      } catch (error) {
+        addToast('error', error instanceof Error ? error.message : 'Could not update plan comment');
+        return null;
+      }
+    },
+    deleteAiPlanReviewComment: async (workItemId, aiRunId, commentId) => {
+      return runAction('Deleting plan comment', async () => {
+        await api.delete(`/api/work-items/${workItemId}/ai-plans/${aiRunId}/comments/${commentId}`);
+        await refreshAfterChange(workItemId);
       });
     },
     startPreview: async (workItemId) => {
@@ -1536,10 +1796,17 @@ type BoardActions = {
   createBoard(form: CreateBoardForm): Promise<boolean>;
   executePipeline(pipelineRunId: string): Promise<boolean>;
   createCard(form: WorkItemForm): Promise<boolean>;
+  createChildCard(parentId: string, request: { type: string; title: string; description: string; status: string; priority: string; assignee?: string | null; isBug: boolean }): Promise<boolean>;
   updateCard(id: string, form: WorkItemForm): Promise<boolean>;
+  autosaveCard(id: string, form: WorkItemForm): Promise<boolean>;
+  updateCardHierarchy(id: string, parentWorkItemId: string | null): Promise<boolean>;
   deleteCard(id: string): Promise<boolean>;
   deleteBoard(boardId: string): Promise<boolean>;
   startAiPlan(id: string): Promise<boolean>;
+  startEpicRun(workItemId: string): Promise<boolean>;
+  startEpicGoal(workItemId: string): Promise<boolean>;
+  cancelEpicGoal(goalId: string, workItemId: string): Promise<boolean>;
+  reviseAiPlan(workItemId: string, aiRunId: string, message: string): Promise<boolean>;
   approvePlan(runId: string, workItemId: string): Promise<void>;
   startImplementationRun(workItemId: string, aiRunId: string, repositoryId?: string | null): Promise<string | null>;
   addGitHubIntegration(): Promise<boolean>;
@@ -1556,6 +1823,13 @@ type BoardActions = {
   discardPlan(runId: string, workItemId: string): Promise<boolean>;
   approvePullRequest(workItemId: string): Promise<boolean>;
   approvePreviewForPr(workItemId: string): Promise<boolean>;
+  createPullRequestReviewComment(workItemId: string, request: { filePath: string; side: string; lineNumber: number; diffLine: string; body: string }): Promise<PullRequestReviewCommentDto | null>;
+  updatePullRequestReviewComment(workItemId: string, commentId: string, request: { body?: string | null; status?: string | null }): Promise<PullRequestReviewCommentDto | null>;
+  deletePullRequestReviewComment(workItemId: string, commentId: string): Promise<boolean>;
+  fixPullRequestReviewCommentsWithAi(workItemId: string): Promise<boolean>;
+  createAiPlanReviewComment(workItemId: string, aiRunId: string, request: { anchorKey: string; quotedText: string; body: string }): Promise<AiPlanReviewCommentDto | null>;
+  updateAiPlanReviewComment(workItemId: string, aiRunId: string, commentId: string, request: { body?: string | null; status?: string | null }): Promise<AiPlanReviewCommentDto | null>;
+  deleteAiPlanReviewComment(workItemId: string, aiRunId: string, commentId: string): Promise<boolean>;
   startPreview(workItemId: string): Promise<boolean>;
   stopPreview(workItemId: string): Promise<boolean>;
   addComment(id: string, body: string): Promise<boolean>;
@@ -1868,6 +2142,62 @@ function BoardHeader({ board, subtitle, onSyncBoard, children }: {
   );
 }
 
+function BoardHierarchyPanel({ board, actions }: { board: Board; actions: BoardActions }) {
+  const items = React.useMemo(() => allBoardItems(board), [board]);
+  const childMap = React.useMemo(() => {
+    const map = new Map<string, WorkItemSummary[]>();
+    for (const item of items) {
+      if (!item.parentWorkItemId) continue;
+      const children = map.get(item.parentWorkItemId) ?? [];
+      children.push(item);
+      map.set(item.parentWorkItemId, children);
+    }
+    for (const children of map.values()) {
+      children.sort(compareWorkItemsForHierarchy);
+    }
+    return map;
+  }, [items]);
+  const itemIds = React.useMemo(() => new Set(items.map((item) => item.id)), [items]);
+  const roots = React.useMemo(() => items
+    .filter((item) => !item.parentWorkItemId || !itemIds.has(item.parentWorkItemId))
+    .sort(compareWorkItemsForHierarchy), [itemIds, items]);
+  const hierarchyItems = roots.filter((item) => item.type === 'Epic' || item.childCount || childMap.has(item.id));
+
+  if (hierarchyItems.length === 0) return null;
+
+  return (
+    <section className="board-hierarchy-panel" aria-label="Board hierarchy">
+      <div className="board-hierarchy-head">
+        <strong>Hierarchy</strong>
+        <span>{hierarchyItems.length} root {hierarchyItems.length === 1 ? 'item' : 'items'}</span>
+      </div>
+      <div className="board-hierarchy-scroll">
+        {hierarchyItems.map((item) => (
+          <HierarchyNode item={item} childMap={childMap} actions={actions} depth={0} key={item.id} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function HierarchyNode({ item, childMap, actions, depth }: { item: WorkItemSummary; childMap: Map<string, WorkItemSummary[]>; actions: BoardActions; depth: number }) {
+  const children = childMap.get(item.id) ?? [];
+  return (
+    <div className="hierarchy-node" style={{ '--depth': depth } as React.CSSProperties}>
+      <button className="hierarchy-node-button" type="button" onClick={() => actions.openWorkItem(item.id)}>
+        <WorkItemTypeBadges item={item} />
+        <strong>{item.key}</strong>
+        <span>{item.title}</span>
+        {children.length > 0 && <em>{item.doneChildCount ?? 0}/{item.childCount ?? children.length} done</em>}
+        {(item.openPullRequestChildCount ?? 0) > 0 && <em>{item.openPullRequestChildCount} PR</em>}
+      </button>
+      {children.map((child) => (
+        <HierarchyNode item={child} childMap={childMap} actions={actions} depth={depth + 1} key={child.id} />
+      ))}
+    </div>
+  );
+}
+
 function BoardView({ board, actions, onSyncBoard }: { board: Board; actions: BoardActions; onSyncBoard: () => void }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const itemIds = board.columns.flatMap((column) => column.items.map((item) => item.id));
@@ -1890,6 +2220,7 @@ function BoardView({ board, actions, onSyncBoard }: { board: Board; actions: Boa
   return (
     <section className="page board-page">
       <BoardHeader board={board} onSyncBoard={onSyncBoard} subtitle={`${boardRepositorySummary(board)} - ${board.columns.reduce((total, column) => total + column.items.length, 0)} active items`} />
+      <BoardHierarchyPanel board={board} actions={actions} />
       <DndContext sensors={sensors} collisionDetection={stableCollisionDetection} onDragStart={handleDragStart} onDragCancel={() => setActiveCard(null)} onDragEnd={handleDragEnd}>
         <div className="board">
           {board.columns.map((column) => (
@@ -2160,10 +2491,16 @@ function WorkItemCard({ item, actions }: { item: WorkItemSummary; actions: Board
       {...listeners}
     >
       <div className="card-row">
-        <span className={item.type === 'Bug' ? 'type bug' : 'type'}>{item.type}</span>
+        <WorkItemTypeBadges item={item} />
         <code>{item.key}</code>
       </div>
       <h3>{item.title}</h3>
+      {(item.parentKey || item.childCount) && (
+        <div className="hierarchy-chip">
+          {item.parentKey ? <span>{item.parentKey}</span> : <span>Root</span>}
+          {(item.childCount ?? 0) > 0 && <strong>{item.doneChildCount ?? 0}/{item.childCount} done</strong>}
+        </div>
+      )}
       {item.aiStatus && <div className="ai-state"><Sparkles size={14} />{item.aiStatus}</div>}
       {item.previewUrl && <div className="preview-chip"><ExternalLink size={13} />Demo ready</div>}
       <div className="card-footer"><span>{item.assignee ?? 'Unassigned'}</span><span>{item.commentCount ? `${item.commentCount} comments` : ''}</span></div>
@@ -2174,10 +2511,19 @@ function WorkItemCard({ item, actions }: { item: WorkItemSummary; actions: Board
 function WorkItemCardPreview({ item }: { item: WorkItemSummary }) {
   return (
     <article className={item.status === 'AI Planning' ? 'card ai-card overlay-card' : 'card overlay-card'}>
-      <div className="card-row"><span className={item.type === 'Bug' ? 'type bug' : 'type'}>{item.type}</span><code>{item.key}</code></div>
+      <div className="card-row"><WorkItemTypeBadges item={item} /><code>{item.key}</code></div>
       <h3>{item.title}</h3>
       {item.aiStatus && <div className="ai-state"><Sparkles size={14} />{item.aiStatus}</div>}
     </article>
+  );
+}
+
+function WorkItemTypeBadges({ item }: { item: Pick<WorkItemSummary, 'type' | 'isBug'> }) {
+  return (
+    <span className="type-stack">
+      <span className="type">{item.type}</span>
+      {item.isBug && <span className="type bug">Bug</span>}
+    </span>
   );
 }
 
@@ -2195,6 +2541,9 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   onClose: () => void;
 }) {
   const [form, setForm] = React.useState<WorkItemForm>(() => formFromDetail(detail));
+  const [lastSavedForm, setLastSavedForm] = React.useState<WorkItemForm>(() => formFromDetail(detail));
+  const [autosaveStatus, setAutosaveStatus] = React.useState<WorkItemAutosaveStatus>('idle');
+  const [autosaveError, setAutosaveError] = React.useState<string | null>(null);
   const [comment, setComment] = React.useState('');
   const sortedPlans = React.useMemo(() => [...aiRuns].sort((left, right) => left.sequenceNumber - right.sequenceNumber || left.createdAt.localeCompare(right.createdAt)), [aiRuns]);
   const defaultPlan = [...sortedPlans].reverse().find((run) => run.status === 'PlanReady') ?? sortedPlans[sortedPlans.length - 1];
@@ -2206,7 +2555,11 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const selectedWorkflow = workflowForRepositoryProfile(selectedTargetRepository?.implementationProfile ?? board?.repository?.implementationProfile, selectedTargetRepository?.implementationWorkflow ?? board?.implementationWorkflow ?? board?.repository?.implementationWorkflow ?? null);
 
   React.useEffect(() => {
-    setForm(formFromDetail(detail));
+    const nextForm = formFromDetail(detail);
+    setForm(nextForm);
+    setLastSavedForm(nextForm);
+    setAutosaveStatus('idle');
+    setAutosaveError(null);
   }, [detail]);
 
   React.useEffect(() => {
@@ -2236,31 +2589,165 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
         ? 'Start repository cleanup'
         : 'Delete and clean up';
   const activityComments = React.useMemo(() => dedupeGeneratedActivityComments(detail.comments), [detail.comments]);
+  const [pullRequestDiffState, setPullRequestDiffState] = React.useState<
+    { status: 'closed' } |
+    { status: 'loading' } |
+    { status: 'loaded'; diff: PullRequestDiffDto; selectedPath: string | null } |
+    { status: 'error'; message: string }
+  >({ status: 'closed' });
+  React.useEffect(() => {
+    setPullRequestDiffState({ status: 'closed' });
+  }, [detail.item.id, detail.development?.pullRequestUrl]);
+  const openLocalPullRequestDiff = React.useCallback(async () => {
+    setPullRequestDiffState({ status: 'loading' });
+    try {
+      const diff = await api.get<PullRequestDiffDto>(`/api/work-items/${detail.item.id}/pull-request/diff`);
+      setPullRequestDiffState({ status: 'loaded', diff, selectedPath: diff.files[0]?.path ?? null });
+    } catch (error) {
+      setPullRequestDiffState({ status: 'error', message: error instanceof Error ? error.message : 'Could not load pull request diff.' });
+    }
+  }, [detail.item.id]);
+  const approvePrBusy = busy && (busyLabel === 'Merging local PR and deploying app' || busyLabel === 'Approving PR and deploying app');
+  const localDevelopmentApprovalState = detail.development && isLocalGitDevelopmentRecord(detail.development)
+    ? buildLocalPullRequestApprovalState(detail.development)
+    : null;
+  const canApproveDevelopmentPullRequest = !!detail.development?.pullRequestUrl &&
+    !detail.development.pullRequestApprovedAt &&
+    (!isLocalGitDevelopmentRecord(detail.development) || localDevelopmentApprovalState?.canApprove === true);
+  const [activeTab, setActiveTab] = React.useState<WorkItemTabKey>('overview');
+  const humanComments = React.useMemo(() => detail.comments.filter((entry) => entry.kind === 'Comment'), [detail.comments]);
+  const parentOptions = React.useMemo(() => availableParentOptions(board, detail.item.id, form.type), [board, detail.item.id, form.type]);
+  const selectedParentAllowed = !form.parentWorkItemId || parentOptions.some((item) => item.id === form.parentWorkItemId);
+  React.useEffect(() => {
+    if (selectedParentAllowed) return;
+    setForm((current) => ({ ...current, parentWorkItemId: '' }));
+  }, [selectedParentAllowed]);
+  const latestEpicRun = detail.epicRuns?.[0] ?? null;
+  const activeEpicGoal = detail.epicGoalRuns?.find((goal) => goal.status === 'Running' || goal.status === 'Queued') ?? null;
+  const canAddFeatureChild = detail.item.type === 'Epic';
+  const canAddTaskChild = detail.item.type === 'Epic' || detail.item.type === 'Feature';
+  const createChild = React.useCallback(async (type: 'Feature' | 'Task', isBug: boolean) => {
+    const title = window.prompt(isBug ? 'Bug task title' : `${type} title`);
+    if (!title?.trim()) return;
+    await actions.createChildCard(detail.item.id, {
+      type,
+      title: title.trim(),
+      description: '',
+      status: board?.columns[0]?.name ?? detail.item.status,
+      priority: isBug ? 'High' : 'Medium',
+      assignee: detail.item.assignee ?? null,
+      isBug
+    });
+  }, [actions, board?.columns, detail.item.assignee, detail.item.id, detail.item.status]);
+
+  React.useEffect(() => {
+    setActiveTab('overview');
+  }, [detail.item.id]);
+
+  React.useEffect(() => {
+    if (activeTab !== 'pull-request') return;
+    if (!detail.development?.pullRequestUrl || !isLocalGitDevelopmentRecord(detail.development)) return;
+    if (pullRequestDiffState.status !== 'closed') return;
+    void openLocalPullRequestDiff();
+  }, [activeTab, detail.development, openLocalPullRequestDiff, pullRequestDiffState.status]);
+
+  React.useEffect(() => {
+    if (workItemFormsEqual(form, lastSavedForm)) {
+      setAutosaveStatus((current) => current === 'saving' ? current : 'idle');
+      setAutosaveError(null);
+      return;
+    }
+
+    setAutosaveStatus('dirty');
+    if (!form.title.trim() || !selectedParentAllowed) return;
+
+    const timeout = window.setTimeout(() => {
+      setAutosaveStatus('saving');
+      void actions.autosaveCard(detail.item.id, form).then((saved) => {
+        if (saved) {
+          setLastSavedForm(form);
+          setAutosaveStatus('saved');
+          setAutosaveError(null);
+        } else {
+          setAutosaveStatus('error');
+          setAutosaveError('The latest card changes could not be saved.');
+        }
+      });
+    }, 800);
+
+    return () => window.clearTimeout(timeout);
+  }, [actions, detail.item.id, form, lastSavedForm, selectedParentAllowed]);
 
   return (
-    <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose}>
-      <div className="modal-grid">
-        <section className="modal-main">
+    <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose} size="wide">
+      <div className="work-item-shell">
+        <nav className="work-item-tabs" aria-label="Work item sections">
+          {workItemModalTabs.map((tab) => (
+            <button
+              className={activeTab === tab.key ? 'active' : ''}
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+
+        {activeTab === 'overview' && (
+          <section className="work-item-tab-panel overview-tab">
           <div className="form-grid">
             <label>Title<input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
             <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
-            <label>Type<select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value })}><option>Feature</option><option>Bug</option><option>Task</option><option>Epic</option></select></label>
+            <label>Type<select value={form.type} onChange={(event) => {
+              const nextType = event.target.value;
+              setForm({ ...form, type: nextType, parentWorkItemId: nextType === 'Epic' ? '' : form.parentWorkItemId, isBug: nextType === 'Epic' ? false : form.isBug });
+            }}>{workItemTypeOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
             <label>Status<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{board?.columns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>
             <label>Priority<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
             <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
+            <label>Parent<select value={selectedParentAllowed ? form.parentWorkItemId : ''} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, parentWorkItemId: event.target.value })}>
+              <option value="">No parent</option>
+              {parentOptions.map((item) => <option value={item.id} key={item.id}>{item.key} - {item.title}</option>)}
+            </select></label>
+            <label className="checkbox-row"><input type="checkbox" checked={form.isBug} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, isBug: event.target.checked })} />Mark as bug</label>
           </div>
-          <div className="modal-actions">
-            <button className="primary-action" disabled={!form.title.trim() || busy} onClick={() => void actions.updateCard(detail.item.id, form)}><Save size={16} />Save</button>
-            <button className={cleanupReady ? 'primary-action' : 'danger-button'} disabled={busy || cleanupPending} onClick={() => confirm('Delete this work item and clean up runtime resources and repository PR state? Open implementation PRs will be closed. Merged implementation PRs will create a cleanup PR first.') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />{cleanupActionLabel}</button>
+          <div className={`autosave-status ${autosaveStatus}`}>
+            {autosaveStatus === 'saving' && <span className="spinner" />}
+            <span>{workItemAutosaveStatusLabel(autosaveStatus)}</span>
+            {autosaveError && <em>{autosaveError}</em>}
           </div>
           {activeRepositoryCleanupRun && (
             <RepositoryCleanupRunPanel run={activeRepositoryCleanupRun} workItemId={detail.item.id} busy={busy} onAdopt={actions.adoptCleanupPullRequest} prominent />
           )}
-          <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
+          <WorkItemOverviewStatus
+            board={board}
+            development={detail.development}
+            preview={detail.preview}
+            onOpenPullRequest={() => setActiveTab('pull-request')}
+            onOpenPreview={() => setActiveTab('preview')}
+            onOpenLogs={() => setActiveTab('logs')}
+          />
+          <WorkItemHierarchyPanel
+            detail={detail}
+            latestEpicRun={latestEpicRun}
+            activeEpicGoal={activeEpicGoal}
+            busy={busy}
+            canAddFeatureChild={canAddFeatureChild}
+            canAddTaskChild={canAddTaskChild}
+            onAddFeature={() => createChild('Feature', false)}
+            onAddTask={() => createChild('Task', false)}
+            onAddBugTask={() => createChild('Task', true)}
+            onOpenWorkItem={actions.openWorkItem}
+            onPlanEpic={() => actions.startAiPlan(detail.item.id)}
+            onStartEpicRun={() => actions.startEpicRun(detail.item.id)}
+            onStartEpicGoal={() => actions.startEpicGoal(detail.item.id)}
+            onCancelEpicGoal={(goalId) => actions.cancelEpicGoal(goalId, detail.item.id)}
+          />
           <section className="activity">
-            <h2>Activity</h2>
-            {activityComments.length === 0 && <EmptyState>No comments yet.</EmptyState>}
-            {activityComments.map((entry) => (
+            <h2>Comments</h2>
+            {humanComments.length === 0 && <EmptyState>No human comments yet.</EmptyState>}
+            {humanComments.slice(-5).map((entry) => (
               <ActivityEntry
                 actor={actor}
                 aiRuns={sortedPlans}
@@ -2287,56 +2774,559 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
               <div className="comment-actions">
                 <button className="secondary" disabled={!comment.trim() || busy}>Comment</button>
                 <button className="primary-action" type="button" disabled={!comment.trim() || busy} onClick={() => void actions.addCommentAndAskAi(detail.item.id, comment.trim()).then((saved) => { if (saved) setComment(''); })}><Sparkles size={16} />Comment + ask AI</button>
+                <button className={`${cleanupReady ? 'primary-action' : 'danger-button'} delete-action-inline`} type="button" disabled={busy || cleanupPending} onClick={() => confirm('Delete this work item and clean up runtime resources and repository PR state? Open implementation PRs will be closed. Merged implementation PRs will create a cleanup PR first.') && void actions.deleteCard(detail.item.id)}><Trash2 size={16} />{cleanupActionLabel}</button>
               </div>
             </form>
           </section>
-        </section>
-        <aside className="modal-side">
-          {detail.development && (
-            <section className="panel compact-panel">
-              <PanelHeader icon={isLocalGitDevelopmentRecord(detail.development) ? <GitPullRequest size={20} /> : <Github size={20} />} title={isLocalGitDevelopmentRecord(detail.development) ? 'Local development' : 'Development'} />
-              <p className="repo">{detail.development.repository}<br />{detail.development.branch}</p>
-              {detail.development.pullRequestUrl && isLocalGitDevelopmentRecord(detail.development) && (
-                <div className="url-box local-url-box">{pullRequestDisplayLabel(detail.development)}<span>{detail.development.pullRequestState ?? 'open'}</span></div>
-              )}
-              {detail.development.pullRequestUrl && !isLocalGitDevelopmentRecord(detail.development) && <SafeExternalLink className="url-box" href={detail.development.pullRequestUrl}>Pull request <ExternalLink size={16} /></SafeExternalLink>}
-              <p className="status-line"><span />{developmentStatusText(detail.development)}</p>
-              {detail.development.pullRequestFailure && <p className="failure-reason">{detail.development.pullRequestFailure}</p>}
-              {detail.development.pullRequestUrl && !detail.development.pullRequestApprovedAt && (
-                <button className="primary-action side-action" disabled={busy} onClick={() => void actions.approvePullRequest(detail.item.id)}><CheckCircle2 size={16} />{approvePullRequestActionLabel(detail.development)}</button>
-              )}
-              {detail.development.pullRequestApprovedAt && (
-                <p className="approval-note">Approved by {detail.development.pullRequestApprovedBy} {relativeTime(detail.development.pullRequestApprovedAt)}.</p>
-              )}
-              {!detail.development.pullRequestUrl && <button className="secondary side-action" disabled>No PR for local preview</button>}
-            </section>
-          )}
-          {activeImplementationRun && (
-            <ImplementationRunPanel run={activeImplementationRun} />
-          )}
-          {!activeRepositoryCleanupRun && hasRepositoryPr && <CleanupAdoptionPanel workItemId={detail.item.id} busy={busy} onAdopt={actions.adoptCleanupPullRequest} />}
-          {detail.preview && (
-            <PreviewPanel preview={detail.preview} busy={busy} onRetry={async () => {
+          </section>
+        )}
+
+        {activeTab === 'ai' && (
+          <section className="work-item-tab-panel">
+            <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} planReviewComments={detail.aiPlanReviewComments ?? []} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
+          </section>
+        )}
+
+        {activeTab === 'preview' && (
+          <section className="work-item-tab-panel">
+            {detail.preview
+              ? <PreviewPanel preview={detail.preview} busy={busy} showTerminal={false} orientation="horizontal" onRetry={async () => {
               const retryPlan = selectedPlan ?? sortedPlans.find((run) => run.status === 'Approved' || run.status === 'PlanReady');
               if (detail.preview?.failureReason === 'ImplementationFailed' && retryPlan) {
                 await actions.approvePlan(retryPlan.id, detail.item.id);
               } else {
                 await actions.startPreview(detail.item.id);
               }
-            }} canApproveForPr={canApprovePreviewForPr} onApproveForPr={() => actions.approvePreviewForPr(detail.item.id)} />
-          )}
-        </aside>
+            }} busyLabel={busyLabel} canApproveForPr={canApprovePreviewForPr} onApproveForPr={() => actions.approvePreviewForPr(detail.item.id)} />
+              : <EmptyState>No preview has been created for this card.</EmptyState>}
+          </section>
+        )}
+
+        {activeTab === 'pull-request' && (
+          <section className="work-item-tab-panel">
+            <PullRequestTab
+              development={detail.development}
+              pullRequestDiffState={pullRequestDiffState}
+              busy={busy}
+              busyLabel={busyLabel}
+              canApproveDevelopmentPullRequest={canApproveDevelopmentPullRequest}
+              localDevelopmentApprovalState={localDevelopmentApprovalState}
+              approvePrBusy={approvePrBusy}
+              onOpenDiff={openLocalPullRequestDiff}
+              onRetryDiff={openLocalPullRequestDiff}
+              onSelectFile={(path) => setPullRequestDiffState((current) => current.status === 'loaded' ? { ...current, selectedPath: path } : current)}
+              onApprovePullRequest={() => actions.approvePullRequest(detail.item.id)}
+              onCreateComment={async (request) => {
+                const saved = await actions.createPullRequestReviewComment(detail.item.id, request);
+                if (saved) {
+                  setPullRequestDiffState((current) => current.status === 'loaded'
+                    ? { ...current, diff: { ...current.diff, reviewComments: [...(current.diff.reviewComments ?? []), saved] } }
+                    : current);
+                }
+              }}
+              onUpdateComment={async (commentId, request) => {
+                const saved = await actions.updatePullRequestReviewComment(detail.item.id, commentId, request);
+                if (saved) {
+                  setPullRequestDiffState((current) => current.status === 'loaded'
+                    ? { ...current, diff: { ...current.diff, reviewComments: (current.diff.reviewComments ?? []).map((entry) => entry.id === saved.id ? saved : entry) } }
+                    : current);
+                }
+              }}
+              onDeleteComment={async (commentId) => {
+                const deleted = await actions.deletePullRequestReviewComment(detail.item.id, commentId);
+                if (deleted) {
+                  setPullRequestDiffState((current) => current.status === 'loaded'
+                    ? { ...current, diff: { ...current.diff, reviewComments: (current.diff.reviewComments ?? []).filter((entry) => entry.id !== commentId) } }
+                    : current);
+                }
+              }}
+              onFixComments={() => actions.fixPullRequestReviewCommentsWithAi(detail.item.id)}
+              onApproveDiff={async () => {
+                const approved = await actions.approvePullRequest(detail.item.id);
+                if (approved) {
+                  setPullRequestDiffState((current) => current.status === 'loaded'
+                    ? {
+                        ...current,
+                        diff: {
+                          ...current.diff,
+                          state: 'closed',
+                          pullRequestApprovedAt: new Date().toISOString(),
+                          pullRequestApprovedBy: actor,
+                          pullRequestMergedAt: current.diff.pullRequestMergedAt ?? new Date().toISOString(),
+                          pullRequestFailure: null,
+                          canApprove: false,
+                          approvalStatus: 'merged',
+                          approvalMessage: `Merged and deployed by ${actor}.`
+                        }
+                      }
+                    : current);
+                }
+                return approved;
+              }}
+            />
+          </section>
+        )}
+
+        {activeTab === 'logs' && (
+          <section className="work-item-tab-panel logs-tab">
+            <WorkItemLogsTab
+              aiRuns={sortedPlans}
+              selectedPlan={selectedPlan}
+              preview={detail.preview}
+              implementationRuns={detail.implementationRuns}
+              repositoryCleanupRuns={detail.repositoryCleanupRuns}
+            />
+          </section>
+        )}
       </div>
     </ModalFrame>
   );
 }
 
-function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChange, aiRuns, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
+function WorkItemOverviewStatus({ board, development, preview, onOpenPullRequest, onOpenPreview, onOpenLogs }: {
+  board: Board | null;
+  development?: DevelopmentDto | null;
+  preview?: PreviewDto | null;
+  onOpenPullRequest: () => void;
+  onOpenPreview: () => void;
+  onOpenLogs: () => void;
+}) {
+  const items = buildOverviewDeliverySummary({ board, development, preview });
+  const handleAction = (tab: WorkItemTabKey | null | undefined) => {
+    if (tab === 'preview') onOpenPreview();
+    if (tab === 'pull-request') onOpenPullRequest();
+    if (tab === 'logs') onOpenLogs();
+  };
+  return (
+    <section className="overview-delivery-row" aria-label="Delivery status">
+      {items.map((item) => (
+        <div className="overview-delivery-item" key={item.key}>
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+          {item.href ? (
+            <SafeExternalLink href={item.href}>{item.actionLabel} <ExternalLink size={13} /></SafeExternalLink>
+          ) : item.tab ? (
+            <button className="link-button" disabled={item.disabled} type="button" onClick={() => handleAction(item.tab)}>
+              {item.actionLabel}
+            </button>
+          ) : (
+            <em>{item.actionLabel}</em>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function WorkItemHierarchyPanel({
+  detail,
+  latestEpicRun,
+  activeEpicGoal,
+  busy,
+  canAddFeatureChild,
+  canAddTaskChild,
+  onAddFeature,
+  onAddTask,
+  onAddBugTask,
+  onOpenWorkItem,
+  onPlanEpic,
+  onStartEpicRun,
+  onStartEpicGoal,
+  onCancelEpicGoal
+}: {
+  detail: WorkItemDetail;
+  latestEpicRun: EpicRunDto | null;
+  activeEpicGoal: EpicGoalRunDto | null;
+  busy: boolean;
+  canAddFeatureChild: boolean;
+  canAddTaskChild: boolean;
+  onAddFeature: () => Promise<void>;
+  onAddTask: () => Promise<void>;
+  onAddBugTask: () => Promise<void>;
+  onOpenWorkItem: (id: string) => void;
+  onPlanEpic: () => Promise<boolean>;
+  onStartEpicRun: () => Promise<boolean>;
+  onStartEpicGoal: () => Promise<boolean>;
+  onCancelEpicGoal: (goalId: string) => Promise<boolean>;
+}) {
+  const children = detail.children ?? [];
+  const descendants = detail.descendants ?? [];
+  const ancestors = detail.ancestors ?? [];
+  const isEpicRoot = detail.item.type === 'Epic' && !detail.item.parentWorkItemId;
+  const hasHierarchy = isEpicRoot || detail.parent || children.length > 0 || descendants.length > 0;
+
+  if (!hasHierarchy && detail.item.type === 'Task') return null;
+
+  return (
+    <section className="hierarchy-detail-panel" aria-label="Card hierarchy">
+      <div className="hierarchy-detail-head">
+        <div>
+          <strong>Hierarchy</strong>
+          <p>{hierarchySummary(detail.item)}</p>
+        </div>
+        <div className="hierarchy-actions">
+          {canAddFeatureChild && <button className="secondary compact" disabled={busy} type="button" onClick={() => void onAddFeature()}><Plus size={14} />Add feature</button>}
+          {canAddTaskChild && <button className="secondary compact" disabled={busy} type="button" onClick={() => void onAddTask()}><Plus size={14} />Add task</button>}
+          {canAddTaskChild && <button className="secondary compact" disabled={busy} type="button" onClick={() => void onAddBugTask()}><Plus size={14} />Add bug task</button>}
+        </div>
+      </div>
+      {ancestors.length > 0 && (
+        <div className="hierarchy-path-row">
+          {ancestors.map((ancestor) => (
+            <button type="button" onClick={() => onOpenWorkItem(ancestor.id)} key={ancestor.id}>{ancestor.key}</button>
+          ))}
+          <span>{detail.item.key}</span>
+        </div>
+      )}
+      {children.length > 0 && (
+        <div className="child-card-list">
+          {children.map((child) => (
+            <button type="button" onClick={() => onOpenWorkItem(child.id)} key={child.id}>
+              <WorkItemTypeBadges item={child} />
+              <strong>{child.key}</strong>
+              <span>{child.title}</span>
+              {(child.childCount ?? 0) > 0 && <em>{child.doneChildCount ?? 0}/{child.childCount} done</em>}
+            </button>
+          ))}
+        </div>
+      )}
+      {isEpicRoot && (
+        <div className="epic-orchestration">
+          <div className="epic-progress">
+            <strong>{detail.item.doneChildCount ?? 0}/{detail.item.childCount ?? descendants.length} done</strong>
+            <span>{detail.item.blockedChildCount ?? 0} blocked</span>
+            <span>{detail.item.openPullRequestChildCount ?? 0} open PRs</span>
+          </div>
+          <div className="epic-actions">
+            <button className="secondary" disabled={busy} type="button" onClick={() => void onPlanEpic()}><Sparkles size={15} />Plan epic</button>
+            <button className="secondary" disabled={busy} type="button" onClick={() => void onStartEpicRun()}><Play size={15} />Start epic implementation</button>
+            {activeEpicGoal
+              ? <button className="danger-button compact" disabled={busy} type="button" onClick={() => void onCancelEpicGoal(activeEpicGoal.id)}>Cancel goal</button>
+              : <button className="primary-action" disabled={busy} type="button" onClick={() => void onStartEpicGoal()}><CheckCircle2 size={15} />Start goal</button>}
+          </div>
+          {latestEpicRun && (
+            <div className="epic-run-summary">
+              <strong>Latest epic run: {latestEpicRun.status}</strong>
+              <p>{latestEpicRun.summary ?? 'Feature agent runs are tracked under this epic.'}</p>
+              {latestEpicRun.children.length > 0 && (
+                <div className="epic-agent-grid">
+                  {latestEpicRun.children.map((child) => (
+                    <div className="epic-agent" key={child.workItemId}>
+                      <span>{child.workItemKey}</span>
+                      <strong>{child.agentRole}</strong>
+                      <em>{child.status}</em>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {activeEpicGoal && <p className="status-line"><span />Goal running since {relativeTime(activeEpicGoal.createdAt)}.</p>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PullRequestTab({
+  development,
+  pullRequestDiffState,
+  busy,
+  busyLabel,
+  canApproveDevelopmentPullRequest,
+  localDevelopmentApprovalState,
+  approvePrBusy,
+  onOpenDiff,
+  onRetryDiff,
+  onSelectFile,
+  onApprovePullRequest,
+  onCreateComment,
+  onUpdateComment,
+  onDeleteComment,
+  onFixComments,
+  onApproveDiff
+}: {
+  development?: DevelopmentDto | null;
+  pullRequestDiffState:
+    { status: 'closed' } |
+    { status: 'loading' } |
+    { status: 'loaded'; diff: PullRequestDiffDto; selectedPath: string | null } |
+    { status: 'error'; message: string };
+  busy: boolean;
+  busyLabel: string | null;
+  canApproveDevelopmentPullRequest: boolean;
+  localDevelopmentApprovalState: ReturnType<typeof buildLocalPullRequestApprovalState> | null;
+  approvePrBusy: boolean;
+  onOpenDiff: () => Promise<void>;
+  onRetryDiff: () => Promise<void>;
+  onSelectFile: (path: string) => void;
+  onApprovePullRequest: () => Promise<boolean>;
+  onCreateComment: PullRequestDiffReviewProps['onCreateComment'];
+  onUpdateComment: PullRequestDiffReviewProps['onUpdateComment'];
+  onDeleteComment: PullRequestDiffReviewProps['onDeleteComment'];
+  onFixComments: PullRequestDiffReviewProps['onFixComments'];
+  onApproveDiff: PullRequestDiffReviewProps['onApprovePr'];
+}) {
+  if (!development?.pullRequestUrl) {
+    return <EmptyState>No pull request has been created for this card.</EmptyState>;
+  }
+
+  if (!isLocalGitDevelopmentRecord(development)) {
+    return (
+      <section className="panel pull-request-tab-summary">
+        <PanelHeader icon={<Github size={20} />} title="GitHub pull request" />
+        <SafeExternalLink className="url-box" href={development.pullRequestUrl}>Open pull request <ExternalLink size={16} /></SafeExternalLink>
+        <p className="status-line"><span />{developmentStatusText(development)}</p>
+        {canApproveDevelopmentPullRequest && (
+          <button className="primary-action side-action" disabled={busy} onClick={() => void onApprovePullRequest()}>
+            {approvePrBusy ? <span className="spinner" /> : <CheckCircle2 size={16} />}
+            {approvePrBusy ? 'Approving...' : approvePullRequestActionLabel(development)}
+          </button>
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <div className="pull-request-tab">
+      <section className="panel pull-request-tab-summary">
+        <PanelHeader icon={<GitPullRequest size={20} />} title={pullRequestDisplayLabel(development)} />
+        <div className="pull-request-meta">
+          <p>{development.repository}</p>
+          <code>{development.branch}</code>
+          <strong>{localDevelopmentApprovalState?.message ?? developmentStatusText(development)}</strong>
+        </div>
+        {development.pullRequestFailure && <p className="failure-reason">{development.pullRequestFailure}</p>}
+        {pullRequestDiffState.status === 'closed' && (
+          <button className="primary-action" disabled={busy} onClick={() => void onOpenDiff()}>
+            <GitPullRequest size={16} />
+            Open diff and review
+          </button>
+        )}
+      </section>
+      {pullRequestDiffState.status !== 'closed' && (
+        <PullRequestDiffReview
+          state={pullRequestDiffState}
+          busy={busy}
+          busyLabel={busyLabel}
+          onClose={() => undefined}
+          onSelectFile={onSelectFile}
+          onRetry={() => void onRetryDiff()}
+          onCreateComment={onCreateComment}
+          onUpdateComment={onUpdateComment}
+          onDeleteComment={onDeleteComment}
+          onFixComments={onFixComments}
+          onApprovePr={onApproveDiff}
+        />
+      )}
+    </div>
+  );
+}
+
+function WorkItemLogsTab({ aiRuns, selectedPlan, preview, implementationRuns, repositoryCleanupRuns }: {
+  aiRuns: AiRun[];
+  selectedPlan?: AiRun;
+  preview?: PreviewDto | null;
+  implementationRuns?: ImplementationRunDto[] | null;
+  repositoryCleanupRuns?: RepositoryCleanupRunDto[] | null;
+}) {
+  const runs = React.useMemo(() => buildWorkItemLogRuns(aiRuns, selectedPlan, preview, implementationRuns, repositoryCleanupRuns), [aiRuns, selectedPlan, preview, implementationRuns, repositoryCleanupRuns]);
+  const [selectedRunId, setSelectedRunId] = React.useState<string | null>(runs[0]?.id ?? null);
+  const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs[0] ?? null;
+  const defaultStepKey = React.useMemo(() => selectedRun ? defaultPreviewStepKey(selectedRun.steps) : null, [selectedRun]);
+  const [selectedStepKey, setSelectedStepKey] = React.useState<string | null>(defaultStepKey);
+  React.useEffect(() => {
+    if (!runs.some((run) => run.id === selectedRunId)) {
+      setSelectedRunId(runs[0]?.id ?? null);
+    }
+  }, [runs, selectedRunId]);
+  React.useEffect(() => {
+    if (!selectedRun) return;
+    if (!selectedStepKey || !selectedRun.steps.some((step) => step.key === selectedStepKey)) {
+      setSelectedStepKey(defaultStepKey);
+    }
+  }, [defaultStepKey, selectedRun, selectedStepKey]);
+
+  const selectedStep = selectedRun?.steps.find((step) => step.key === selectedStepKey) ?? selectedRun?.steps[0] ?? null;
+  if (runs.length === 0) return <EmptyState>No runner logs have been recorded for this card.</EmptyState>;
+
+  return (
+    <div className="logs-workspace">
+      <nav className="log-run-list" aria-label="Runs">
+        {runs.map((run) => (
+          <button className={run.id === selectedRun?.id ? 'active' : ''} key={run.id} type="button" onClick={() => {
+            setSelectedRunId(run.id);
+            setSelectedStepKey(defaultPreviewStepKey(run.steps));
+          }}>
+            <strong>{run.title}</strong>
+            <span>{run.status ?? 'Recorded'}{run.updatedAt ? ` · ${relativeTime(run.updatedAt)}` : ''}</span>
+          </button>
+        ))}
+      </nav>
+      {selectedRun && (
+        <section className="log-run-detail">
+          <HorizontalStepSelector
+            steps={selectedRun.steps}
+            selectedStepKey={selectedStep?.key ?? null}
+            onSelectStep={setSelectedStepKey}
+          />
+          {selectedStep && (
+            <PreviewTerminal
+              active={selectedStep.state === 'active'}
+              lines={selectedStep.terminalLines}
+              title={`${selectedRun.title}: ${selectedStep.title}`}
+            />
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function HorizontalStepSelector({ steps, selectedStepKey, onSelectStep }: { steps: WorkItemTabRun['steps']; selectedStepKey: string | null; onSelectStep: (key: string) => void }) {
+  return (
+    <ol className="horizontal-stepper" aria-label="Run lifecycle">
+      {steps.map((step, index) => (
+        <li className={`stepper-item ${step.state} ${step.key === selectedStepKey ? 'selected' : ''}`} key={step.key}>
+          <button className="stepper-button" type="button" onClick={() => onSelectStep(step.key)} aria-pressed={step.key === selectedStepKey}>
+            <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
+            <span className="stepper-body">
+              <strong>{step.title}</strong>
+              <span>{step.description}</span>
+              <span className="step-log-count">{step.logCount === 1 ? '1 log line' : `${step.logCount} log lines`}</span>
+            </span>
+          </button>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+type WorkItemLogRun = WorkItemTabRun & {
+  terminalTitle: string;
+};
+
+function buildWorkItemLogRuns(aiRuns: AiRun[], selectedPlan?: AiRun, preview?: PreviewDto | null, implementationRuns?: ImplementationRunDto[] | null, repositoryCleanupRuns?: RepositoryCleanupRunDto[] | null): WorkItemLogRun[] {
+  const runs: WorkItemLogRun[] = [];
+  const plan = selectedPlan ?? [...aiRuns].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  if (plan) {
+    runs.push({
+      id: `ai-${plan.id}`,
+      title: `AI plan #${plan.sequenceNumber}`,
+      terminalTitle: 'AI plan',
+      status: plan.status,
+      updatedAt: plan.createdAt,
+      steps: [{
+        key: 'plan',
+        title: plan.status === 'NeedsInput' ? 'Waiting for input' : 'Plan generated',
+        description: plan.status === 'Approved' ? 'The plan is approved for implementation.' : 'The AI planning state for this card.',
+        state: plan.status === 'NeedsInput' ? 'active' : 'done',
+        terminalLines: [],
+        logCount: 0
+      }]
+    });
+  }
+
+  if (preview) {
+    const previewSteps = previewStepLogsForDisplay(preview);
+    const sourceStep = previewSteps.find((step) => step.key === 'source');
+    if (sourceStep) {
+      runs.push({
+        id: `preview-source-${preview.id}`,
+        title: 'Preview source',
+        terminalTitle: 'Preview source',
+        status: preview.status,
+        updatedAt: preview.lastCheckedAt ?? null,
+        steps: [sourceStep]
+      });
+    }
+    runs.push({
+      id: `preview-deploy-${preview.id}`,
+      title: 'Preview deploy',
+      terminalTitle: 'Preview deploy',
+      status: preview.status,
+      updatedAt: preview.lastCheckedAt ?? null,
+      steps: previewSteps.filter((step) => step.key !== 'source')
+    });
+  }
+
+  const latestPreviewPromotion = latestImplementationRun((implementationRuns ?? []).filter((run) => run.runKind === 'preview-promotion'));
+  if (latestPreviewPromotion) {
+    runs.push(repositoryRunToLogRun(latestPreviewPromotion, 'PR creation'));
+  }
+
+  const latestImplementation = latestImplementationRun((implementationRuns ?? []).filter((run) => run.runKind !== 'preview-promotion'));
+  if (latestImplementation) {
+    runs.push(repositoryRunToLogRun(latestImplementation, 'Implementation'));
+  }
+
+  const latestCleanup = latestRepositoryCleanupRun(repositoryCleanupRuns);
+  if (latestCleanup) {
+    runs.push(repositoryCleanupRunToLogRun(latestCleanup));
+  }
+
+  return runs;
+}
+
+function repositoryRunToLogRun(run: ImplementationRunDto, title: string): WorkItemLogRun {
+  const presentation = repositoryRunPresentation(run.status, run.runKind);
+  return {
+    id: `implementation-${run.id}`,
+    title,
+    terminalTitle: presentation.terminalTitle,
+    status: run.status,
+    updatedAt: run.updatedAt,
+    steps: repositoryStepsWithTerminalLines(presentation.steps, run.terminalLines ?? [], run.runKind)
+  };
+}
+
+function repositoryCleanupRunToLogRun(run: RepositoryCleanupRunDto): WorkItemLogRun {
+  const presentation = repositoryRunPresentation(run.status);
+  return {
+    id: `cleanup-${run.id}`,
+    title: 'Cleanup',
+    terminalTitle: 'Cleanup log',
+    status: run.status,
+    updatedAt: run.updatedAt,
+    steps: repositoryStepsWithTerminalLines(presentation.steps, run.terminalLines ?? [], null)
+  };
+}
+
+function repositoryStepsWithTerminalLines(steps: Array<{ key: string; title: string; description: string; state: 'done' | 'blocked' | 'active' | 'pending' }>, terminalLines: PreviewTerminalLineDto[], runKind?: string | null): WorkItemTabRun['steps'] {
+  const buckets = new Map(steps.map((step) => [step.key, [] as PreviewTerminalLineDto[]]));
+  let currentKey = steps[0]?.key ?? '';
+  for (const line of terminalLines) {
+    const marker = line.message.match(/RDO_STEP=([A-Za-z0-9_-]+)/)?.[1];
+    if (marker) {
+      currentKey = normalizeRepositoryLogStep(marker, steps, runKind);
+    }
+    if (buckets.has(currentKey)) {
+      buckets.get(currentKey)?.push(line);
+    }
+  }
+
+  if (terminalLines.length > 0 && [...buckets.values()].every((lines) => lines.length === 0)) {
+    buckets.get(steps.find((step) => step.state === 'active')?.key ?? steps[0]?.key ?? '')?.push(...terminalLines);
+  }
+
+  return steps.map((step) => {
+    const lines = buckets.get(step.key) ?? [];
+    return { ...step, terminalLines: lines, logCount: lines.length };
+  });
+}
+
+function normalizeRepositoryLogStep(marker: string, steps: Array<{ key: string }>, runKind?: string | null): string {
+  if (runKind === 'preview-promotion' && marker === 'Implementing') return 'WritingPreviewSource';
+  return steps.some((step) => step.key === marker) ? marker : steps[0]?.key ?? marker;
+}
+
+function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChange, aiRuns, planReviewComments, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
   detail: WorkItemDetail;
   board: Board | null;
   targetRepositoryId: string | null;
   onTargetRepositoryChange: (repositoryId: string | null) => void;
   aiRuns: AiRun[];
+  planReviewComments: AiPlanReviewCommentDto[];
   selectedPlan?: AiRun;
   onSelectPlan: (id: string) => void;
   busy: boolean;
@@ -2376,13 +3366,40 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
     previewHasGeneratedSource
   });
   const planQuestions = React.useMemo(() => selectedPlan?.plan ? extractPlanQuestions(selectedPlan.plan) : [], [selectedPlan?.plan]);
+  const planBlocks = React.useMemo(() => splitAiPlanReviewBlocks(selectedPlan?.plan), [selectedPlan?.plan]);
+  const commentCountsByRun = React.useMemo(() => planReviewCommentCountsByRun(planReviewComments), [planReviewComments]);
+  const selectedPlanComments = React.useMemo(
+    () => selectedPlan ? planReviewComments.filter((comment) => comment.aiRunId === selectedPlan.id) : [],
+    [planReviewComments, selectedPlan]
+  );
+  const unresolvedPlanComments = selectedPlan ? unresolvedAiPlanReviewCommentCount(planReviewComments, selectedPlan.id) : 0;
+  const selectedPlanCanStart = selectedPlan ? canApproveAiPlanWithComments(selectedPlan.id, planReviewComments) : false;
+  const [activeAnchorKey, setActiveAnchorKey] = React.useState<string | null>(null);
+  const [commentDraft, setCommentDraft] = React.useState('');
+  const [revisionMessage, setRevisionMessage] = React.useState('');
+  const [editingCommentId, setEditingCommentId] = React.useState<string | null>(null);
+  const [editingBody, setEditingBody] = React.useState('');
   const [implementationStartError, setImplementationStartError] = React.useState<string | null>(null);
   React.useEffect(() => {
     setImplementationStartError(null);
+    setActiveAnchorKey(null);
+    setCommentDraft('');
+    setRevisionMessage('');
+    setEditingCommentId(null);
+    setEditingBody('');
   }, [selectedPlan?.id, targetRepository?.repositoryId]);
+  React.useEffect(() => {
+    if (!activeAnchorKey) return;
+    if (planBlocks.some((block) => block.anchorKey === activeAnchorKey)) return;
+    setActiveAnchorKey(null);
+  }, [activeAnchorKey, planBlocks]);
   const startSelectedPlan = React.useCallback(async () => {
     if (!selectedPlan) return;
     setImplementationStartError(null);
+    if (!selectedPlanCanStart) {
+      setImplementationStartError('Resolve all AI plan review comments before starting implementation.');
+      return;
+    }
     if (isRepositoryImplementation) {
       const error = await actions.startImplementationRun(detail.item.id, selectedPlan.id, targetRepository?.repositoryId ?? null);
       if (error) {
@@ -2392,38 +3409,65 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
     }
 
     await actions.approvePlan(selectedPlan.id, detail.item.id);
-  }, [actions, detail.item.id, isRepositoryImplementation, selectedPlan, targetRepository?.repositoryId]);
+  }, [actions, detail.item.id, isRepositoryImplementation, selectedPlan, selectedPlanCanStart, targetRepository?.repositoryId]);
+  const commentsByAnchor = React.useMemo(() => selectedPlanComments.reduce<Record<string, AiPlanReviewCommentDto[]>>((map, comment) => {
+    map[comment.anchorKey] ??= [];
+    map[comment.anchorKey].push(comment);
+    return map;
+  }, {}), [selectedPlanComments]);
+  const submitPlanComment = React.useCallback(async (block: AiPlanReviewBlock) => {
+    if (!selectedPlan || !commentDraft.trim()) return;
+    const saved = await actions.createAiPlanReviewComment(detail.item.id, selectedPlan.id, {
+      anchorKey: block.anchorKey,
+      quotedText: block.text,
+      body: commentDraft.trim()
+    });
+    if (saved) setCommentDraft('');
+  }, [actions, commentDraft, detail.item.id, selectedPlan]);
+  const submitRevision = React.useCallback(async () => {
+    if (!selectedPlan || !revisionMessage.trim()) return;
+    const revised = await actions.reviseAiPlan(detail.item.id, selectedPlan.id, revisionMessage.trim());
+    if (revised) setRevisionMessage('');
+  }, [actions, detail.item.id, revisionMessage, selectedPlan]);
   return (
     <section className="panel ai-plan-panel">
-      <PanelHeader icon={<Bot size={20} />} title="AI plans" />
-      <div className="ai-plan-body">
-        {busyLabel && <div className="inline-progress"><Sparkles size={15} />{busyLabel}...</div>}
-        <div className="plan-toolbar">
-          {aiModel && <p>Next run: {aiProvider ? `${aiProvider} / ` : ''}{aiModel}.</p>}
-          <button className="secondary" disabled={busy} onClick={() => void actions.startAiPlan(detail.item.id)}><Sparkles size={16} />{aiRuns.length > 0 ? 'Generate revised AI plan' : 'Generate AI plan'}</button>
-        </div>
-        {aiRuns.length > 0 && (
-          <div className="plan-tabs" aria-label="AI plans">
-            {aiRuns.map((run) => (
-              <button className={run.id === selectedPlan?.id ? 'plan-tab active' : 'plan-tab'} key={run.id} onClick={() => onSelectPlan(run.id)} type="button">
-                <strong>#{run.sequenceNumber}</strong>
-                <span>{planTitle(run)}</span>
-                <small>{run.status} · {run.model} · {relativeTime(run.createdAt)}</small>
-              </button>
-            ))}
+      <PanelHeader icon={<Bot size={20} />} title="AI plan review" />
+      {busyLabel && <div className="inline-progress"><Sparkles size={15} />{busyLabel}...</div>}
+      <div className="ai-review-workspace">
+        <aside className="plan-version-rail" aria-label="Plan versions">
+          <div className="plan-version-header">
+            <span>{aiModel ? `${aiProvider ? `${aiProvider} / ` : ''}${aiModel}` : 'Plan versions'}</span>
+            <button className="icon-button" disabled={busy} onClick={() => void actions.startAiPlan(detail.item.id)} title="Generate AI plan" type="button">
+              <Sparkles size={15} />
+            </button>
           </div>
-        )}
-        {selectedPlan?.plan
-          ? (
+          {aiRuns.length === 0 && <EmptyState>No AI plans yet.</EmptyState>}
+          {aiRuns.map((run) => {
+            const counts = commentCountsByRun[run.id];
+            return (
+              <button className={run.id === selectedPlan?.id ? 'plan-version active' : 'plan-version'} key={run.id} onClick={() => onSelectPlan(run.id)} type="button">
+                <strong>#{run.sequenceNumber} {planTitle(run)}</strong>
+                <span>{run.status} · {run.model}</span>
+                {counts && <small>{counts.unresolved} unresolved / {counts.total} comments</small>}
+              </button>
+            );
+          })}
+        </aside>
+        <main className="plan-review-main">
+          {selectedPlan?.plan ? (
             <>
-              <p>Provider: {selectedPlan.provider} / {selectedPlan.model}. Status: {selectedPlan.status}.</p>
-              {selectedPlan.status === 'NeedsInput' && <p className="needs-input-note">Questions need answers before implementation can start.</p>}
+              <div className="plan-review-meta">
+                <div>
+                  <strong>{selectedPlan.provider} / {selectedPlan.model}</strong>
+                  <span>{selectedPlan.status} · {relativeTime(selectedPlan.createdAt)}</span>
+                </div>
+                {implementationWorkflow !== 'preview-only' && boardRepositories.length > 0 && (
+                  <label className="target-repo-select compact">Target repo<select value={targetRepository?.repositoryId ?? ''} onChange={(event) => onTargetRepositoryChange(event.target.value || null)}>
+                    {boardRepositories.map((entry) => <option key={entry.repositoryId} value={entry.repositoryId}>{repositoryLabel(entry.repository)} {entry.isPrimary ? '(primary)' : ''} - {profileLabel(entry.implementationProfile)}</option>)}
+                  </select></label>
+                )}
+              </div>
               {detail.aiSession && <p className="session-line">Session: {detail.aiSession.provider} / {detail.aiSession.model} - {detail.aiSession.providerSessionId ? 'Codex resume ready' : 'No provider session id yet'}.</p>}
-              {implementationWorkflow !== 'preview-only' && boardRepositories.length > 0 && (
-                <label className="target-repo-select">Target repo<select value={targetRepository?.repositoryId ?? ''} onChange={(event) => onTargetRepositoryChange(event.target.value || null)}>
-                  {boardRepositories.map((entry) => <option key={entry.repositoryId} value={entry.repositoryId}>{repositoryLabel(entry.repository)} {entry.isPrimary ? '(primary)' : ''} - {profileLabel(entry.implementationProfile)}</option>)}
-                </select></label>
-              )}
               {planQuestions.length > 0 && (
                 <PlanQuestionStepper
                   busy={busy}
@@ -2433,19 +3477,62 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
                   }}
                 />
               )}
-              <div className="plan-markdown"><CommentBody body={selectedPlan.plan} /></div>
+              <div className="plan-markdown">
+                <CommentBody
+                  body={selectedPlan.plan}
+                  review={{
+                    activeAnchorKey,
+                    busy,
+                    commentDraft,
+                    commentsByAnchor,
+                    editingBody,
+                    editingCommentId,
+                    onCancelEdit: () => {
+                      setEditingCommentId(null);
+                      setEditingBody('');
+                    },
+                    onDeleteComment: (commentId) => void actions.deleteAiPlanReviewComment(detail.item.id, selectedPlan.id, commentId),
+                    onDraftChange: setCommentDraft,
+                    onEditingBodyChange: setEditingBody,
+                    onSaveEdit: (commentId) => void actions.updateAiPlanReviewComment(detail.item.id, selectedPlan.id, commentId, { body: editingBody.trim() }).then((updated) => {
+                      if (updated) {
+                        setEditingCommentId(null);
+                        setEditingBody('');
+                      }
+                    }),
+                    onSelectAnchor: setActiveAnchorKey,
+                    onStartEdit: (comment) => {
+                      setEditingCommentId(comment.id);
+                      setEditingBody(comment.body);
+                    },
+                    onSubmitComment: (block) => void submitPlanComment(block),
+                    onToggleResolved: (comment) => void actions.updateAiPlanReviewComment(detail.item.id, selectedPlan.id, comment.id, { status: comment.status.toLowerCase() === 'resolved' ? 'Open' : 'Resolved' })
+                  }}
+                />
+              </div>
             </>
-          )
-          : <EmptyState>No AI plans yet.</EmptyState>}
-        <div className="approval-row">
-          {selectedPlan && implementationAction.canStart && <button className="primary-action" disabled={busy} onClick={() => void startSelectedPlan()}><CheckCircle2 size={16} />{implementationAction.label}</button>}
-          {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
-        </div>
-        {implementationStartError && <p className="failure-reason action-error">Implementation did not start: {implementationStartError}</p>}
-        {implementationAction.retryContext && <p className="plan-help">{implementationAction.retryContext}</p>}
-        {selectedPlan?.status === 'NeedsInput' && <p className="plan-help">Add a comment with answers, then generate a revised AI plan.</p>}
-        {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && <p className="plan-help">{implementationAction.helpText}</p>}
-        {aiRuns.some((run) => run.status === 'Discarded') && <p>Discarded plans are kept in history but hidden from approval.</p>}
+          ) : <EmptyState>No AI plan selected.</EmptyState>}
+        </main>
+        <aside className="plan-review-sidebar">
+          <section className="plan-review-card">
+            <strong>Ask AI to revise</strong>
+            <p>Overview discussion and unresolved plan comments are included in the next plan context.</p>
+            <textarea value={revisionMessage} onChange={(event) => setRevisionMessage(event.target.value)} placeholder="Describe what should change in the plan..." />
+            <button className="primary-action" disabled={!selectedPlan || !revisionMessage.trim() || busy} onClick={() => void submitRevision()}><Sparkles size={16} />Revise plan with AI</button>
+          </section>
+          <section className="plan-review-card">
+            <strong>Start delivery</strong>
+            {implementationStartError && <p className="failure-reason action-error">Implementation did not start: {implementationStartError}</p>}
+            {selectedPlan && implementationAction.canStart && (
+              <button className="primary-action" disabled={busy || !selectedPlanCanStart} onClick={() => void startSelectedPlan()}><CheckCircle2 size={16} />{implementationAction.label}</button>
+            )}
+            {selectedPlan?.status === 'PlanReady' && <button className="secondary" disabled={busy} onClick={() => void actions.discardPlan(selectedPlan.id, detail.item.id)}>Discard plan</button>}
+            {!selectedPlanCanStart && selectedPlan && <p className="plan-help">Resolve plan comments before starting implementation.</p>}
+            {implementationAction.retryContext && <p className="plan-help">{implementationAction.retryContext}</p>}
+            {selectedPlan?.status === 'NeedsInput' && <p className="plan-help">Answer the open questions or ask AI to revise the plan.</p>}
+            {selectedPlan && ['PlanReady', 'Approved'].includes(selectedPlan.status) && selectedPlanCanStart && <p className="plan-help">{implementationAction.helpText}</p>}
+          </section>
+        </aside>
       </div>
     </section>
   );
@@ -2627,7 +3714,7 @@ function CleanupAdoptionPanel({ workItemId, busy, onAdopt, compact = false }: { 
   );
 }
 
-function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onApproveForPr }: { preview: PreviewDto; busy: boolean; onRetry: () => Promise<void>; canApproveForPr?: boolean; onApproveForPr?: () => Promise<boolean> }) {
+function PreviewPanel({ preview, busy, busyLabel, onRetry, canApproveForPr = false, onApproveForPr, showTerminal = true, orientation = 'vertical' }: { preview: PreviewDto; busy: boolean; busyLabel?: string | null; onRetry: () => Promise<void>; canApproveForPr?: boolean; onApproveForPr?: () => Promise<boolean>; showTerminal?: boolean; orientation?: 'vertical' | 'horizontal' }) {
   const status = preview.status;
   const running = status === 'Running';
   const failed = status === 'Failed';
@@ -2639,6 +3726,7 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
   const actionLabel = failed ? 'Preview failed' : implementing ? 'Implementing plan...' : stopped ? 'Preview stopped' : waiting ? 'Waiting for healthy preview...' : 'Open demo environment';
   const retryLabel = stopped ? 'Recreate preview' : failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
   const steps = React.useMemo(() => previewStepLogsForDisplay(preview), [preview]);
+  const approvingForPr = busy && busyLabel === 'Creating pull request from approved preview';
   const preferredStepKey = React.useMemo(() => defaultPreviewStepKey(steps), [steps]);
   const [selectedStepKey, setSelectedStepKey] = React.useState(preferredStepKey);
   React.useEffect(() => {
@@ -2650,15 +3738,16 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
   const selectedStep = steps.find((step) => step.key === selectedStepKey) ?? steps[0];
   const runtimeDiagnostic = previewRuntimeDiagnostic(preview);
   return (
-    <section className="panel compact-panel preview-panel">
+    <section className={`panel compact-panel preview-panel ${orientation === 'horizontal' ? 'preview-panel-horizontal' : ''}`}>
       <PanelHeader icon={<ExternalLink size={20} />} title="Preview environment" />
       {implementing && <div className="implementation-banner"><Sparkles size={16} /><span>Implementing plan...</span></div>}
       {running
         ? <SafeExternalLink className="demo-link" href={preview.url}>Open demo environment <ExternalLink size={16} /></SafeExternalLink>
         : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
       {running && canApproveForPr && onApproveForPr && (
-        <button className="primary-action side-action" disabled={busy} onClick={() => void onApproveForPr()}><GitPullRequest size={16} />Approve preview and create PR</button>
+        <button className="primary-action side-action" disabled={busy} onClick={() => void onApproveForPr()}>{approvingForPr ? <span className="spinner" /> : <GitPullRequest size={16} />}{approvingForPr ? 'Creating pull request...' : 'Approve preview and create PR'}</button>
       )}
+      {approvingForPr && <p className="namespace-note">Job accepted, waiting for Kubernetes runner to create the pull request...</p>}
       <ol className="preview-stepper" aria-label="Preview lifecycle">
         {steps.map((step, index) => (
           <li className={`stepper-item ${step.state} ${selectedStep?.key === step.key ? 'selected' : ''}`} key={step.key}>
@@ -2678,7 +3767,7 @@ function PreviewPanel({ preview, busy, onRetry, canApproveForPr = false, onAppro
       {runtimeDiagnostic && <p className="failure-reason">{runtimeDiagnostic}</p>}
       {preview.podName && <p className="namespace-note">Pod: <code>{preview.podName}</code></p>}
       {preview.lastCheckedAt && <p className="namespace-note">Last checked {relativeTime(preview.lastCheckedAt)}.</p>}
-      {selectedStep && <PreviewTerminal lines={selectedStep.terminalLines} active={isPreviewTerminalLive(status) && selectedStep.state === 'active'} title={selectedStep.title} />}
+      {showTerminal && selectedStep && <PreviewTerminal lines={selectedStep.terminalLines} active={isPreviewTerminalLive(status) && selectedStep.state === 'active'} title={selectedStep.title} />}
       <div className="split-stats"><span>Status<br /><strong>{status}</strong></span><span>TTL<br /><strong>{relativeDays(preview.expiresAt)}</strong></span></div>
       {failed && preview.failureReason && <p className="failure-reason">Reason: {preview.failureReason}</p>}
       {failed && preview.failureLog && <pre className="failure-log">{preview.failureLog}</pre>}
@@ -2810,6 +3899,11 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
 }) {
   const [form, setForm] = React.useState<WorkItemForm>({ ...emptyForm, status: initialStatus, assignee: preferredAssignee(assigneeOptions) });
   const [submitting, setSubmitting] = React.useState(false);
+  const parentOptions = React.useMemo(() => availableParentOptions(board, null, form.type), [board, form.type]);
+  React.useEffect(() => {
+    if (!form.parentWorkItemId || parentOptions.some((item) => item.id === form.parentWorkItemId)) return;
+    setForm((current) => ({ ...current, parentWorkItemId: '' }));
+  }, [form.parentWorkItemId, parentOptions]);
   return (
     <ModalFrame title="New card" onClose={onClose}>
       <form className="create-form" onSubmit={(event) => {
@@ -2825,10 +3919,18 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
         <label>Title<input autoFocus value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
         <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
         <div className="form-grid two">
-          <label>Type<select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value })}><option>Feature</option><option>Bug</option><option>Task</option><option>Epic</option></select></label>
+          <label>Type<select value={form.type} onChange={(event) => {
+            const nextType = event.target.value;
+            setForm({ ...form, type: nextType, parentWorkItemId: nextType === 'Epic' ? '' : form.parentWorkItemId, isBug: nextType === 'Epic' ? false : form.isBug });
+          }}>{workItemTypeOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
           <label>Status<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{board.columns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>
           <label>Priority<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
           <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
+          <label>Parent<select value={form.parentWorkItemId} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, parentWorkItemId: event.target.value })}>
+            <option value="">No parent</option>
+            {parentOptions.map((item) => <option value={item.id} key={item.id}>{item.key} - {item.title}</option>)}
+          </select></label>
+          <label className="checkbox-row"><input type="checkbox" checked={form.isBug} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, isBug: event.target.checked })} />Mark as bug</label>
         </div>
         <div className="modal-actions">
           <button className="primary-action" disabled={!form.title.trim() || submitting}><Plus size={16} />Create card</button>
@@ -4262,6 +5364,264 @@ function ModalFrame({ title, onClose, children, size = 'default' }: { title: str
   );
 }
 
+function PullRequestDiffModal(props: PullRequestDiffReviewProps) {
+  const title = props.state.status === 'loaded' ? `Local pull request #${props.state.diff.number}` : 'Local pull request diff';
+  return (
+    <ModalFrame title={title} onClose={props.onClose} size="wide">
+      <PullRequestDiffReview {...props} />
+    </ModalFrame>
+  );
+}
+
+type PullRequestDiffReviewProps = {
+  state:
+    { status: 'loading' } |
+    { status: 'loaded'; diff: PullRequestDiffDto; selectedPath: string | null } |
+    { status: 'error'; message: string };
+  busy: boolean;
+  busyLabel: string | null;
+  onClose: () => void;
+  onSelectFile: (path: string) => void;
+  onRetry: () => void;
+  onCreateComment: (request: { filePath: string; side: string; lineNumber: number; diffLine: string; body: string }) => Promise<void>;
+  onUpdateComment: (commentId: string, request: { body?: string | null; status?: string | null }) => Promise<void>;
+  onDeleteComment: (commentId: string) => Promise<void>;
+  onFixComments: () => Promise<boolean>;
+  onApprovePr: () => Promise<boolean>;
+};
+
+function PullRequestDiffReview({ state, busy, busyLabel, onSelectFile, onRetry, onCreateComment, onUpdateComment, onDeleteComment, onFixComments, onApprovePr }: PullRequestDiffReviewProps) {
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const sectionRefs = React.useRef<Record<string, HTMLElement | null>>({});
+  const [activePath, setActivePath] = React.useState<string | null>(state.status === 'loaded' ? state.selectedPath ?? state.diff.files[0]?.path ?? null : null);
+  const [composer, setComposer] = React.useState<{ filePath: string; side: string; lineNumber: number; diffLine: string } | null>(null);
+  const [composerBody, setComposerBody] = React.useState('');
+  const [localApproving, setLocalApproving] = React.useState(false);
+  const [approvalError, setApprovalError] = React.useState<string | null>(null);
+  const [showSlowApproval, setShowSlowApproval] = React.useState(false);
+  const loadedState = state.status === 'loaded' ? state : null;
+  const diff = loadedState?.diff ?? emptyPullRequestDiff();
+  const parsed = React.useMemo(() => parseUnifiedDiffForContinuousReview(diff.diff, diff.files), [diff.diff, diff.files]);
+  const comments = diff.reviewComments ?? [];
+  const countsByFile = React.useMemo(() => reviewCommentCountsByFile(comments), [comments]);
+  const unresolvedCount = unresolvedReviewCommentCount(comments);
+  const approvalState = buildLocalPullRequestApprovalState({
+    ...diff,
+    unresolvedComments: unresolvedCount,
+    pending: localApproving || (busy && (busyLabel === 'Merging local PR and deploying app' || busyLabel === 'Approving PR and deploying app'))
+  });
+  const canApprove = canApprovePullRequestWithComments(comments) && approvalState.canApprove;
+  const fixing = busy && busyLabel === 'Fixing review comments with AI';
+  const approving = approvalState.status === 'approving';
+  const commentsByLine = React.useMemo(() => {
+    const map = new Map<string, PullRequestReviewCommentDto[]>();
+    for (const comment of comments) {
+      const key = reviewLineKey(comment.filePath, comment.side, comment.lineNumber);
+      map.set(key, [...(map.get(key) ?? []), comment]);
+    }
+    return map;
+  }, [comments]);
+
+  React.useEffect(() => {
+    setActivePath(loadedState?.selectedPath ?? diff.files[0]?.path ?? parsed.sections[0]?.path ?? null);
+  }, [diff.files, loadedState?.selectedPath, parsed.sections]);
+  React.useEffect(() => {
+    setApprovalError(null);
+  }, [diff.number, diff.pullRequestApprovedAt, diff.approvalStatus]);
+  React.useEffect(() => {
+    if (!approving) {
+      setShowSlowApproval(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => setShowSlowApproval(true), 3000);
+    return () => window.clearTimeout(timer);
+  }, [approving]);
+
+  if (state.status === 'loading') {
+    return <div className="modal-loading"><span className="spinner" /> Loading pull request diff...</div>;
+  }
+
+  if (state.status === 'error') {
+    return (
+      <div className="diff-error">
+        <p className="failure-reason">{state.message}</p>
+        <button className="secondary" type="button" onClick={onRetry}><RefreshCw size={16} />Retry</button>
+      </div>
+    );
+  }
+
+  const jumpToFile = (path: string) => {
+    setActivePath(path);
+    onSelectFile(path);
+    sectionRefs.current[path]?.scrollIntoView({ block: 'start' });
+  };
+
+  const handleScroll = () => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const containerTop = container.getBoundingClientRect().top;
+    let current = activePath;
+    for (const section of parsed.sections) {
+      const element = sectionRefs.current[section.path];
+      if (!element) continue;
+      if (element.getBoundingClientRect().top - containerTop <= 80) {
+        current = section.path;
+      }
+    }
+    if (current && current !== activePath) {
+      setActivePath(current);
+      onSelectFile(current);
+    }
+  };
+
+  const openComposer = (sectionPath: string, line: ContinuousDiffLine) => {
+    if (!line.commentable) return;
+    const side = line.side === 'old' ? 'old' : 'new';
+    const lineNumber = side === 'old' ? line.oldLine : line.newLine ?? line.oldLine;
+    if (!lineNumber) return;
+    setComposer({ filePath: sectionPath, side, lineNumber, diffLine: line.text });
+    setComposerBody('');
+  };
+
+  const saveComposer = async () => {
+    if (!composer || !composerBody.trim()) return;
+    await onCreateComment({ ...composer, body: composerBody.trim() });
+    setComposer(null);
+    setComposerBody('');
+  };
+  const approvePullRequest = async () => {
+    if (!canApprove || localApproving) return;
+    setApprovalError(null);
+    setLocalApproving(true);
+    try {
+      const approved = await onApprovePr();
+      if (!approved) {
+        setApprovalError('Approval failed. See the notification for details.');
+      }
+    } finally {
+      setLocalApproving(false);
+    }
+  };
+
+  return (
+    <div className="diff-modal">
+        <header className="diff-summary">
+          <div>
+            <strong>{diff.repository}</strong>
+            <p>{diff.baseBranch ?? 'base'} {'<-'} {diff.headBranch ?? 'head'} - {diff.state}</p>
+          </div>
+          <div className="diff-stats">
+            <span>{diff.changedFiles} files</span>
+            <span className="diff-add">+{diff.additions}</span>
+            <span className="diff-del">-{diff.deletions}</span>
+          </div>
+        </header>
+        <div className="diff-actions">
+          <span>{unresolvedCount > 0 ? `${unresolvedCount} unresolved review comment${unresolvedCount === 1 ? '' : 's'}` : 'No unresolved review comments'}</span>
+          <div>
+            <button className="secondary" disabled={busy || unresolvedCount === 0} onClick={() => void onFixComments()} type="button">{fixing ? <span className="spinner" /> : <Sparkles size={16} />}{fixing ? 'Fixing comments...' : 'Fix comments with AI'}</button>
+            <button className="primary-action" disabled={busy || localApproving || !canApprove} onClick={() => void approvePullRequest()} type="button">{approving ? <span className="spinner" /> : <CheckCircle2 size={16} />}{approving ? 'Merging...' : approvalState.status === 'merged' ? 'Merged' : 'Approve PR'}</button>
+          </div>
+        </div>
+        <p className={`diff-approval-status ${approvalState.status}`}>
+          {approvalState.message}
+          {showSlowApproval ? ' Merge accepted, deploying app and cleaning preview...' : ''}
+        </p>
+        {approvalError && <p className="failure-reason">{approvalError}</p>}
+        {diff.message && <p className="provider-status">{diff.message}</p>}
+        <div className="diff-layout">
+          <nav className="diff-files" aria-label="Changed files">
+            {diff.files.length === 0 && <p>No changed files were returned.</p>}
+            {diff.files.map((file) => (
+              <button className={file.path === activePath ? 'active' : ''} key={file.path} type="button" onClick={() => jumpToFile(file.path)}>
+                <span>{file.path}</span>
+                <small>{file.status ?? 'modified'} {file.additions ? `+${file.additions}` : ''}{file.deletions ? ` -${file.deletions}` : ''}</small>
+                {countsByFile[file.path] && (
+                  <small>{countsByFile[file.path].unresolved}/{countsByFile[file.path].total} unresolved</small>
+                )}
+              </button>
+            ))}
+          </nav>
+          <div className="diff-view" aria-label="Unified diff" onScroll={handleScroll} ref={scrollRef}>
+            {parsed.sections.length === 0 && <pre>No diff content returned.</pre>}
+            {parsed.sections.map((section) => (
+              <section className="diff-section" key={section.path} ref={(element) => { sectionRefs.current[section.path] = element; }}>
+                <header className="diff-file-header">
+                  <strong>{section.path}</strong>
+                  <span>{section.file?.status ?? 'modified'} {section.file?.additions ? `+${section.file.additions}` : ''}{section.file?.deletions ? ` -${section.file.deletions}` : ''}</span>
+                </header>
+                <div className="diff-lines">
+                  {section.lines.map((line) => {
+                    const lineNumber = line.side === 'old' ? line.oldLine : line.newLine ?? line.oldLine ?? 0;
+                    const side = line.side === 'old' ? 'old' : 'new';
+                    const lineComments = lineNumber ? commentsByLine.get(reviewLineKey(section.path, side, lineNumber)) ?? [] : [];
+                    const isComposerLine = composer?.filePath === section.path && composer.side === side && composer.lineNumber === lineNumber;
+                    return (
+                      <React.Fragment key={line.id}>
+                        <button className={`diff-line ${line.kind}${line.commentable ? ' commentable' : ''}`} disabled={!line.commentable} onClick={() => openComposer(section.path, line)} type="button">
+                          <span className="diff-line-number">{line.oldLine ?? ''}</span>
+                          <span className="diff-line-number">{line.newLine ?? ''}</span>
+                          <code>{line.text || ' '}</code>
+                        </button>
+                        {isComposerLine && (
+                          <div className="diff-comment-composer">
+                            <textarea value={composerBody} onChange={(event) => setComposerBody(event.target.value)} placeholder="Comment on this line..." />
+                            <div>
+                              <button className="primary-action" disabled={!composerBody.trim()} onClick={() => void saveComposer()} type="button">Save comment</button>
+                              <button className="secondary" onClick={() => setComposer(null)} type="button">Cancel</button>
+                            </div>
+                          </div>
+                        )}
+                        {lineComments.map((comment) => (
+                          <div className={comment.status === 'resolved' ? 'diff-comment resolved' : 'diff-comment'} key={comment.id}>
+                            <div>
+                              <strong>{comment.author}</strong>
+                              <span>{comment.status}</span>
+                            </div>
+                            <p>{comment.body}</p>
+                            <div>
+                              {comment.status !== 'resolved' && <button className="link-button" onClick={() => void onUpdateComment(comment.id, { status: 'resolved' })} type="button">Resolve</button>}
+                              {comment.status === 'resolved' && <button className="link-button" onClick={() => void onUpdateComment(comment.id, { status: 'open' })} type="button">Reopen</button>}
+                              <button className="link-button danger-link" onClick={() => void onDeleteComment(comment.id)} type="button">Delete</button>
+                            </div>
+                          </div>
+                        ))}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+        </div>
+    </div>
+  );
+}
+
+function reviewLineKey(filePath: string, side: string, lineNumber: number): string {
+  return `${filePath}\n${side === 'old' ? 'old' : 'new'}\n${lineNumber}`;
+}
+
+function emptyPullRequestDiff(): PullRequestDiffDto {
+  return {
+    provider: 'LocalGit',
+    repository: '',
+    number: 0,
+    state: '',
+    changedFiles: 0,
+    additions: 0,
+    deletions: 0,
+    truncated: false,
+    files: [],
+    diff: '',
+    reviewComments: [],
+    canApprove: false,
+    approvalStatus: 'blocked',
+    approvalMessage: 'No Local pull request is available.'
+  };
+}
+
 function ActivityEntry({ actor, aiRuns, comment, busy, onDelete, onSelectPlan, onUpdate }: {
   actor: string;
   aiRuns: AiRun[];
@@ -4372,29 +5732,53 @@ function SafeExternalLink({ href, className, ariaLabel, children }: { href: stri
   return <a className={className} href={safeHref} target="_blank" rel="noreferrer" aria-label={ariaLabel}>{children}</a>;
 }
 
-function CommentBody({ body }: { body: string }) {
+type MarkdownReviewOptions = {
+  activeAnchorKey: string | null;
+  busy: boolean;
+  commentDraft: string;
+  commentsByAnchor: Record<string, AiPlanReviewCommentDto[]>;
+  editingBody: string;
+  editingCommentId: string | null;
+  onCancelEdit: () => void;
+  onDeleteComment: (commentId: string) => void;
+  onDraftChange: (value: string) => void;
+  onEditingBodyChange: (value: string) => void;
+  onSaveEdit: (commentId: string) => void;
+  onSelectAnchor: (anchorKey: string | null) => void;
+  onStartEdit: (comment: AiPlanReviewCommentDto) => void;
+  onSubmitComment: (block: AiPlanReviewBlock) => void;
+  onToggleResolved: (comment: AiPlanReviewCommentDto) => void;
+};
+
+function CommentBody({ body, review }: { body: string; review?: MarkdownReviewOptions }) {
   const [expanded, setExpanded] = React.useState(false);
   const collapsible = body.length > 520 || body.split(/\r?\n/).length > 6;
-  const visible = collapsible && !expanded ? `${body.slice(0, 520).trimEnd()}...` : body;
+  const collapsed = collapsible && !expanded;
+  const visible = collapsed ? `${body.slice(0, 520).trimEnd()}...` : body;
+  const activeReview = review && (!collapsible || expanded) ? review : undefined;
   return (
     <div
-      className={collapsible && !expanded ? 'markdown-body collapsed' : 'markdown-body'}
-      onClick={() => collapsible && setExpanded(true)}
-      role={collapsible ? 'button' : undefined}
-      tabIndex={collapsible ? 0 : undefined}
+      className={`${collapsed ? 'markdown-body collapsed' : 'markdown-body'}${review ? ' markdown-review-body' : ''}`}
+      onClick={() => collapsed && setExpanded(true)}
+      role={collapsed ? 'button' : undefined}
+      tabIndex={collapsed ? 0 : undefined}
       onKeyDown={(event) => {
-        if (collapsible && (event.key === 'Enter' || event.key === ' ')) {
+        if (collapsed && (event.key === 'Enter' || event.key === ' ')) {
           setExpanded(true);
         }
       }}
     >
-      <MarkdownText text={visible} />
-      {collapsible && !expanded && <span className="read-more">Show more</span>}
+      <MarkdownText review={activeReview} text={activeReview ? body : visible} />
+      {collapsed && <span className="read-more">Show more</span>}
     </div>
   );
 }
 
-function MarkdownText({ text }: { text: string }) {
+function MarkdownText({ text, review }: { text: string; review?: MarkdownReviewOptions }) {
+  if (review) {
+    return <>{splitAiPlanReviewBlocks(text).map((block) => <MarkdownReviewBlock block={block} key={block.anchorKey} review={review} />)}</>;
+  }
+
   const lines = text.split(/\r?\n/);
   const blocks: React.ReactNode[] = [];
   let list: string[] = [];
@@ -4422,6 +5806,78 @@ function MarkdownText({ text }: { text: string }) {
 
   flushList();
   return <>{blocks}</>;
+}
+
+function MarkdownReviewBlock({ block, review }: { block: AiPlanReviewBlock; review: MarkdownReviewOptions }) {
+  const comments = review.commentsByAnchor[block.anchorKey] ?? [];
+  const unresolvedCount = comments.filter((entry) => entry.status.toLowerCase() !== 'resolved').length;
+  const active = block.anchorKey === review.activeAnchorKey;
+
+  return (
+    <section className={`markdown-review-block ${block.kind} ${active ? 'active' : ''}`}>
+      <div className="markdown-review-line" role="button" tabIndex={0} onClick={() => review.onSelectAnchor(block.anchorKey)} onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          review.onSelectAnchor(block.anchorKey);
+        }
+      }}>
+        <MarkdownReviewBlockText block={block} />
+        <span className={comments.length > 0 ? 'markdown-review-marker has-comments' : 'markdown-review-marker'} aria-hidden="true">
+          {comments.length > 0 ? unresolvedCount || comments.length : '+'}
+        </span>
+      </div>
+      {active && (
+        <div className="markdown-review-composer">
+          <textarea value={review.commentDraft} onChange={(event) => review.onDraftChange(event.target.value)} placeholder="Add a plan review comment..." />
+          <div>
+            <button className="primary-action" disabled={!review.commentDraft.trim() || review.busy} onClick={() => review.onSubmitComment(block)}>Add comment</button>
+            <button className="secondary" disabled={review.busy} onClick={() => review.onSelectAnchor(null)} type="button">Cancel</button>
+          </div>
+        </div>
+      )}
+      {comments.map((entry) => (
+        <article className={entry.status.toLowerCase() === 'resolved' ? 'markdown-review-thread resolved' : 'markdown-review-thread'} key={entry.id}>
+          <header><strong>{entry.author}</strong><span>{entry.status} · {relativeTime(entry.createdAt)}</span></header>
+          {review.editingCommentId === entry.id ? (
+            <div className="plan-review-edit">
+              <textarea value={review.editingBody} onChange={(event) => review.onEditingBodyChange(event.target.value)} />
+              <button className="primary-action" disabled={!review.editingBody.trim() || review.busy} onClick={() => review.onSaveEdit(entry.id)}>Save</button>
+              <button className="secondary" disabled={review.busy} onClick={review.onCancelEdit}>Cancel</button>
+            </div>
+          ) : (
+            <p>{entry.body}</p>
+          )}
+          <footer>
+            <button className="link-button" disabled={review.busy} type="button" onClick={() => review.onStartEdit(entry)}>Edit</button>
+            <button className="link-button" disabled={review.busy} type="button" onClick={() => review.onToggleResolved(entry)}>
+              {entry.status.toLowerCase() === 'resolved' ? 'Reopen' : 'Resolve'}
+            </button>
+            <button className="link-button danger-link" disabled={review.busy} type="button" onClick={() => review.onDeleteComment(entry.id)}>Delete</button>
+          </footer>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function MarkdownReviewBlockText({ block }: { block: AiPlanReviewBlock }) {
+  if (block.kind === 'heading') {
+    return <h3>{renderInlineMarkdown(block.text)}</h3>;
+  }
+
+  if (block.kind === 'list-item') {
+    const numbered = block.text.match(/^(\d+[.)])\s+(.+)$/);
+    const marker = numbered ? numbered[1] : '-';
+    const body = numbered ? numbered[2] : block.text;
+    return (
+      <div className="markdown-review-list-item">
+        <span>{marker}</span>
+        <p>{renderInlineMarkdown(body)}</p>
+      </div>
+    );
+  }
+
+  return <p>{renderInlineMarkdown(block.text)}</p>;
 }
 
 function renderInlineMarkdown(text: string): React.ReactNode[] {
@@ -4521,6 +5977,10 @@ function planTitle(run: AiRun): string {
 }
 
 function findReferencedPlan(comment: CommentDto, aiRuns: AiRun[]): AiRun | undefined {
+  if (!shouldRenderPlanReferenceActivity(comment)) {
+    return undefined;
+  }
+
   const sequence = comment.body.match(/plan\s+#(\d+)/i);
   if (sequence) {
     const match = aiRuns.find((run) => run.sequenceNumber === Number(sequence[1]));
@@ -4616,6 +6076,61 @@ function moveCardInBoard(board: Board, id: string, status: string, sortOrder: nu
   };
 }
 
+function allBoardItems(board: Board | null): WorkItemSummary[] {
+  return board?.columns.flatMap((column) => column.items) ?? [];
+}
+
+function compareWorkItemsForHierarchy(left: WorkItemSummary, right: WorkItemSummary) {
+  const leftPath = left.hierarchyPath ?? '';
+  const rightPath = right.hierarchyPath ?? '';
+  if (leftPath && rightPath && leftPath !== rightPath) return leftPath.localeCompare(rightPath);
+  return left.sortOrder - right.sortOrder || left.key.localeCompare(right.key);
+}
+
+function availableParentOptions(board: Board | null, currentId: string | null, type: string): WorkItemSummary[] {
+  if (type === 'Epic') return [];
+  const items = allBoardItems(board);
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const isDescendantOfCurrent = (candidate: WorkItemSummary) => {
+    if (!currentId) return false;
+    let parentId = candidate.parentWorkItemId ?? null;
+    const seen = new Set<string>();
+    while (parentId) {
+      if (parentId === currentId) return true;
+      if (seen.has(parentId)) return false;
+      seen.add(parentId);
+      parentId = itemById.get(parentId)?.parentWorkItemId ?? null;
+    }
+    return false;
+  };
+  return items
+    .filter((item) => item.id !== currentId)
+    .filter((item) => type === 'Feature' ? item.type === 'Epic' : item.type === 'Epic' || item.type === 'Feature')
+    .filter((item) => !isDescendantOfCurrent(item))
+    .sort(compareWorkItemsForHierarchy);
+}
+
+function hierarchySummary(item: WorkItemSummary) {
+  const childCount = item.childCount ?? 0;
+  if (childCount > 0) {
+    return `${item.doneChildCount ?? 0}/${childCount} children done`;
+  }
+  if (item.parentKey) return `Child of ${item.parentKey}`;
+  if (item.type === 'Epic') return 'Epic root';
+  return 'Standalone card';
+}
+
+function workItemFormsEqual(left: WorkItemForm, right: WorkItemForm) {
+  return left.title === right.title &&
+    left.description === right.description &&
+    left.type === right.type &&
+    left.status === right.status &&
+    left.priority === right.priority &&
+    left.assignee === right.assignee &&
+    left.parentWorkItemId === right.parentWorkItemId &&
+    left.isBug === right.isBug;
+}
+
 function formFromDetail(detail: WorkItemDetail): WorkItemForm {
   return {
     title: detail.item.title,
@@ -4623,7 +6138,9 @@ function formFromDetail(detail: WorkItemDetail): WorkItemForm {
     type: detail.item.type,
     status: detail.item.status,
     priority: detail.item.priority,
-    assignee: detail.item.assignee ?? ''
+    assignee: detail.item.assignee ?? '',
+    parentWorkItemId: detail.item.parentWorkItemId ?? '',
+    isBug: detail.item.isBug ?? false
   };
 }
 
@@ -4873,6 +6390,23 @@ function workflowLabel(workflow?: string | null) {
 
 function latestRepositoryCleanupRun(runs?: RepositoryCleanupRunDto[] | null) {
   return [...(runs ?? [])].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+}
+
+function extractUnifiedDiffForFile(diff: string, path: string): string {
+  if (!diff.trim()) return '';
+  const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`(^diff --git a\\/.* b\\/${escapedPath}[\\s\\S]*?)(?=^diff --git |(?![\\s\\S]))`, 'm');
+  const match = diff.match(pattern);
+  if (match?.[1]) return match[1].trimEnd();
+
+  const lines = diff.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === `+++ b/${path}` || line.endsWith(` b/${path}`));
+  if (start < 0) return '';
+  let header = start;
+  while (header > 0 && !lines[header].startsWith('diff --git ')) header -= 1;
+  let end = start + 1;
+  while (end < lines.length && !lines[end].startsWith('diff --git ')) end += 1;
+  return lines.slice(header, end).join('\n').trimEnd();
 }
 
 function initials(value: string) {
