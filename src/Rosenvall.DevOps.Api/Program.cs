@@ -1299,6 +1299,40 @@ api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWo
     return Results.Ok(item);
 });
 
+api.MapPatch("/work-items/{workItemId:guid}/hierarchy", async (Guid workItemId, UpdateWorkItemHierarchyRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var item = store.UpdateWorkItemHierarchy(workItemId, request);
+    if (item is null)
+    {
+        return Results.Problem("The requested parent would create an invalid work item hierarchy.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    await hub.Clients.All.SendAsync("workItemChanged", item);
+    return Results.Ok(item);
+});
+
+api.MapPost("/work-items/{workItemId:guid}/children", async (Guid workItemId, CreateChildWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var item = store.CreateChildWorkItem(workItemId, request);
+    if (item is null)
+    {
+        return Results.Problem("The child card could not be created because the requested hierarchy is invalid.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    await hub.Clients.All.SendAsync("workItemChanged", item);
+    return Results.Created($"/api/work-items/{item.Id}", item);
+});
+
 api.MapGet("/work-items/{workItemId:guid}", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanViewWorkItemRequest(store, workItemId, user))
@@ -1309,6 +1343,69 @@ api.MapGet("/work-items/{workItemId:guid}", (Guid workItemId, ClaimsPrincipal us
     return store.GetWorkItemDetail(workItemId) is { } item ? Results.Ok(item) : Results.NotFound();
 });
 
+api.MapGet("/work-items/{workItemId:guid}/tree", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewWorkItemRequest(store, workItemId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    var tree = store.GetWorkItemTree(workItemId);
+    return tree is null ? Results.NotFound() : Results.Ok(tree);
+});
+
+api.MapPost("/work-items/{workItemId:guid}/epic-runs", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var run = store.StartEpicRun(workItemId, request.Actor);
+    if (run is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("epicRunChanged", run);
+    return Results.Accepted($"/api/work-items/{workItemId}/epic-runs/{run.Id}", run);
+});
+
+api.MapPost("/work-items/{workItemId:guid}/epic-goals", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var goal = store.StartEpicGoal(workItemId, request.Actor);
+    if (goal is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("epicGoalChanged", goal);
+    return Results.Accepted($"/api/work-items/{workItemId}/epic-goals/{goal.Id}", goal);
+});
+
+api.MapPost("/epic-goals/{goalId:guid}/cancel", async (Guid goalId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    var existing = store.GetEpicGoal(goalId);
+    if (existing is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (!CanMutateWorkItemRequest(store, existing.RootWorkItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var goal = store.CancelEpicGoal(goalId, request.Actor)!;
+    await hub.Clients.All.SendAsync("epicGoalChanged", goal);
+    return Results.Ok(goal);
+});
+
 api.MapGet("/work-items/{workItemId:guid}/ai-runs", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanViewWorkItemRequest(store, workItemId, user))
@@ -1317,6 +1414,187 @@ api.MapGet("/work-items/{workItemId:guid}/ai-runs", (Guid workItemId, ClaimsPrin
     }
 
     return Results.Ok(store.GetAiRuns(workItemId));
+});
+
+api.MapGet("/work-items/{workItemId:guid}/pull-request/diff", async (Guid workItemId, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, CancellationToken cancellationToken) =>
+{
+    if (!CanViewWorkItemRequest(store, workItemId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    var approvalContext = store.GetPullRequestApprovalContext(workItemId);
+    if (approvalContext is null || string.IsNullOrWhiteSpace(approvalContext.Value.Development.PullRequestUrl))
+    {
+        return Results.NotFound();
+    }
+
+    if (approvalContext.Value.Repository is null)
+    {
+        return Results.Problem("Pull request repository metadata is missing.", statusCode: StatusCodes.Status409Conflict);
+    }
+
+    var repository = approvalContext.Value.Repository;
+    if (!repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Problem("RDO-hosted pull request diff is available for Local Git pull requests. Open GitHub pull requests in GitHub.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var development = approvalContext.Value.Development;
+    var pullRequest = await localGit.GetPullRequestAsync(repository, development.PullRequestUrl!, cancellationToken);
+    if (pullRequest is null && development.PullRequestNumber is { } pullRequestNumber)
+    {
+        pullRequest = await localGit.GetPullRequestAsync(repository, pullRequestNumber, development.PullRequestUrl, cancellationToken);
+    }
+    if (pullRequest is null)
+    {
+        return Results.Problem("Local pull request could not be read from Forgejo. Retry after Forgejo is available.", statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var files = await localGit.GetPullRequestFilesAsync(pullRequest, cancellationToken) ?? [];
+    var diff = await localGit.GetPullRequestDiffAsync(pullRequest, cancellationToken) ?? "";
+    const int maxDiffCharacters = 320_000;
+    var truncated = diff.Length > maxDiffCharacters;
+    if (truncated)
+    {
+        diff = diff[..maxDiffCharacters];
+    }
+    var reviewComments = store.GetPullRequestReviewComments(workItemId, "LocalGit", pullRequest.Number);
+    var approvalState = store.GetLocalPullRequestApprovalState(workItemId, pullRequest.State);
+
+    return Results.Ok(new PullRequestDiffDto(
+        "LocalGit",
+        $"{pullRequest.Owner}/{pullRequest.Repository}",
+        pullRequest.Number,
+        pullRequest.State,
+        pullRequest.BaseRef ?? repository.DefaultBranch,
+        pullRequest.HeadRef,
+        pullRequest.HtmlUrl,
+        files.Count,
+        files.Sum(file => file.Additions ?? 0),
+        files.Sum(file => file.Deletions ?? 0),
+        truncated,
+        truncated ? "Diff was truncated for display. The pull request still contains the full change." : null,
+        files,
+        diff,
+        reviewComments,
+        approvalState.PullRequestApprovedBy,
+        approvalState.PullRequestApprovedAt,
+        approvalState.PullRequestMergedAt,
+        approvalState.PullRequestFailure,
+        approvalState.CanApprove,
+        approvalState.Status,
+        approvalState.Message));
+});
+
+api.MapPost("/work-items/{workItemId:guid}/pull-request/comments", (Guid workItemId, CreatePullRequestReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var comment = store.AddPullRequestReviewComment(workItemId, request, UserIdentityFromClaims(user).DisplayName);
+    return comment is null
+        ? Results.Problem("Review comments can only be added to Local Git pull requests.", statusCode: StatusCodes.Status409Conflict)
+        : Results.Ok(comment);
+});
+
+api.MapPatch("/work-items/{workItemId:guid}/pull-request/comments/{commentId:guid}", (Guid workItemId, Guid commentId, UpdatePullRequestReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var comment = store.UpdatePullRequestReviewComment(workItemId, commentId, request, UserIdentityFromClaims(user).DisplayName);
+    return comment is null ? Results.NotFound() : Results.Ok(comment);
+});
+
+api.MapDelete("/work-items/{workItemId:guid}/pull-request/comments/{commentId:guid}", (Guid workItemId, Guid commentId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    return store.DeletePullRequestReviewComment(workItemId, commentId) ? Results.NoContent() : Results.NotFound();
+});
+
+api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async (Guid workItemId, StartPullRequestReviewFixRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, ForgejoRepositoryClient localGit, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    var resourceDiagnostics = ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics);
+    var preflight = ImplementationCapacityPreflight.Evaluate(resourceDiagnostics, configuration.GetValue("RepositoryRuns:ApiMemoryMinHeadroomBytes", 128L * 1024 * 1024));
+    if (!preflight.Succeeded)
+    {
+        return Results.Problem(preflight.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    if (store.GetPendingImplementationRun(workItemId) is { } pendingRun)
+    {
+        return Results.Problem(
+            $"Review comments cannot be fixed because {pendingRun.WorkItemKey} already has a pending implementation run on branch {pendingRun.Branch}.",
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
+    ImplementationRunDto? run;
+    try
+    {
+        run = store.StartPullRequestReviewFixRun(workItemId, request);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+    }
+
+    if (run is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("implementationRunChanged", run);
+    var localGitCredential = localGit.ConfiguredToken ?? localGit.ConfiguredPassword;
+    if (string.IsNullOrWhiteSpace(localGitCredential))
+    {
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Could not resolve Local Git credentials for review fix.");
+        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        return Results.Problem(failed?.FailureReason ?? "Could not resolve Local Git credentials.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var secretName = RepositoryImplementationJobManifestRenderer.RepositoryTokenSecretName(run);
+    var tokenSecretApply = await jobs.ApplyAsync(RepositoryImplementationJobManifestRenderer.RenderRepositoryTokenSecret(run, localGitCredential), cancellationToken);
+    if (!tokenSecretApply.Succeeded)
+    {
+        var failure = KubernetesFailureClassifier.Classify(tokenSecretApply.Message);
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretApply.Message, failure);
+        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var manifest = store.RenderImplementationRunManifest(run.Id, configuration, secretName);
+    if (manifest is null)
+    {
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Review fix manifest could not be rendered.");
+        return Results.Problem(failed?.FailureReason ?? "Review fix manifest could not be rendered.", statusCode: StatusCodes.Status409Conflict);
+    }
+
+    var apply = await jobs.ApplyAsync(manifest, cancellationToken);
+    if (!apply.Succeeded)
+    {
+        var failure = KubernetesFailureClassifier.Classify(apply.Message);
+        var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
+        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
+    await hub.Clients.All.SendAsync("implementationRunChanged", updated);
+    return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
 });
 
 api.MapGet("/work-items/{workItemId:guid}/ai-session", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
@@ -1408,6 +1686,56 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, string actor,
     }
 });
 
+api.MapPost("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments", async (Guid workItemId, Guid aiRunId, CreateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
+    {
+        return BoardMutationForbidden();
+    }
+
+    var comment = store.AddAiPlanReviewComment(workItemId, aiRunId, request, UserIdentityFromClaims(user).DisplayName);
+    if (comment is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("aiPlanReviewCommentChanged", comment);
+    return Results.Created($"/api/work-items/{workItemId}/ai-plans/{aiRunId}/comments/{comment.Id}", comment);
+});
+
+api.MapPatch("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, UpdateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
+    {
+        return BoardMutationForbidden();
+    }
+
+    var comment = store.UpdateAiPlanReviewComment(workItemId, aiRunId, commentId, request, UserIdentityFromClaims(user).DisplayName);
+    if (comment is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("aiPlanReviewCommentChanged", comment);
+    return Results.Ok(comment);
+});
+
+api.MapDelete("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+{
+    if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
+    {
+        return BoardMutationForbidden();
+    }
+
+    if (!store.DeleteAiPlanReviewComment(workItemId, aiRunId, commentId))
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("aiPlanReviewCommentDeleted", commentId);
+    return Results.NoContent();
+});
+
 api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
@@ -1425,6 +1753,65 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     try
     {
         var validated = AiModelPolicy.ValidatePlanningRequest(request, store.GetSettings(configuration, AuthenticatedSubjectOrNull(user)));
+        if (validated is null)
+        {
+            return Results.Problem("Requested AI provider or model is not configured for planning.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        plan = await planner.GeneratePlanAsync(validated.Provider, validated.Model, validated.ReasoningEffort, context, cancellationToken);
+        request = request with
+        {
+            Provider = validated.Provider,
+            Model = validated.Model,
+            ReasoningEffort = validated.ReasoningEffort
+        };
+    }
+    catch (AiPlanProviderUnavailableException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var run = store.StartAiPlan(workItemId, request.Provider, request.Model, plan, request.ReasoningEffort);
+    if (run is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("aiRunChanged", run);
+    return Results.Accepted($"/api/ai-runs/{run.Id}", run);
+});
+
+api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItemId, ReviseAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+{
+    if (!CanMutateWorkItemRequest(store, workItemId, user))
+    {
+        return BoardMutationForbidden();
+    }
+
+    if (string.IsNullOrWhiteSpace(request.Message))
+    {
+        return Results.BadRequest("Revision message is required.");
+    }
+
+    var actor = UserIdentityFromClaims(user).DisplayName;
+    var comment = store.AddComment(workItemId, actor, "Comment", request.Message);
+    if (comment is null)
+    {
+        return Results.NotFound();
+    }
+
+    await hub.Clients.All.SendAsync("commentAdded", comment);
+
+    var context = store.GetWorkItemDetail(workItemId);
+    if (context is null)
+    {
+        return Results.NotFound();
+    }
+
+    string plan;
+    try
+    {
+        var validated = AiModelPolicy.ValidatePlanningRequest(new StartAiPlanRequest(request.Provider, request.Model, request.ReasoningEffort), store.GetSettings(configuration, AuthenticatedSubjectOrNull(user)));
         if (validated is null)
         {
             return Results.Problem("Requested AI provider or model is not configured for planning.", statusCode: StatusCodes.Status400BadRequest);
@@ -1540,9 +1927,19 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
 
     var approvalContext = store.GetPullRequestApprovalContext(workItemId);
     var isLocalGitApproval = approvalContext?.Repository?.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) == true;
+    if (isLocalGitApproval && store.HasUnresolvedPullRequestReviewComments(workItemId))
+    {
+        return Results.Problem("Resolve all review comments before approving the pull request.", statusCode: StatusCodes.Status409Conflict);
+    }
+
     if (isLocalGitApproval && approvalContext?.Repository is { } repository)
     {
-        var pullRequest = await localGit.GetPullRequestAsync(repository, approvalContext.Value.Development.PullRequestUrl!, cancellationToken);
+        var development = approvalContext.Value.Development;
+        var pullRequest = await localGit.GetPullRequestAsync(repository, development.PullRequestUrl!, cancellationToken);
+        if (pullRequest is null && development.PullRequestNumber is { } pullRequestNumber)
+        {
+            pullRequest = await localGit.GetPullRequestAsync(repository, pullRequestNumber, development.PullRequestUrl, cancellationToken);
+        }
         if (pullRequest is null)
         {
             var message = "Local pull request could not be read from Forgejo. Retry after Forgejo is available.";
@@ -2193,9 +2590,10 @@ namespace Rosenvall.DevOps.Api
     public sealed record BoardPlanningContextDto(Guid BoardId, string RepositoryProfile, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, RepositoryProfileDto? RepositoryProfileDraft = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null);
     public sealed record BoardDto(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<BoardColumnDto> Columns, RepositoryDto? Repository = null, IReadOnlyList<BoardRepositoryDto>? Repositories = null, IReadOnlyList<BoardTeamAccessDto>? TeamAccess = null, BoardGitOpsSettingsDto? GitOpsSettings = null, BoardAiContextDto? AiContext = null, string RepositorySyncState = "Preview only", IReadOnlyList<string>? ProviderCapabilities = null, string ImplementationWorkflow = "preview-only", string? PublicHostname = null, BoardPublicAppDto? PublicApp = null);
     public sealed record BoardColumnDto(string Name, IReadOnlyList<WorkItemSummaryDto> Items);
-    public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl);
-    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null, BoardPlanningContextDto? BoardContext = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null);
+    public sealed record WorkItemSummaryDto(Guid Id, string Key, string Type, string Title, string Status, string? Assignee, string Priority, int CommentCount, string? AiStatus, string? PullRequestUrl, int SortOrder, string? PreviewUrl, Guid? ParentWorkItemId = null, string? ParentKey = null, Guid? RootWorkItemId = null, string? RootKey = null, string HierarchyPath = "", bool IsBug = false, int ChildCount = 0, int DoneChildCount = 0, int BlockedChildCount = 0, int OpenPullRequestChildCount = 0);
+    public sealed record WorkItemDetailDto(WorkItemSummaryDto Item, string Description, IReadOnlyList<CommentDto> Comments, PreviewDto? Preview, DevelopmentDto? Development, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, AiSessionDto? AiSession = null, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<AiRun>? PreviewImplementationRunsAwaitingRecovery = null, BoardPlanningContextDto? BoardContext = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, WorkItemSummaryDto? Parent = null, IReadOnlyList<WorkItemSummaryDto>? Children = null, IReadOnlyList<WorkItemSummaryDto>? Ancestors = null, IReadOnlyList<WorkItemSummaryDto>? Descendants = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null);
     public sealed record CommentDto(Guid Id, Guid WorkItemId, string Author, string Kind, string Body, DateTimeOffset CreatedAt);
+    public sealed record AiPlanReviewCommentDto(Guid Id, Guid WorkItemId, Guid AiRunId, string AnchorKey, string QuotedText, string Author, string Body, string Status, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string? ResolvedBy = null, DateTimeOffset? ResolvedAt = null, int AiRunSequenceNumber = 0);
     public sealed record PreviewDto(Guid Id, Guid WorkItemId, string Url, string Image, string Status, DateTimeOffset ExpiresAt, string? StaticHtml, string? Namespace = null, string? ResourceName = null, string? Phase = null, string? Message = null, DateTimeOffset? LastCheckedAt = null, string? PodName = null, string? FailureReason = null, string? FailureLog = null, IReadOnlyList<PreviewSourceFile>? SourceFiles = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, IReadOnlyList<PreviewStepLogDto>? StepLogs = null);
     public sealed record PreviewStepLogDto(string Key, string Title, string Description, string State, DateTimeOffset? StartedAt = null, DateTimeOffset? CompletedAt = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
     public sealed record BoardPublicAppDto(Guid BoardId, string Hostname, string Url, string Namespace, string ResourceName, string Status, Guid? SourceWorkItemId, Guid? SourcePreviewId, Guid? SourceImplementationRunId, string? SourcePullRequestUrl, string? SourceBranch, string? CommitSha, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastDeployedAt = null, string? FailureReason = null, string? Message = null);
@@ -2205,11 +2603,18 @@ namespace Rosenvall.DevOps.Api
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0);
     public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, string RunKind = "codex", Guid? SourcePreviewId = null, string? PullRequestProvider = null, int? PullRequestNumber = null, string? PullRequestState = null, DateTimeOffset? PullRequestMergedAt = null);
+    public sealed record EpicRunChildDto(Guid WorkItemId, string WorkItemKey, string WorkItemTitle, string AgentRole, string Status, Guid? AiRunId = null, Guid? ImplementationRunId = null, string? Summary = null, DateTimeOffset? UpdatedAt = null);
+    public sealed record EpicRunDto(Guid Id, Guid RootWorkItemId, string RootWorkItemKey, string RootWorkItemTitle, string Status, string Actor, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<EpicRunChildDto> Children, string? Summary = null, string? FailureReason = null);
+    public sealed record EpicGoalRunDto(Guid Id, Guid RootWorkItemId, Guid? EpicRunId, string Status, string Actor, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string? Summary = null, string? FailureReason = null);
     public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, bool Adopted = false, DateTimeOffset? MergedAt = null, DateTimeOffset? VerifiedAt = null, string? VerificationFailure = null);
     public sealed record ApiStatusDto(ApiResourceDiagnosticsDto Resources);
     public sealed record ApiResourceDiagnosticsDto(long? ProcessRssBytes, long? MemoryCurrentBytes, long? MemoryLimitBytes, long? MemoryAvailableBytes, bool IsMemoryPressured, string Status, string? Message, long? SnapshotJsonBytes = null, long SnapshotPersistWriteCount = 0, long SnapshotPersistSkipCount = 0, DateTimeOffset? LastSnapshotPersistedAt = null);
     public sealed record ImplementationCapacityPreflightResult(bool Succeeded, string Message, ApiResourceDiagnosticsDto Diagnostics);
-    public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null, string? HeadRef = null);
+    public sealed record GitHubPullRequestDto(string Owner, string Repository, int Number, string State, bool Merged, string HtmlUrl, string? DiffUrl = null, string? HeadRef = null, string? BaseRef = null);
+    public sealed record PullRequestDiffFileDto(string Path, string? Status = null, int? Additions = null, int? Deletions = null, string? PreviousPath = null);
+    public sealed record PullRequestReviewCommentDto(Guid Id, Guid WorkItemId, string PullRequestProvider, int PullRequestNumber, string FilePath, string Side, int LineNumber, string DiffLine, string Author, string Body, string Status, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string? ResolvedBy = null, DateTimeOffset? ResolvedAt = null);
+    public sealed record PullRequestApprovalStateDto(bool CanApprove, string Status, string Message, string? PullRequestApprovedBy = null, DateTimeOffset? PullRequestApprovedAt = null, DateTimeOffset? PullRequestMergedAt = null, string? PullRequestFailure = null);
+    public sealed record PullRequestDiffDto(string Provider, string Repository, int Number, string State, string? BaseBranch, string? HeadBranch, string? PullRequestUrl, int ChangedFiles, int Additions, int Deletions, bool Truncated, string? Message, IReadOnlyList<PullRequestDiffFileDto> Files, string Diff, IReadOnlyList<PullRequestReviewCommentDto>? ReviewComments = null, string? PullRequestApprovedBy = null, DateTimeOffset? PullRequestApprovedAt = null, DateTimeOffset? PullRequestMergedAt = null, string? PullRequestFailure = null, bool CanApprove = false, string ApprovalStatus = "blocked", string? ApprovalMessage = null);
     public sealed record GitOpsApplicationStatusDto(string Name, string Namespace, string SyncStatus, string HealthStatus, string? Revision, string Message, string? Url, DateTimeOffset? UpdatedAt, IReadOnlyList<string>? ApplicationUrls = null);
     public sealed record GitOpsApplicationsResponseDto(IReadOnlyList<GitOpsApplicationStatusDto> Applications, string? Message = null);
     public sealed record GitHubIntegrationDto(Guid Id, long InstallationId, string AccountLogin, string AccountType, string Status, int RepositoriesCount, string InstalledBy, DateTimeOffset CreatedAt, bool CanCreateRepositories = false, IReadOnlyList<Guid>? RepositoryCreatorTeamIds = null, bool CanManageRepositoryCreationPolicy = false, bool RequiresUserAuthorizationForRepositoryCreation = false, bool HasUserAuthorization = false, string? AuthorizedGitHubLogin = null, string? RepositoryCreationMessage = null);
@@ -2277,12 +2682,21 @@ namespace Rosenvall.DevOps.Api
     public sealed record SyncGitHubRepositoryRequest(Guid? RepositoryId = null, string? Owner = null, string? Name = null, bool Private = true, string? Description = null, long? InstallationId = null, string? ImplementationProfile = null, bool CreateNew = false, string? RemoteUrl = null, string? WebUrl = null, string? DefaultBranch = null, string? ImplementationWorkflow = null);
     public sealed record UpsertBoardTeamAccessRequest(string Role);
     public sealed record CreateBoardSecretRequest(string Key, string Value, Guid? RepositoryId = null);
-    public sealed record CreateWorkItemRequest(Guid BoardId, string Type, string Title, string Description, string Status, string Priority, string? Assignee);
-    public sealed record UpdateWorkItemRequest(string Title, string Description, string Type, string Status, string Priority, string? Assignee);
+    public sealed record CreateWorkItemRequest(Guid BoardId, string Type, string Title, string Description, string Status, string Priority, string? Assignee, Guid? ParentWorkItemId = null, bool IsBug = false);
+    public sealed record UpdateWorkItemRequest(string Title, string Description, string Type, string Status, string Priority, string? Assignee, Guid? ParentWorkItemId = null, bool IsBug = false);
+    public sealed record CreateChildWorkItemRequest(string Type, string Title, string Description, string Status, string Priority, string? Assignee, bool IsBug = false);
+    public sealed record UpdateWorkItemHierarchyRequest(Guid? ParentWorkItemId);
+    public sealed record WorkItemHierarchyNodeDto(WorkItemSummaryDto Item, IReadOnlyList<WorkItemHierarchyNodeDto> Children);
     public sealed record MoveWorkItemRequest(string Status, int SortOrder);
     public sealed record AddCommentRequest(string Author, string Kind, string Body);
     public sealed record UpdateCommentRequest(string Actor, string Body);
+    public sealed record CreateAiPlanReviewCommentRequest(string AnchorKey, string QuotedText, string Body);
+    public sealed record UpdateAiPlanReviewCommentRequest(string? Body = null, string? Status = null);
+    public sealed record CreatePullRequestReviewCommentRequest(string FilePath, string Side, int LineNumber, string DiffLine, string Body);
+    public sealed record UpdatePullRequestReviewCommentRequest(string? Body = null, string? Status = null);
+    public sealed record StartPullRequestReviewFixRequest(string Actor, string? ReasoningEffort = null);
     public sealed record StartAiPlanRequest(string Provider, string Model, string? ReasoningEffort = null);
+    public sealed record ReviseAiPlanRequest(string Message, string Provider, string Model, string? ReasoningEffort = null, Guid? AiRunId = null);
     public sealed record ApproveAiRunRequest(string ApprovedBy, string? ReasoningEffort = null);
     public sealed record DiscardAiRunRequest(string DiscardedBy);
     public sealed record ApprovePullRequestRequest(string ApprovedBy);
@@ -2732,7 +3146,7 @@ namespace Rosenvall.DevOps.Api
                                  else
                                    auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${ROSENVALL_GIT_TOKEN}@github.com/#")"
                                  fi
-                                 git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
                                  cd "$workspace/repo"
                                   git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                   git config user.name "Rosenvall DevOps"
@@ -2811,9 +3225,14 @@ namespace Rosenvall.DevOps.Api
                                    pr_payload="{\"title\":\"$pr_title\",\"head\":\"$pr_head\",\"base\":\"$pr_base\",\"body\":\"Generated by Rosenvall DevOps.\"}"
                                    forgejo_auth="$(printf '%s:%s' "$ROSENVALL_LOCAL_GIT_USERNAME" "$ROSENVALL_GIT_TOKEN" | base64 | tr -d '\n')"
                                    pr_response="$(curl -sS -X POST "$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Basic $forgejo_auth" -H "Accept: application/json" -H "Content-Type: application/json" -d "$pr_payload")"
-                                   pr_url="$(printf '%s' "$pr_response" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
                                    pr_number="$(printf '%s' "$pr_response" | sed -n 's/.*"number":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
                                    pr_state="$(printf '%s' "$pr_response" | sed -n 's/.*"state":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                                   if [ -n "$pr_number" ]; then
+                                     pr_base_url="${ROSENVALL_FORGEJO_API_BASE_URL%/api/v1}"
+                                     pr_url="$pr_base_url/$ROSENVALL_REPOSITORY/pulls/$pr_number"
+                                   else
+                                     pr_url="$(printf '%s' "$pr_response" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                                   fi
                                  else
                                    repo_owner="${ROSENVALL_REPOSITORY%%/*}"
                                    existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
@@ -2974,11 +3393,11 @@ namespace Rosenvall.DevOps.Api
                              securityContext:
                                runAsNonRoot: true
                                runAsUser: 1000
-                                 runAsGroup: 1000
-                                 allowPrivilegeEscalation: false
-                                 capabilities:
-                                   drop:
-                                     - ALL
+                               runAsGroup: 1000
+                               allowPrivilegeEscalation: false
+                               capabilities:
+                                 drop:
+                                   - ALL
                              env:
                    {{githubTokenEnv}}
                                - name: ROSENVALL_GIT_TOKEN
@@ -3022,7 +3441,7 @@ namespace Rosenvall.DevOps.Api
                                  else
                                    auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${ROSENVALL_GIT_TOKEN}@github.com/#")"
                                  fi
-                                 git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
                                  cd "$workspace/repo"
                                  git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                  git config user.name "Rosenvall DevOps"
@@ -3053,9 +3472,14 @@ namespace Rosenvall.DevOps.Api
                                    pr_payload="{\"title\":\"$pr_title\",\"head\":\"$pr_head\",\"base\":\"$pr_base\",\"body\":\"$pr_body\"}"
                                    forgejo_auth="$(printf '%s:%s' "$ROSENVALL_LOCAL_GIT_USERNAME" "$ROSENVALL_GIT_TOKEN" | base64 | tr -d '\n')"
                                    pr_response="$(curl -sS -X POST "$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Basic $forgejo_auth" -H "Accept: application/json" -H "Content-Type: application/json" -d "$pr_payload")"
-                                   pr_url="$(printf '%s' "$pr_response" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
                                    pr_number="$(printf '%s' "$pr_response" | sed -n 's/.*"number":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
                                    pr_state="$(printf '%s' "$pr_response" | sed -n 's/.*"state":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                                   if [ -n "$pr_number" ]; then
+                                     pr_base_url="${ROSENVALL_FORGEJO_API_BASE_URL%/api/v1}"
+                                     pr_url="$pr_base_url/$ROSENVALL_REPOSITORY/pulls/$pr_number"
+                                   else
+                                     pr_url="$(printf '%s' "$pr_response" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                                   fi
                                  else
                                    repo_owner="${ROSENVALL_REPOSITORY%%/*}"
                                    existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
@@ -3126,6 +3550,235 @@ namespace Rosenvall.DevOps.Api
 
         private static string NormalizeProvider(string value) =>
             value.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) ? "LocalGit" : "GitHub";
+
+        private static string Escape(string? value) =>
+            (value ?? "")
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal)
+                .Replace("\t", "\\t", StringComparison.Ordinal);
+    }
+
+    public static class RepositoryPullRequestReviewFixJobManifestRenderer
+    {
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, IReadOnlyList<PullRequestReviewCommentDto> comments, string model, string? reasoningEffort, string githubSecretName, AiSessionDto? aiSession = null, string? sandboxMode = null, string? forgejoApiBaseUrl = null, string? localGitUsername = null)
+        {
+            var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, context);
+            var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
+            var forgejoApi = string.IsNullOrWhiteSpace(forgejoApiBaseUrl) ? "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/api/v1" : forgejoApiBaseUrl.Trim().TrimEnd('/');
+            var forgejoUser = string.IsNullOrWhiteSpace(localGitUsername) ? "rdo" : localGitUsername.Trim();
+            var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
+            var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, aiRun, context, comments)));
+            var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
+                ? $"codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
+                : $"codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
+            return $$"""
+                   apiVersion: batch/v1
+                   kind: Job
+                   metadata:
+                     name: {{jobName}}
+                     namespace: {{RepositoryImplementationJobManifestRenderer.Namespace}}
+                     labels:
+                       app.kubernetes.io/part-of: rosenvall-devops-implementation
+                       rosenvall.devops/work-item: {{SafeName(context.Item.Key)}}
+                   spec:
+                     backoffLimit: 0
+                     activeDeadlineSeconds: 3600
+                     template:
+                       metadata:
+                         labels:
+                           app.kubernetes.io/name: {{jobName}}
+                       spec:
+                         affinity:
+                           podAffinity:
+                             requiredDuringSchedulingIgnoredDuringExecution:
+                               - labelSelector:
+                                   matchLabels:
+                                     app.kubernetes.io/name: rosenvall-devops-api
+                                 topologyKey: kubernetes.io/hostname
+                         automountServiceAccountToken: false
+                         restartPolicy: Never
+                         securityContext:
+                           fsGroup: 1000
+                           seccompProfile:
+                             type: RuntimeDefault
+                         volumes:
+                           - name: codex-home
+                             emptyDir: {}
+                           - name: codex-home-source
+                             persistentVolumeClaim:
+                               claimName: rosenvall-devops-codex-home
+                         initContainers:
+                           - name: prepare-codex-home
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               runAsUser: 0
+                               runAsGroup: 0
+                               allowPrivilegeEscalation: false
+                             volumeMounts:
+                               - name: codex-home
+                                 mountPath: /app/codex-home
+                               - name: codex-home-source
+                                 mountPath: /codex-home-source
+                                 readOnly: true
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 mkdir -p /app/codex-home
+                                 for file in auth.json config.toml installation_id models_cache.json; do
+                                   if [ -f "/codex-home-source/$file" ]; then
+                                     cp -a "/codex-home-source/$file" "/app/codex-home/$file"
+                                   fi
+                                 done
+                                 mkdir -p /app/codex-home/tmp
+                                 chown -R 1000:1000 /app/codex-home
+                                 chmod 700 /app/codex-home/tmp
+                         containers:
+                           - name: runner
+                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             imagePullPolicy: Always
+                             securityContext:
+                               runAsNonRoot: true
+                               runAsUser: 1000
+                               runAsGroup: 1000
+                               allowPrivilegeEscalation: false
+                               capabilities:
+                                 drop:
+                                   - ALL
+                             volumeMounts:
+                               - name: codex-home
+                                 mountPath: /app/codex-home
+                             env:
+                               - name: ROSENVALL_GIT_TOKEN
+                                 valueFrom:
+                                   secretKeyRef:
+                                     name: {{githubSecretName}}
+                                     key: token
+                               - name: HOME
+                                 value: /home/ubuntu
+                               - name: USER
+                                 value: ubuntu
+                               - name: SHELL
+                                 value: /bin/bash
+                               - name: CODEX_HOME
+                                 value: /app/codex-home
+                               - name: CODEX_MODEL
+                                 value: "{{Escape(model)}}"
+                               - name: CODEX_REASONING_EFFORT
+                                 value: "{{Escape(CodexCliArguments.NormalizeReasoningEffort(reasoningEffort) ?? "high")}}"
+                               - name: ROSENVALL_REPOSITORY_URL
+                                 value: "{{Escape(repository.RemoteUrl)}}"
+                               - name: ROSENVALL_REPOSITORY
+                                 value: "{{Escape(ownerRepo)}}"
+                               - name: ROSENVALL_FORGEJO_API_BASE_URL
+                                 value: "{{Escape(forgejoApi)}}"
+                               - name: ROSENVALL_LOCAL_GIT_USERNAME
+                                 value: "{{Escape(forgejoUser)}}"
+                               - name: ROSENVALL_BRANCH
+                                 value: "{{Escape(run.Branch)}}"
+                               - name: ROSENVALL_WORK_ITEM_KEY
+                                 value: "{{Escape(context.Item.Key)}}"
+                               - name: ROSENVALL_WORK_ITEM_TITLE
+                                 value: "{{Escape(context.Item.Title)}}"
+                               - name: ROSENVALL_PULL_REQUEST_URL
+                                 value: "{{Escape(run.PullRequestUrl)}}"
+                               - name: ROSENVALL_PULL_REQUEST_NUMBER
+                                 value: "{{run.PullRequestNumber?.ToString(CultureInfo.InvariantCulture) ?? ""}}"
+                               - name: ROSENVALL_PROMPT_B64
+                                 value: "{{prompt}}"
+                               - name: ROSENVALL_CODEX_SESSION_ID
+                                 value: "{{Escape(aiSession?.ProviderSessionId)}}"
+                             command:
+                               - sh
+                               - -lc
+                               - |
+                                 set -eu
+                                 workspace="/tmp/rosenvall-review-fix-workspace"
+                                 mkdir -p "$workspace"
+                                 echo "RDO_STEP=Cloning"
+                                 auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#://#://${ROSENVALL_LOCAL_GIT_USERNAME}:${ROSENVALL_GIT_TOKEN}@#")"
+                                 git clone --depth 1 --branch "$ROSENVALL_BRANCH" "$auth_remote" "$workspace/repo"
+                                 cd "$workspace/repo"
+                                 git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
+                                 git config user.name "Rosenvall DevOps"
+                                 git config user.email "devops@rosenvall.se"
+                                 printf '%s' "$ROSENVALL_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
+                                 echo "RDO_STEP=FixingReviewComments"
+                                 repository_token_for_runner="$ROSENVALL_GIT_TOKEN"
+                                 unset GITHUB_TOKEN
+                                 codex_log="$workspace/codex-output.log"
+                                 set +e
+                                 {{codexCommand}} > "$codex_log" 2>&1
+                                 codex_status=$?
+                                 set -e
+                                 cat "$codex_log"
+                                 if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
+                                 if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
+                                 ROSENVALL_GIT_TOKEN="$repository_token_for_runner"
+                                 export ROSENVALL_GIT_TOKEN
+                                 echo "RDO_STEP=Validating"
+                                 git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/changed-files.txt"
+                                 if [ ! -s "$workspace/changed-files.txt" ]; then echo "RDO_FAILURE=No changes produced"; exit 20; fi
+                                 git add -A
+                                 commit_title="$(printf 'Address review comments for %s %s' "$ROSENVALL_WORK_ITEM_KEY" "$ROSENVALL_WORK_ITEM_TITLE" | tr '\r\n' '  ')"
+                                 git commit -m "$commit_title"
+                                 commit="$(git rev-parse HEAD)"
+                                 echo "RDO_COMMIT=$commit"
+                                 echo "RDO_STEP=Pushing"
+                                 git remote set-url origin "$auth_remote"
+                                 git push origin "$ROSENVALL_BRANCH"
+                                 echo "RDO_STEP=PullRequestReady"
+                                 echo "RDO_PULL_REQUEST_URL=$ROSENVALL_PULL_REQUEST_URL"
+                                 echo "RDO_PULL_REQUEST_NUMBER=$ROSENVALL_PULL_REQUEST_NUMBER"
+                                 echo "RDO_PULL_REQUEST_STATE=open"
+                   """;
+        }
+
+        private static string BuildPrompt(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, IReadOnlyList<PullRequestReviewCommentDto> comments)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("You are updating an existing LocalGit pull request branch for Rosenvall DevOps.");
+            builder.AppendLine("Address the unresolved RDO review comments below by editing the checked-out repository.");
+            builder.AppendLine("Do not create a new pull request, do not resolve review comments, and leave file changes uncommitted; the runner owns commit and push.");
+            builder.AppendLine();
+            builder.AppendLine($"Work item: {run.WorkItemKey} {run.WorkItemTitle}");
+            builder.AppendLine($"Repository: {repository.Provider} {repository.Owner}/{repository.Name}");
+            builder.AppendLine($"Branch: {run.Branch}");
+            builder.AppendLine($"AI plan: {aiRun.Plan}");
+            if (!string.IsNullOrWhiteSpace(context.BoardContext?.AiContext?.AgentInstructions))
+            {
+                builder.AppendLine();
+                builder.AppendLine("Board agent instructions:");
+                builder.AppendLine(context.BoardContext.AiContext.AgentInstructions);
+            }
+
+            builder.AppendLine();
+            builder.AppendLine("Unresolved review comments:");
+            foreach (var comment in comments.OrderBy(comment => comment.FilePath, StringComparer.OrdinalIgnoreCase).ThenBy(comment => comment.LineNumber))
+            {
+                builder.AppendLine($"- {comment.FilePath}:{comment.LineNumber} ({comment.Side})");
+                builder.AppendLine($"  Diff line: {comment.DiffLine}");
+                builder.AppendLine($"  Comment: {comment.Body}");
+            }
+
+            return builder.ToString();
+        }
+
+        private static string SafeName(string value)
+        {
+            var chars = value.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : '-').ToArray();
+            var normalized = new string(chars).Trim('-');
+            while (normalized.Contains("--", StringComparison.Ordinal))
+            {
+                normalized = normalized.Replace("--", "-", StringComparison.Ordinal);
+            }
+
+            return string.IsNullOrWhiteSpace(normalized) ? "review-fix" : normalized[..Math.Min(normalized.Length, 63)].Trim('-');
+        }
 
         private static string Escape(string? value) =>
             (value ?? "")
@@ -3336,7 +3989,7 @@ namespace Rosenvall.DevOps.Api
                                  json_escape() { printf '%s' "$1" | tr '\r\n' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
                                  echo "RDO_STEP=Cloning"
                                  auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${GITHUB_TOKEN}@github.com/#")"
-                                 git clone --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
                                  cd "$workspace/repo"
                                  git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                  git config user.name "Rosenvall DevOps"
@@ -5809,6 +6462,22 @@ namespace Rosenvall.DevOps.Api
             }
 
             var builder = new StringBuilder();
+            builder.AppendLine($"Work item hierarchy path: {EmptyAsNone(context.Item.HierarchyPath)}");
+            if (context.Parent is not null)
+            {
+                builder.AppendLine($"Parent card: {context.Parent.Key} {context.Parent.Title} ({context.Parent.Type})");
+            }
+
+            if (context.Descendants is { Count: > 0 } descendants)
+            {
+                builder.AppendLine("Child cards:");
+                foreach (var child in descendants.Take(30))
+                {
+                    var marker = child.IsBug ? " bug" : "";
+                    builder.AppendLine($"- {child.Key} {child.Title}: {child.Type}{marker}, status {child.Status}, priority {child.Priority}");
+                }
+            }
+
             builder.AppendLine($"Repository profile: {board.RepositoryProfile}");
             builder.AppendLine($"Implementation workflow: {board.ImplementationWorkflow}");
             if (!string.IsNullOrWhiteSpace(board.PublicHostname))
@@ -5836,6 +6505,40 @@ namespace Rosenvall.DevOps.Api
             }
 
             return builder.ToString().TrimEnd();
+        }
+
+        public static string RenderWorkItemDiscussion(WorkItemDetailDto context)
+        {
+            var humanComments = context.Comments
+                .Where(comment => comment.Kind.Equals("Comment", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(comment => comment.CreatedAt)
+                .TakeLast(20)
+                .ToArray();
+            if (humanComments.Length == 0)
+            {
+                return "none";
+            }
+
+            return string.Join("\n", humanComments.Select(comment => $"- {comment.Author}: {TrimPromptLine(comment.Body, 900)}"));
+        }
+
+        public static string RenderUnresolvedAiPlanReviewComments(WorkItemDetailDto context)
+        {
+            var comments = (context.AiPlanReviewComments ?? [])
+                .Where(comment => !comment.Status.Equals("resolved", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(comment => comment.CreatedAt)
+                .Take(30)
+                .ToArray();
+            if (comments.Length == 0)
+            {
+                return "none";
+            }
+
+            return string.Join("\n", comments.Select(comment =>
+            {
+                var label = comment.AiRunSequenceNumber > 0 ? $"Plan #{comment.AiRunSequenceNumber}" : $"Plan {comment.AiRunId:N}";
+                return $"- {label} {comment.AnchorKey}: \"{TrimPromptLine(comment.QuotedText, 260)}\" - {comment.Author}: {TrimPromptLine(comment.Body, 900)}";
+            }));
         }
 
         public static string RenderImplementationContext(WorkItemDetailDto context)
@@ -5935,6 +6638,12 @@ namespace Rosenvall.DevOps.Api
         {
             var trimmed = string.IsNullOrWhiteSpace(content) ? "No skill content provided." : content.Trim();
             return trimmed.Length <= 1800 ? trimmed : $"{trimmed[..1800].TrimEnd()}\n[truncated]";
+        }
+
+        private static string TrimPromptLine(string value, int maxLength)
+        {
+            var normalized = Regex.Replace(value.Trim(), @"\s+", " ");
+            return normalized.Length <= maxLength ? normalized : $"{normalized[..maxLength].TrimEnd()} [truncated]";
         }
     }
 
@@ -6828,6 +7537,26 @@ namespace Rosenvall.DevOps.Api
                 return null;
             }
 
+            return await GetPullRequestAsync(owner, repo, number, pullRequestUrl, cancellationToken);
+        }
+
+        public async Task<GitHubPullRequestDto?> GetPullRequestAsync(RepositoryDto repository, int pullRequestNumber, string? fallbackUrl, CancellationToken cancellationToken)
+        {
+            if (pullRequestNumber <= 0 || string.IsNullOrWhiteSpace(repository.Name))
+            {
+                return null;
+            }
+
+            var owner = string.IsNullOrWhiteSpace(repository.Owner) ? Owner : repository.Owner!;
+            var repo = repository.Name;
+            var url = string.IsNullOrWhiteSpace(fallbackUrl)
+                ? $"{CloneBaseUrl}/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/pulls/{pullRequestNumber}"
+                : fallbackUrl.Trim();
+            return await GetPullRequestAsync(owner, repo, pullRequestNumber, url, cancellationToken);
+        }
+
+        private async Task<GitHubPullRequestDto?> GetPullRequestAsync(string owner, string repo, int number, string fallbackUrl, CancellationToken cancellationToken)
+        {
             using var request = CreateForgejoRequest(HttpMethod.Get, $"{ApiBaseUrl(configuration)}/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/pulls/{number}");
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
@@ -6837,7 +7566,45 @@ namespace Rosenvall.DevOps.Api
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-            return PullRequestFromJson(document.RootElement, owner, repo, number, pullRequestUrl);
+            return PullRequestFromJson(document.RootElement, owner, repo, number, fallbackUrl);
+        }
+
+        public async Task<IReadOnlyList<PullRequestDiffFileDto>?> GetPullRequestFilesAsync(GitHubPullRequestDto pullRequest, CancellationToken cancellationToken)
+        {
+            using var request = CreateForgejoRequest(HttpMethod.Get, $"{ApiBaseUrl(configuration)}/repos/{Uri.EscapeDataString(pullRequest.Owner)}/{Uri.EscapeDataString(pullRequest.Repository)}/pulls/{pullRequest.Number}/files?limit=200");
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return document.RootElement.EnumerateArray()
+                .Select(file => new PullRequestDiffFileDto(
+                    NormalizeText(FirstNonEmpty(GetString(file, "filename"), GetString(file, "path"), GetString(file, "name")), "unknown"),
+                    GetString(file, "status"),
+                    GetInt32(file, "additions"),
+                    GetInt32(file, "deletions"),
+                    FirstNonEmpty(GetString(file, "previous_filename"), GetString(file, "previousPath"))))
+                .Where(file => !string.IsNullOrWhiteSpace(file.Path))
+                .ToArray();
+        }
+
+        public async Task<string?> GetPullRequestDiffAsync(GitHubPullRequestDto pullRequest, CancellationToken cancellationToken)
+        {
+            using var request = CreateForgejoRequest(HttpMethod.Get, $"{ApiBaseUrl(configuration)}/repos/{Uri.EscapeDataString(pullRequest.Owner)}/{Uri.EscapeDataString(pullRequest.Repository)}/pulls/{pullRequest.Number}.diff");
+            request.Headers.Accept.Clear();
+            request.Headers.Accept.ParseAdd("text/plain");
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            return response.IsSuccessStatusCode
+                ? await response.Content.ReadAsStringAsync(cancellationToken)
+                : null;
         }
 
         public async Task<bool> MergePullRequestAsync(GitHubPullRequestDto pullRequest, CancellationToken cancellationToken)
@@ -6930,7 +7697,10 @@ namespace Rosenvall.DevOps.Api
             var headRef = root.TryGetProperty("head", out var head) && head.ValueKind == JsonValueKind.Object
                 ? GetString(head, "ref")
                 : null;
-            return new GitHubPullRequestDto(fallbackOwner, fallbackRepo, number, state, merged, htmlUrl, diffUrl, headRef);
+            var baseRef = root.TryGetProperty("base", out var baseBranch) && baseBranch.ValueKind == JsonValueKind.Object
+                ? GetString(baseBranch, "ref")
+                : null;
+            return new GitHubPullRequestDto(fallbackOwner, fallbackRepo, number, state, merged, htmlUrl, diffUrl, headRef, baseRef);
         }
 
         private static bool TryResolvePullRequest(RepositoryDto repository, string pullRequestUrl, out string owner, out string repo, out int number)
@@ -7000,6 +7770,14 @@ namespace Rosenvall.DevOps.Api
             element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
                 ? value.GetString() ?? ""
                 : "";
+
+        private static string FirstNonEmpty(params string[] values) =>
+            values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
+
+        private static int? GetInt32(JsonElement element, string property) =>
+            element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var parsed)
+                ? parsed
+                : null;
 
         private static string NormalizeText(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
@@ -8322,8 +9100,11 @@ namespace Rosenvall.DevOps.Api
               Status: {{context.Item.Status}}
               Priority: {{context.Item.Priority}}
               Description: {{context.Description}}
-              Comments:
-              {{string.Join("\n", context.Comments.Select(comment => $"- {comment.Author} ({comment.Kind}): {comment.Body}"))}}
+              Work item discussion:
+              {{PromptContextRenderer.RenderWorkItemDiscussion(context)}}
+
+              Unresolved plan review comments:
+              {{PromptContextRenderer.RenderUnresolvedAiPlanReviewComments(context)}}
 
               Board and repository context:
               {{PromptContextRenderer.RenderPlanningContext(context)}}
@@ -8505,8 +9286,11 @@ namespace Rosenvall.DevOps.Api
               Status: {{context.Item.Status}}
               Priority: {{context.Item.Priority}}
               Description: {{context.Description}}
-              Comments:
-              {{string.Join("\n", context.Comments.Select(comment => $"- {comment.Author} ({comment.Kind}): {comment.Body}"))}}
+              Work item discussion:
+              {{PromptContextRenderer.RenderWorkItemDiscussion(context)}}
+
+              Unresolved plan review comments:
+              {{PromptContextRenderer.RenderUnresolvedAiPlanReviewComments(context)}}
 
               Board and repository context:
               {{PromptContextRenderer.RenderPlanningContext(context)}}
@@ -9048,7 +9832,7 @@ namespace Rosenvall.DevOps.Api
         public async Task<IReadOnlyList<PreviewSourceFile>> GenerateSourceAsync(string model, string? reasoningEffort, AiRun run, WorkItemDetailDto context, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
         {
             var jobName = PreviewSourceJobManifestRenderer.JobName(run, context);
-            var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:PreviewSourceJobTimeoutSeconds", configuration.GetValue("Ai:Codex:ImplementationTimeoutSeconds", 600)));
+            var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Codex:PreviewSourceJobTimeoutSeconds", 600));
             var runnerImage = configuration["Ai:Codex:KubernetesRunnerImage"];
             await ReportTerminalAsync(onTerminalLine, "system", $"Checking Kubernetes preview source job {jobName}.");
 
@@ -9135,10 +9919,19 @@ namespace Rosenvall.DevOps.Api
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             }
 
+            if (await TryReadResultAsync(
+                    run,
+                    onTerminalLine,
+                    cancellationToken,
+                    $"Preview source job {jobName} reached the timeout window, but an existing result was found. Adopting it instead of starting Codex again.") is { } lateFiles)
+            {
+                return lateFiles;
+            }
+
             throw new AiPlanProviderUnavailableException($"Preview source job {jobName} timed out after {timeout.TotalSeconds:0} seconds; no preview was deployed.");
         }
 
-        private async Task<IReadOnlyList<PreviewSourceFile>?> TryReadResultAsync(AiRun run, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken)
+        private async Task<IReadOnlyList<PreviewSourceFile>?> TryReadResultAsync(AiRun run, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken, string? message = null)
         {
             var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
             if (!result.Succeeded)
@@ -9146,7 +9939,7 @@ namespace Rosenvall.DevOps.Api
                 return null;
             }
 
-            await ReportTerminalAsync(onTerminalLine, "system", "Found existing preview source result. Reusing it instead of starting Codex again.");
+            await ReportTerminalAsync(onTerminalLine, "system", message ?? "Found existing preview source result. Reusing it instead of starting Codex again.");
             return PreviewSourceJobResultParser.ParseConfigMapJson(result.Message);
         }
 
@@ -9513,7 +10306,11 @@ namespace Rosenvall.DevOps.Api
         private readonly List<PreviewEventDto> _previewEvents = [];
         private readonly List<PipelineRunDto> _pipelineRuns = [];
         private readonly List<ImplementationRunDto> _implementationRuns = [];
+        private readonly List<EpicRunDto> _epicRuns = [];
+        private readonly List<EpicGoalRunDto> _epicGoalRuns = [];
         private readonly List<RepositoryCleanupRunDto> _repositoryCleanupRuns = [];
+        private readonly List<PullRequestReviewCommentDto> _pullRequestReviewComments = [];
+        private readonly List<AiPlanReviewCommentDto> _aiPlanReviewComments = [];
         private readonly List<TimelineEventDto> _timelineEvents = [];
         private readonly List<UserDto> _users = [];
         private readonly List<TeamDto> _teams = [];
@@ -10750,6 +11547,161 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public WorkItemHierarchyNodeDto? GetWorkItemTree(Guid workItemId)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                var root = RootFor(item) ?? item;
+                return ToHierarchyNode(root);
+            }
+        }
+
+        public EpicRunDto? StartEpicRun(Guid workItemId, string actor)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                var root = RootFor(item) ?? item;
+                var featureCards = _items
+                    .Where(child => child.ParentWorkItemId == root.Id && child.Type.Equals("Feature", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(child => child.SortOrder)
+                    .ThenBy(child => child.Key)
+                    .ToArray();
+                if (featureCards.Length == 0)
+                {
+                    featureCards = DescendantsFor(root)
+                        .Where(child => child.Type.Equals("Feature", StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(child => child.SortOrder)
+                        .ThenBy(child => child.Key)
+                        .ToArray();
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var children = featureCards.Select(feature =>
+                {
+                    var approvedPlan = _aiRuns
+                        .Where(run => run.WorkItemId == feature.Id && run.Status == AiRunStatus.Approved)
+                        .OrderByDescending(run => run.CreatedAt)
+                        .FirstOrDefault();
+                    return new EpicRunChildDto(
+                        feature.Id,
+                        feature.Key,
+                        feature.Title,
+                        "Feature agent",
+                        approvedPlan is null ? "Queued" : "Ready",
+                        approvedPlan?.Id,
+                        null,
+                        approvedPlan is null ? "Feature agent is queued and waiting for an approved child plan." : $"Feature agent can run from plan #{approvedPlan.SequenceNumber}.",
+                        now);
+                }).ToArray();
+                var run = new EpicRunDto(
+                    Guid.NewGuid(),
+                    root.Id,
+                    root.Key,
+                    root.Title,
+                    children.Length == 0 ? "Blocked" : "Running",
+                    NormalizeText(actor, "system"),
+                    now,
+                    now,
+                    children,
+                    children.Length == 0 ? "No child features exist under this epic yet." : $"Started {children.Length} feature agent orchestration run(s).",
+                    children.Length == 0 ? "No child features exist under this epic yet." : null);
+                _epicRuns.Add(run);
+                AddTimelineForItem(root, "EpicRunStarted", root.Key, run.Summary ?? "Epic orchestration started.", actor);
+                Persist();
+                return run;
+            }
+        }
+
+        public EpicGoalRunDto? StartEpicGoal(Guid workItemId, string actor)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                if (item is null)
+                {
+                    return null;
+                }
+
+                var root = RootFor(item) ?? item;
+                var active = _epicGoalRuns
+                    .Where(goal => goal.RootWorkItemId == root.Id && goal.Status is "Running" or "Queued")
+                    .OrderByDescending(goal => goal.UpdatedAt)
+                    .FirstOrDefault();
+                if (active is not null)
+                {
+                    return active;
+                }
+
+                var run = _epicRuns
+                    .Where(entry => entry.RootWorkItemId == root.Id && entry.Status is "Running" or "Queued" or "Blocked")
+                    .OrderByDescending(entry => entry.UpdatedAt)
+                    .FirstOrDefault() ?? StartEpicRun(root.Id, actor);
+                var now = DateTimeOffset.UtcNow;
+                var goal = new EpicGoalRunDto(
+                    Guid.NewGuid(),
+                    root.Id,
+                    run?.Id,
+                    run?.Status == "Blocked" ? "Blocked" : "Running",
+                    NormalizeText(actor, "system"),
+                    now,
+                    now,
+                    run?.Summary,
+                    run?.FailureReason);
+                _epicGoalRuns.Add(goal);
+                AddTimelineForItem(root, "EpicGoalStarted", root.Key, $"Started epic goal for {root.Title}.", actor);
+                Persist();
+                return goal;
+            }
+        }
+
+        public EpicGoalRunDto? GetEpicGoal(Guid goalId)
+        {
+            lock (_lock)
+            {
+                return _epicGoalRuns.SingleOrDefault(goal => goal.Id == goalId);
+            }
+        }
+
+        public EpicGoalRunDto? CancelEpicGoal(Guid goalId, string actor)
+        {
+            lock (_lock)
+            {
+                var index = _epicGoalRuns.FindIndex(goal => goal.Id == goalId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _epicGoalRuns[index];
+                var updated = existing with
+                {
+                    Status = "Cancelled",
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    Summary = $"Cancelled by {NormalizeText(actor, "system")}."
+                };
+                _epicGoalRuns[index] = updated;
+                if (_items.SingleOrDefault(item => item.Id == updated.RootWorkItemId) is { } root)
+                {
+                    AddTimelineForItem(root, "EpicGoalCancelled", root.Key, updated.Summary, actor);
+                }
+
+                Persist();
+                return updated;
+            }
+        }
+
         public WorkItemSummaryDto? CreateWorkItem(CreateWorkItemRequest request)
         {
             lock (_lock)
@@ -10760,16 +11712,36 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
+                var (type, isBug) = NormalizeWorkItemTypeAndBug(request.Type, request.IsBug);
+                if (!CanAssignWorkItemParentWithoutLock(Guid.Empty, request.BoardId, type, request.ParentWorkItemId))
+                {
+                    return null;
+                }
+
                 var index = _nextTaskNumber++;
                 var sortOrder = _items.Where(i => i.BoardId == request.BoardId && i.Status == request.Status)
                     .Select(i => i.SortOrder)
                     .DefaultIfEmpty(-1)
                     .Max() + 1;
-                var item = new WorkItemRecord(Guid.NewGuid(), request.BoardId, $"TASK-{index}", request.Type, request.Title, request.Description, request.Status, request.Priority, request.Assignee, sortOrder);
+                var item = new WorkItemRecord(Guid.NewGuid(), request.BoardId, $"TASK-{index}", type, request.Title, request.Description, request.Status, request.Priority, request.Assignee, sortOrder, request.ParentWorkItemId, isBug);
                 _items.Add(item);
                 AddTimelineForItem(item, "CardCreated", item.Key, $"Created {item.Title}.", "system");
                 Persist();
                 return ToSummary(item);
+            }
+        }
+
+        public WorkItemSummaryDto? CreateChildWorkItem(Guid parentWorkItemId, CreateChildWorkItemRequest request)
+        {
+            lock (_lock)
+            {
+                var parent = _items.SingleOrDefault(item => item.Id == parentWorkItemId);
+                if (parent is null)
+                {
+                    return null;
+                }
+
+                return CreateWorkItemWithoutLock(new CreateWorkItemRequest(parent.BoardId, request.Type, request.Title, request.Description, request.Status, request.Priority, request.Assignee, parent.Id, request.IsBug), "system");
             }
         }
 
@@ -10783,9 +11755,18 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
+                var (type, isBug) = NormalizeWorkItemTypeAndBug(request.Type, request.IsBug);
+                if (!CanAssignWorkItemParentWithoutLock(item.Id, item.BoardId, type, request.ParentWorkItemId) ||
+                    !CanKeepExistingChildrenWithoutLock(item.Id, type))
+                {
+                    return null;
+                }
+
                 item.Title = request.Title.Trim();
                 item.Description = request.Description.Trim();
-                item.Type = request.Type.Trim();
+                item.Type = type;
+                item.IsBug = isBug;
+                item.ParentWorkItemId = request.ParentWorkItemId;
                 item.Priority = request.Priority.Trim();
                 item.Assignee = string.IsNullOrWhiteSpace(request.Assignee) ? null : request.Assignee.Trim();
                 if (!string.Equals(item.Status, request.Status, StringComparison.Ordinal))
@@ -10799,6 +11780,24 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 AddTimelineForItem(item, "CardUpdated", item.Key, $"Updated {item.Title}.", "system");
+                Persist();
+                return ToSummary(item);
+            }
+        }
+
+        public WorkItemSummaryDto? UpdateWorkItemHierarchy(Guid workItemId, UpdateWorkItemHierarchyRequest request)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(i => i.Id == workItemId);
+                if (item is null ||
+                    !CanAssignWorkItemParentWithoutLock(item.Id, item.BoardId, item.Type, request.ParentWorkItemId))
+                {
+                    return null;
+                }
+
+                item.ParentWorkItemId = request.ParentWorkItemId;
+                AddTimelineForItem(item, "CardHierarchyUpdated", item.Key, request.ParentWorkItemId is null ? $"Removed parent from {item.Title}." : $"Moved {item.Title} under a parent card.", "system");
                 Persist();
                 return ToSummary(item);
             }
@@ -10843,13 +11842,21 @@ namespace Rosenvall.DevOps.Api
                     AddPreviewEvent(item, preview, "Deleted", actor, $"Preview resources deleted for {item.Key}.");
                 }
 
+                foreach (var child in _items.Where(child => child.ParentWorkItemId == workItemId))
+                {
+                    child.ParentWorkItemId = null;
+                }
+
                 _items.Remove(item);
                 _comments.RemoveAll(c => c.WorkItemId == workItemId);
                 _aiRuns.RemoveAll(r => r.WorkItemId == workItemId);
+                _aiPlanReviewComments.RemoveAll(comment => comment.WorkItemId == workItemId);
                 _aiSessions.RemoveAll(session => session.WorkItemId == workItemId);
                 _previews.RemoveAll(p => p.WorkItemId == workItemId);
                 _development.RemoveAll(d => d.WorkItemId == workItemId);
                 _implementationRuns.RemoveAll(run => run.WorkItemId == workItemId);
+                _epicRuns.RemoveAll(run => run.RootWorkItemId == workItemId || run.Children.Any(child => child.WorkItemId == workItemId));
+                _epicGoalRuns.RemoveAll(run => run.RootWorkItemId == workItemId);
                 _repositoryCleanupRuns.RemoveAll(run => run.WorkItemId == workItemId);
                 _pipelineRuns.RemoveAll(run => run.WorkItemId == workItemId);
                 AddTimelineForItem(item, "CardDeleted", item.Key, $"Deleted {item.Title}.", actor);
@@ -10874,10 +11881,13 @@ namespace Rosenvall.DevOps.Api
                 _items.RemoveAll(item => item.BoardId == boardId);
                 _comments.RemoveAll(comment => itemIds.Contains(comment.WorkItemId));
                 _aiRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _aiPlanReviewComments.RemoveAll(comment => itemIds.Contains(comment.WorkItemId));
                 _aiSessions.RemoveAll(session => itemIds.Contains(session.WorkItemId));
                 _previews.RemoveAll(preview => itemIds.Contains(preview.WorkItemId));
                 _development.RemoveAll(development => itemIds.Contains(development.WorkItemId));
                 _implementationRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _epicRuns.RemoveAll(run => itemIds.Contains(run.RootWorkItemId) || run.Children.Any(child => itemIds.Contains(child.WorkItemId)));
+                _epicGoalRuns.RemoveAll(run => itemIds.Contains(run.RootWorkItemId));
                 _repositoryCleanupRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
                 _pipelineRuns.RemoveAll(run => run.BoardId == boardId || run.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
                 _previewEvents.RemoveAll(entry => entry.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
@@ -10964,7 +11974,22 @@ namespace Rosenvall.DevOps.Api
                     _previewEvents.Where(entry => entry.WorkItemId == item.Id).OrderBy(entry => entry.CreatedAt).ToArray(),
                     PreviewImplementationRunsAwaitingRecoveryForWorkItem(item.Id),
                     new BoardPlanningContextDto(item.BoardId, BoardImplementationProfile(item.BoardId), GitOpsSettingsFor(item.BoardId), AiContextFor(item.BoardId), PrimaryRepositoryProfileFor(item.BoardId), BoardImplementationWorkflow(item.BoardId), _boards.Single(board => board.Id == item.BoardId).PublicHostname),
-                    _repositoryCleanupRuns.Where(run => run.WorkItemId == item.Id).OrderByDescending(run => run.CreatedAt).ToArray());
+                    _repositoryCleanupRuns.Where(run => run.WorkItemId == item.Id).OrderByDescending(run => run.CreatedAt).ToArray(),
+                    _aiPlanReviewComments.Where(comment => comment.WorkItemId == item.Id).OrderBy(comment => comment.CreatedAt).ToArray(),
+                    item.ParentWorkItemId is { } parentId ? _items.SingleOrDefault(parent => parent.Id == parentId) is { } parent ? ToSummary(parent) : null : null,
+                    _items.Where(child => child.ParentWorkItemId == item.Id).OrderBy(child => child.SortOrder).ThenBy(child => child.Key).Select(ToSummary).ToArray(),
+                    AncestorsFor(item).Select(ToSummary).ToArray(),
+                    DescendantsFor(item).Select(ToSummary).ToArray(),
+                    _epicRuns.Where(run => run.RootWorkItemId == (RootFor(item)?.Id ?? item.Id)).OrderByDescending(run => run.CreatedAt).ToArray(),
+                    _epicGoalRuns.Where(goal => goal.RootWorkItemId == (RootFor(item)?.Id ?? item.Id)).OrderByDescending(goal => goal.CreatedAt).ToArray());
+            }
+        }
+
+        public AiRun? GetAiRun(Guid aiRunId)
+        {
+            lock (_lock)
+            {
+                return _aiRuns.SingleOrDefault(run => run.Id == aiRunId);
             }
         }
 
@@ -11105,6 +12130,11 @@ namespace Rosenvall.DevOps.Api
                      !repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase)))
                 {
                     return null;
+                }
+
+                if (HasUnresolvedAiPlanReviewCommentsWithoutLock(aiRun.Id))
+                {
+                    throw new InvalidOperationException("Resolve all AI plan review comments before starting implementation.");
                 }
 
                 if (aiRun.Status != AiRunStatus.Approved)
@@ -11455,6 +12485,71 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public ImplementationRunDto? StartPullRequestReviewFixRun(Guid workItemId, StartPullRequestReviewFixRequest request)
+        {
+            lock (_lock)
+            {
+                var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+                var context = CurrentLocalPullRequestContextWithoutLock(workItemId);
+                if (item is null || context is null)
+                {
+                    return null;
+                }
+
+                var unresolved = _pullRequestReviewComments
+                    .Where(comment => comment.WorkItemId == workItemId &&
+                        comment.PullRequestNumber == context.Value.PullRequestNumber &&
+                        !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (unresolved.Length == 0)
+                {
+                    throw new InvalidOperationException("There are no unresolved review comments to fix.");
+                }
+
+                var aiRun = _aiRuns
+                    .Where(run => run.WorkItemId == workItemId && run.Status == AiRunStatus.Approved)
+                    .OrderByDescending(run => run.SequenceNumber)
+                    .ThenByDescending(run => run.CreatedAt)
+                    .FirstOrDefault();
+                if (aiRun is null)
+                {
+                    throw new InvalidOperationException("An approved AI plan is required before fixing pull request review comments.");
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var attemptNumber = _implementationRuns.Count(run => run.WorkItemId == item.Id && run.RunKind == "pr-review-fix") + 1;
+                var runDto = new ImplementationRunDto(
+                    Guid.NewGuid(),
+                    context.Value.Repository.Id,
+                    item.Id,
+                    aiRun.Id,
+                    item.Key,
+                    item.Title,
+                    "Queued",
+                    context.Value.Development.Branch,
+                    context.Value.Development.PullRequestUrl,
+                    null,
+                    null,
+                    now,
+                    now,
+                    [
+                        new PreviewTerminalLineDto(now, "system", attemptNumber == 1 ? $"Queued AI review fix for {item.Key}." : $"Queued AI review fix attempt {attemptNumber} for {item.Key}."),
+                        new PreviewTerminalLineDto(now, "system", $"Local pull request #{context.Value.PullRequestNumber}."),
+                        new PreviewTerminalLineDto(now, "system", $"{unresolved.Length} unresolved review comment(s).")
+                    ],
+                    RunKind: "pr-review-fix",
+                    PullRequestProvider: "LocalGit",
+                    PullRequestNumber: context.Value.PullRequestNumber,
+                    PullRequestState: context.Value.Development.PullRequestState ?? "open");
+                _implementationRuns.Add(runDto);
+                EnsureAiSession(item.Id, aiRun.Provider, aiRun.Model, context.Value.Repository.Id, request.ReasoningEffort ?? aiRun.ReasoningEffort);
+                item.AiStatus = "ImplementationRunning";
+                AddTimelineForItem(item, "PullRequestReviewFixQueued", item.Key, $"AI review fix queued for local pull request #{context.Value.PullRequestNumber}.", request.Actor, context.Value.Development.PullRequestUrl);
+                Persist();
+                return runDto;
+            }
+        }
+
         public RepositoryCleanupRunDto? AdoptRepositoryCleanupPullRequest(Guid workItemId, Guid sourceImplementationRunId, string actor, string cleanupPullRequestUrl, string? branch, string? state, bool merged)
         {
             lock (_lock)
@@ -11666,6 +12761,271 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public IReadOnlyList<PullRequestReviewCommentDto> GetPullRequestReviewComments(Guid workItemId, string provider, int pullRequestNumber)
+        {
+            lock (_lock)
+            {
+                return _pullRequestReviewComments
+                    .Where(comment => comment.WorkItemId == workItemId &&
+                        comment.PullRequestNumber == pullRequestNumber &&
+                        string.Equals(comment.PullRequestProvider, provider, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(comment => comment.FilePath, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(comment => comment.LineNumber)
+                    .ThenBy(comment => comment.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public bool HasUnresolvedPullRequestReviewComments(Guid workItemId)
+        {
+            lock (_lock)
+            {
+                return _pullRequestReviewComments.Any(comment =>
+                    comment.WorkItemId == workItemId &&
+                    !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        public IReadOnlyList<PullRequestReviewCommentDto> GetUnresolvedPullRequestReviewComments(Guid workItemId)
+        {
+            lock (_lock)
+            {
+                return _pullRequestReviewComments
+                    .Where(comment => comment.WorkItemId == workItemId &&
+                        !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(comment => comment.FilePath, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(comment => comment.LineNumber)
+                    .ThenBy(comment => comment.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public PullRequestReviewCommentDto? AddPullRequestReviewComment(Guid workItemId, CreatePullRequestReviewCommentRequest request, string actor)
+        {
+            lock (_lock)
+            {
+                var context = CurrentLocalPullRequestContextWithoutLock(workItemId);
+                if (context is null)
+                {
+                    return null;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var comment = new PullRequestReviewCommentDto(
+                    Guid.NewGuid(),
+                    workItemId,
+                    "LocalGit",
+                    context.Value.PullRequestNumber,
+                    NormalizePath(request.FilePath),
+                    NormalizeReviewSide(request.Side),
+                    Math.Max(1, request.LineNumber),
+                    RedactTerminalMessage(NormalizeText(request.DiffLine, "")),
+                    NormalizeText(actor, "user"),
+                    NormalizeText(request.Body, ""),
+                    "open",
+                    now,
+                    now);
+                if (string.IsNullOrWhiteSpace(comment.FilePath) || string.IsNullOrWhiteSpace(comment.Body))
+                {
+                    return null;
+                }
+
+                _pullRequestReviewComments.Add(comment);
+                Persist();
+                return comment;
+            }
+        }
+
+        public PullRequestReviewCommentDto? UpdatePullRequestReviewComment(Guid workItemId, Guid commentId, UpdatePullRequestReviewCommentRequest request, string actor)
+        {
+            lock (_lock)
+            {
+                var index = _pullRequestReviewComments.FindIndex(comment => comment.Id == commentId && comment.WorkItemId == workItemId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _pullRequestReviewComments[index];
+                var normalizedStatus = NormalizeReviewStatus(request.Status, existing.Status);
+                var resolvedNow = string.Equals(normalizedStatus, "resolved", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(existing.Status, "resolved", StringComparison.OrdinalIgnoreCase);
+                var reopened = !string.Equals(normalizedStatus, "resolved", StringComparison.OrdinalIgnoreCase);
+                var updated = existing with
+                {
+                    Body = string.IsNullOrWhiteSpace(request.Body) ? existing.Body : NormalizeText(request.Body, existing.Body),
+                    Status = normalizedStatus,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    ResolvedBy = resolvedNow ? NormalizeText(actor, "user") : reopened ? null : existing.ResolvedBy,
+                    ResolvedAt = resolvedNow ? DateTimeOffset.UtcNow : reopened ? null : existing.ResolvedAt
+                };
+                _pullRequestReviewComments[index] = updated;
+                Persist();
+                return updated;
+            }
+        }
+
+        public bool DeletePullRequestReviewComment(Guid workItemId, Guid commentId)
+        {
+            lock (_lock)
+            {
+                var removed = _pullRequestReviewComments.RemoveAll(comment => comment.Id == commentId && comment.WorkItemId == workItemId) > 0;
+                if (removed)
+                {
+                    Persist();
+                }
+
+                return removed;
+            }
+        }
+
+        public IReadOnlyList<AiPlanReviewCommentDto> GetAiPlanReviewComments(Guid workItemId, Guid aiRunId)
+        {
+            lock (_lock)
+            {
+                return _aiPlanReviewComments
+                    .Where(comment => comment.WorkItemId == workItemId && comment.AiRunId == aiRunId)
+                    .OrderBy(comment => comment.AnchorKey, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(comment => comment.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public bool HasUnresolvedAiPlanReviewComments(Guid aiRunId)
+        {
+            lock (_lock)
+            {
+                return HasUnresolvedAiPlanReviewCommentsWithoutLock(aiRunId);
+            }
+        }
+
+        private bool HasUnresolvedAiPlanReviewCommentsWithoutLock(Guid aiRunId) =>
+            _aiPlanReviewComments.Any(comment =>
+                comment.AiRunId == aiRunId &&
+                !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase));
+
+        public AiPlanReviewCommentDto? AddAiPlanReviewComment(Guid workItemId, Guid aiRunId, CreateAiPlanReviewCommentRequest request, string actor)
+        {
+            lock (_lock)
+            {
+                var aiRun = _aiRuns.SingleOrDefault(run => run.Id == aiRunId && run.WorkItemId == workItemId);
+                if (aiRun is null)
+                {
+                    return null;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var comment = new AiPlanReviewCommentDto(
+                    Guid.NewGuid(),
+                    workItemId,
+                    aiRunId,
+                    NormalizePlanAnchorKey(request.AnchorKey),
+                    RedactTerminalMessage(NormalizeText(request.QuotedText, "")),
+                    NormalizeText(actor, "user"),
+                    NormalizeText(request.Body, ""),
+                    "open",
+                    now,
+                    now,
+                    AiRunSequenceNumber: aiRun.SequenceNumber);
+                if (string.IsNullOrWhiteSpace(comment.AnchorKey) || string.IsNullOrWhiteSpace(comment.Body))
+                {
+                    return null;
+                }
+
+                _aiPlanReviewComments.Add(comment);
+                Persist();
+                return comment;
+            }
+        }
+
+        public AiPlanReviewCommentDto? UpdateAiPlanReviewComment(Guid workItemId, Guid aiRunId, Guid commentId, UpdateAiPlanReviewCommentRequest request, string actor)
+        {
+            lock (_lock)
+            {
+                var index = _aiPlanReviewComments.FindIndex(comment => comment.Id == commentId && comment.WorkItemId == workItemId && comment.AiRunId == aiRunId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _aiPlanReviewComments[index];
+                var normalizedStatus = NormalizeReviewStatus(request.Status, existing.Status);
+                var resolvedNow = string.Equals(normalizedStatus, "resolved", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(existing.Status, "resolved", StringComparison.OrdinalIgnoreCase);
+                var reopened = !string.Equals(normalizedStatus, "resolved", StringComparison.OrdinalIgnoreCase);
+                var updated = existing with
+                {
+                    Body = string.IsNullOrWhiteSpace(request.Body) ? existing.Body : NormalizeText(request.Body, existing.Body),
+                    Status = normalizedStatus,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    ResolvedBy = resolvedNow ? NormalizeText(actor, "user") : reopened ? null : existing.ResolvedBy,
+                    ResolvedAt = resolvedNow ? DateTimeOffset.UtcNow : reopened ? null : existing.ResolvedAt
+                };
+                _aiPlanReviewComments[index] = updated;
+                Persist();
+                return updated;
+            }
+        }
+
+        public bool DeleteAiPlanReviewComment(Guid workItemId, Guid aiRunId, Guid commentId)
+        {
+            lock (_lock)
+            {
+                var removed = _aiPlanReviewComments.RemoveAll(comment => comment.Id == commentId && comment.WorkItemId == workItemId && comment.AiRunId == aiRunId) > 0;
+                if (removed)
+                {
+                    Persist();
+                }
+
+                return removed;
+            }
+        }
+
+        private (RepositoryDto Repository, DevelopmentDto Development, int PullRequestNumber)? CurrentLocalPullRequestContextWithoutLock(Guid workItemId)
+        {
+            var item = _items.SingleOrDefault(entry => entry.Id == workItemId);
+            var development = _development.SingleOrDefault(entry => entry.WorkItemId == workItemId)?.Development;
+            if (item is null || development is null || string.IsNullOrWhiteSpace(development.PullRequestUrl))
+            {
+                return null;
+            }
+
+            var repositoryId = development.RepositoryId ?? RepositoryIdForBoard(item.BoardId);
+            var repository = repositoryId is null ? null : _repositories.SingleOrDefault(entry => entry.Id == repositoryId.Value);
+            var pullRequestNumber = development.PullRequestNumber ?? TryParsePullRequestNumber(development.PullRequestUrl);
+            if (repository is null ||
+                pullRequestNumber is null ||
+                !repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return (repository, development, pullRequestNumber.Value);
+        }
+
+        private static string NormalizeReviewSide(string? value)
+        {
+            var normalized = NormalizeText(value, "new").ToLowerInvariant();
+            return normalized is "old" or "new" or "both" ? normalized : "new";
+        }
+
+        private static string NormalizeReviewStatus(string? value, string fallback)
+        {
+            var normalized = NormalizeText(value, fallback).ToLowerInvariant();
+            return normalized is "resolved" ? "resolved" : "open";
+        }
+
+        private static string NormalizePlanAnchorKey(string? value) =>
+            NormalizeText(value, "")
+                .Replace("\\", "/", StringComparison.Ordinal)
+                .Trim();
+
+        private static string NormalizePath(string? value) =>
+            NormalizeText(value, "")
+                .Replace("\\", "/", StringComparison.Ordinal)
+                .Trim()
+                .TrimStart('/');
+
         public bool IsPullRequestApproved(Guid workItemId)
         {
             lock (_lock)
@@ -11673,6 +13033,89 @@ namespace Rosenvall.DevOps.Api
                 var development = _development.SingleOrDefault(entry => entry.WorkItemId == workItemId)?.Development;
                 return development?.PullRequestApprovedAt is not null;
             }
+        }
+
+        public PullRequestApprovalStateDto GetLocalPullRequestApprovalState(Guid workItemId, string? providerPullRequestState = null)
+        {
+            lock (_lock)
+            {
+                var development = _development.SingleOrDefault(entry => entry.WorkItemId == workItemId)?.Development;
+                var unresolvedComments = _pullRequestReviewComments.Count(comment =>
+                    comment.WorkItemId == workItemId &&
+                    !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase));
+                return BuildLocalPullRequestApprovalState(development, providerPullRequestState, unresolvedComments);
+            }
+        }
+
+        private static PullRequestApprovalStateDto BuildLocalPullRequestApprovalState(DevelopmentDto? development, string? providerPullRequestState, int unresolvedComments)
+        {
+            if (development is null || string.IsNullOrWhiteSpace(development.PullRequestUrl))
+            {
+                return new PullRequestApprovalStateDto(false, "blocked", "No Local pull request is available.");
+            }
+
+            if (development.PullRequestApprovedAt is not null)
+            {
+                var actor = string.IsNullOrWhiteSpace(development.PullRequestApprovedBy) ? "RDO" : development.PullRequestApprovedBy;
+                return new PullRequestApprovalStateDto(
+                    false,
+                    "merged",
+                    $"Merged and deployed by {actor}.",
+                    development.PullRequestApprovedBy,
+                    development.PullRequestApprovedAt,
+                    development.PullRequestMergedAt,
+                    development.PullRequestFailure);
+            }
+
+            if (unresolvedComments > 0)
+            {
+                var noun = unresolvedComments == 1 ? "review comment" : "review comments";
+                return new PullRequestApprovalStateDto(
+                    false,
+                    "blocked",
+                    $"Resolve {unresolvedComments} {noun} before approving PR.",
+                    development.PullRequestApprovedBy,
+                    development.PullRequestApprovedAt,
+                    development.PullRequestMergedAt,
+                    development.PullRequestFailure);
+            }
+
+            var state = NormalizeText(providerPullRequestState, development.PullRequestState ?? "open").ToLowerInvariant();
+            if (development.PullRequestMergedAt is not null || state is "merged")
+            {
+                var message = string.IsNullOrWhiteSpace(development.PullRequestFailure)
+                    ? "Local pull request is merged, but RDO has not marked the app as deployed."
+                    : $"Local pull request was merged, but deployment failed: {development.PullRequestFailure}";
+                return new PullRequestApprovalStateDto(
+                    false,
+                    "failed",
+                    message,
+                    development.PullRequestApprovedBy,
+                    development.PullRequestApprovedAt,
+                    development.PullRequestMergedAt,
+                    development.PullRequestFailure);
+            }
+
+            if (!string.Equals(state, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                return new PullRequestApprovalStateDto(
+                    false,
+                    "blocked",
+                    $"Local pull request is {state} in Forgejo and cannot be approved by RDO.",
+                    development.PullRequestApprovedBy,
+                    development.PullRequestApprovedAt,
+                    development.PullRequestMergedAt,
+                    development.PullRequestFailure);
+            }
+
+            return new PullRequestApprovalStateDto(
+                true,
+                "reviewable",
+                "Ready to merge and deploy.",
+                development.PullRequestApprovedBy,
+                development.PullRequestApprovedAt,
+                development.PullRequestMergedAt,
+                development.PullRequestFailure);
         }
 
         public WorkItemDetailDto? MarkPullRequestMergeState(Guid workItemId, string state, bool merged, string? failure = null)
@@ -11765,6 +13208,18 @@ namespace Rosenvall.DevOps.Api
                         _previews.SingleOrDefault(entry => entry.WorkItemId == run.WorkItemId);
                     return preview?.SourceFiles is { Count: > 0 } sourceFiles
                         ? RepositoryPreviewPromotionJobManifestRenderer.Render(run, repository, context, sourceFiles, secret, ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo")
+                        : null;
+                }
+
+                if (string.Equals(run.RunKind, "pr-review-fix", StringComparison.OrdinalIgnoreCase))
+                {
+                    var comments = _pullRequestReviewComments
+                        .Where(comment => comment.WorkItemId == run.WorkItemId &&
+                            comment.PullRequestNumber == run.PullRequestNumber &&
+                            !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase))
+                        .ToArray();
+                    return comments.Length > 0
+                        ? RepositoryPullRequestReviewFixJobManifestRenderer.Render(run, repository, aiRun, context, comments, model, reasoningEffort, secret, aiSession, CodexKubernetesRunner.SandboxMode(configuration), ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo")
                         : null;
                 }
 
@@ -11974,6 +13429,17 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        private void AddGeneratedRosenvallAiResultComment(Guid workItemId, string body, DateTimeOffset createdAt)
+        {
+            var newKey = GeneratedRosenvallAiResultCommentKey(workItemId, body);
+            if (_comments.Any(comment => GeneratedRosenvallAiResultCommentKey(comment) == newKey))
+            {
+                return;
+            }
+
+            _comments.Add(new CommentDto(Guid.NewGuid(), workItemId, "Rosenvall AI", "Result", body, createdAt));
+        }
+
         public CommentDto? UpdateComment(Guid commentId, string actor, string body)
         {
             lock (_lock)
@@ -12045,7 +13511,7 @@ namespace Rosenvall.DevOps.Api
                     run.PostPlan(planBody);
                 }
                 _aiRuns.Add(run);
-                _comments.Add(new CommentDto(Guid.NewGuid(), workItemId, "Rosenvall AI", "Result", run.Status == AiRunStatus.NeedsInput ? $"AI needs input for plan #{run.SequenceNumber}: {item.Title}." : $"Created plan #{run.SequenceNumber}: {item.Title}.", run.CreatedAt));
+                AddGeneratedRosenvallAiResultComment(workItemId, run.Status == AiRunStatus.NeedsInput ? $"AI needs input for plan #{run.SequenceNumber}: {item.Title}." : $"Created plan #{run.SequenceNumber}: {item.Title}.", run.CreatedAt);
                 item.AiStatus = run.Status == AiRunStatus.NeedsInput ? "NeedsInput" : "PlanReady";
                 if (session is not null)
                 {
@@ -12071,6 +13537,11 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
+                if (HasUnresolvedAiPlanReviewCommentsWithoutLock(run.Id))
+                {
+                    throw new InvalidOperationException("Resolve all AI plan review comments before starting implementation.");
+                }
+
                 if (run.Status == AiRunStatus.PlanReady)
                 {
                     run.Approve(approvedBy);
@@ -12087,7 +13558,7 @@ namespace Rosenvall.DevOps.Api
                 var item = _items.Single(i => i.Id == run.WorkItemId);
                 item.Status = "Review";
                 item.AiStatus = "ImplementationRunning";
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Implementing plan #{run.SequenceNumber} with Codex preview source generation.", DateTimeOffset.UtcNow));
+                AddGeneratedRosenvallAiResultComment(item.Id, $"Implementing plan #{run.SequenceNumber} with Codex preview source generation.", DateTimeOffset.UtcNow);
                 AddTimelineForItem(item, "AiPlanApproved", item.Key, $"AI plan approved by {approvedBy}.", approvedBy);
                 Persist();
                 return run;
@@ -12186,7 +13657,7 @@ namespace Rosenvall.DevOps.Api
                 AddPreviewEvent(item, preview, "Created", "system", $"Preview created for {item.Key}.");
                 _development.RemoveAll(d => d.WorkItemId == item.Id);
                 _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto("local/vite-react-tailwind", $"local/{resources.Name}", null, "Local React/Tailwind source generated")));
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Local React/Tailwind implementation completed. Preview provisioning started for {preview.Url}.", DateTimeOffset.UtcNow));
+                AddGeneratedRosenvallAiResultComment(item.Id, $"Local React/Tailwind implementation completed. Preview provisioning started for {preview.Url}.", DateTimeOffset.UtcNow);
                 RecordPipelineRunWithoutLock(new RecordPipelineRunRequest(RepositoryIdForBoard(item.BoardId) ?? EnsureLocalRepository().Id, item.BoardId, item.Id, "Preview", "Succeeded", "Kubernetes preview job completed", preview.Url));
                 Persist();
                 return GetWorkItemDetail(item.Id);
@@ -12237,7 +13708,7 @@ namespace Rosenvall.DevOps.Api
                 AddPreviewEvent(item, preview, "Created", providerName, $"Preview source generated for {item.Key}.");
                 _development.RemoveAll(d => d.WorkItemId == item.Id);
                 _development.Add(new DevelopmentDtoRecord(item.Id, new DevelopmentDto($"local/{providerName}-preview-source", $"local/{resources.Name}", null, "Codex preview source generated")));
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Codex preview source generated from the approved plan. Preview provisioning started for {preview.Url}.", DateTimeOffset.UtcNow));
+                AddGeneratedRosenvallAiResultComment(item.Id, $"Codex preview source generated from the approved plan. Preview provisioning started for {preview.Url}.", DateTimeOffset.UtcNow);
                 RecordPipelineRunWithoutLock(new RecordPipelineRunRequest(RepositoryIdForBoard(item.BoardId) ?? EnsureLocalRepository().Id, item.BoardId, item.Id, "Preview", "Succeeded", "Kubernetes preview job completed", preview.Url));
                 Persist();
                 return GetWorkItemDetail(item.Id);
@@ -12281,7 +13752,7 @@ namespace Rosenvall.DevOps.Api
                     });
                     AddPreviewEvent(item, preview, "ImplementationFailed", actor, message);
                 }
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"Preview source implementation failed: {message}", DateTimeOffset.UtcNow));
+                AddGeneratedRosenvallAiResultComment(item.Id, $"Preview source implementation failed: {message}", DateTimeOffset.UtcNow);
                 Persist();
             }
         }
@@ -12310,7 +13781,7 @@ namespace Rosenvall.DevOps.Api
                     }
 
                     item.AiStatus = null;
-                    _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", $"AI plan discarded by {discardedBy}.", DateTimeOffset.UtcNow));
+                    AddGeneratedRosenvallAiResultComment(item.Id, $"AI plan discarded by {discardedBy}.", DateTimeOffset.UtcNow);
                     AddTimelineForItem(item, "AiPlanDiscarded", item.Key, $"AI plan discarded by {discardedBy}.", discardedBy);
                     NormalizeBoard(item.BoardId);
                 }
@@ -12342,7 +13813,7 @@ namespace Rosenvall.DevOps.Api
                 var resultMessage = string.IsNullOrWhiteSpace(request.PullRequestUrl)
                     ? $"Feature implemented by {request.Repository}. Demo is available at {preview.Url}."
                     : $"Feature implemented in {request.PullRequestUrl}. Demo is available at {preview.Url}.";
-                _comments.Add(new CommentDto(Guid.NewGuid(), item.Id, "Rosenvall AI", "Result", resultMessage, DateTimeOffset.UtcNow));
+                AddGeneratedRosenvallAiResultComment(item.Id, resultMessage, DateTimeOffset.UtcNow);
                 var repositoryId = ResolveRepositoryForDevelopment(item.BoardId, request.Repository);
                 AddTimelineEvent(item.BoardId, repositoryId, item.Id, "PullRequest", item.Key, string.IsNullOrWhiteSpace(request.PullRequestUrl) ? $"Implementation callback from {request.Repository}." : $"Pull request opened for {item.Key}.", request.Repository, request.PullRequestUrl);
                 RecordPipelineRunWithoutLock(new RecordPipelineRunRequest(repositoryId ?? EnsureLocalRepository().Id, item.BoardId, item.Id, "Checks", request.ChecksStatus, request.ChecksStatus, request.PullRequestUrl));
@@ -12360,6 +13831,13 @@ namespace Rosenvall.DevOps.Api
                 if (item is null || currentDevelopment is null || string.IsNullOrWhiteSpace(currentDevelopment.Development.PullRequestUrl))
                 {
                     return null;
+                }
+
+                if (_pullRequestReviewComments.Any(comment =>
+                    comment.WorkItemId == workItemId &&
+                    !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new InvalidOperationException("Resolve all review comments before approving the pull request.");
                 }
 
                 var approvedAt = DateTimeOffset.UtcNow;
@@ -13417,7 +14895,174 @@ namespace Rosenvall.DevOps.Api
             var runningPreview = _previews.SingleOrDefault(preview =>
                 preview.WorkItemId == item.Id &&
                 string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase));
-            return new(item.Id, item.Key, item.Type, item.Title, item.Status, item.Assignee, item.Priority, _comments.Count(c => c.WorkItemId == item.Id), item.AiStatus, item.PullRequestUrl, item.SortOrder, runningPreview?.Url);
+            var parent = item.ParentWorkItemId is { } parentId
+                ? _items.SingleOrDefault(entry => entry.Id == parentId)
+                : null;
+            var root = RootFor(item);
+            var descendants = DescendantsFor(item).ToArray();
+            var blockedStatuses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Blocked", "Failed" };
+            return new(
+                item.Id,
+                item.Key,
+                item.Type,
+                item.Title,
+                item.Status,
+                item.Assignee,
+                item.Priority,
+                _comments.Count(c => c.WorkItemId == item.Id),
+                item.AiStatus,
+                item.PullRequestUrl,
+                item.SortOrder,
+                runningPreview?.Url,
+                item.ParentWorkItemId,
+                parent?.Key,
+                root?.Id ?? item.Id,
+                root?.Key ?? item.Key,
+                BuildHierarchyPath(item),
+                item.IsBug,
+                descendants.Length,
+                descendants.Count(child => child.Status.Equals("Done", StringComparison.OrdinalIgnoreCase)),
+                descendants.Count(child => blockedStatuses.Contains(child.Status)),
+                descendants.Count(child => !string.IsNullOrWhiteSpace(child.PullRequestUrl)));
+        }
+
+        private WorkItemSummaryDto? CreateWorkItemWithoutLock(CreateWorkItemRequest request, string actor)
+        {
+            var board = _boards.SingleOrDefault(board => board.Id == request.BoardId);
+            if (board is null || !board.Columns.Contains(request.Status, StringComparer.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var (type, isBug) = NormalizeWorkItemTypeAndBug(request.Type, request.IsBug);
+            if (!CanAssignWorkItemParentWithoutLock(Guid.Empty, request.BoardId, type, request.ParentWorkItemId))
+            {
+                return null;
+            }
+
+            var index = _nextTaskNumber++;
+            var sortOrder = _items.Where(i => i.BoardId == request.BoardId && i.Status == request.Status)
+                .Select(i => i.SortOrder)
+                .DefaultIfEmpty(-1)
+                .Max() + 1;
+            var item = new WorkItemRecord(Guid.NewGuid(), request.BoardId, $"TASK-{index}", type, request.Title, request.Description, request.Status, request.Priority, request.Assignee, sortOrder, request.ParentWorkItemId, isBug);
+            _items.Add(item);
+            AddTimelineForItem(item, "CardCreated", item.Key, $"Created {item.Title}.", actor);
+            Persist();
+            return ToSummary(item);
+        }
+
+        private static (string Type, bool IsBug) NormalizeWorkItemTypeAndBug(string? type, bool isBug)
+        {
+            var normalized = NormalizeText(type, "Feature");
+            if (normalized.Equals("Bug", StringComparison.OrdinalIgnoreCase))
+            {
+                return ("Task", true);
+            }
+
+            return normalized.Equals("Epic", StringComparison.OrdinalIgnoreCase) ||
+                normalized.Equals("Feature", StringComparison.OrdinalIgnoreCase) ||
+                normalized.Equals("Task", StringComparison.OrdinalIgnoreCase)
+                    ? (CultureInfo.InvariantCulture.TextInfo.ToTitleCase(normalized.ToLowerInvariant()), isBug)
+                    : ("Feature", isBug);
+        }
+
+        private bool CanAssignWorkItemParentWithoutLock(Guid workItemId, Guid boardId, string type, Guid? parentWorkItemId)
+        {
+            if (parentWorkItemId is null)
+            {
+                return true;
+            }
+
+            if (type.Equals("Epic", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var parent = _items.SingleOrDefault(item => item.Id == parentWorkItemId);
+            if (parent is null || parent.BoardId != boardId || parent.Id == workItemId)
+            {
+                return false;
+            }
+
+            if (workItemId != Guid.Empty && DescendantsFor(_items.Single(item => item.Id == workItemId)).Any(item => item.Id == parent.Id))
+            {
+                return false;
+            }
+
+            return type.Equals("Feature", StringComparison.OrdinalIgnoreCase)
+                ? parent.Type.Equals("Epic", StringComparison.OrdinalIgnoreCase)
+                : type.Equals("Task", StringComparison.OrdinalIgnoreCase) &&
+                    (parent.Type.Equals("Feature", StringComparison.OrdinalIgnoreCase) || parent.Type.Equals("Epic", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private bool CanKeepExistingChildrenWithoutLock(Guid workItemId, string type) =>
+            _items.Where(child => child.ParentWorkItemId == workItemId)
+                .All(child => type.Equals("Epic", StringComparison.OrdinalIgnoreCase)
+                    ? child.Type.Equals("Feature", StringComparison.OrdinalIgnoreCase) || child.Type.Equals("Task", StringComparison.OrdinalIgnoreCase)
+                    : type.Equals("Feature", StringComparison.OrdinalIgnoreCase)
+                        ? child.Type.Equals("Task", StringComparison.OrdinalIgnoreCase)
+                        : false);
+
+        private IEnumerable<WorkItemRecord> AncestorsFor(WorkItemRecord item)
+        {
+            var current = item;
+            var seen = new HashSet<Guid> { item.Id };
+            while (current.ParentWorkItemId is { } parentId && seen.Add(parentId))
+            {
+                var parent = _items.SingleOrDefault(entry => entry.Id == parentId && entry.BoardId == item.BoardId);
+                if (parent is null)
+                {
+                    yield break;
+                }
+
+                yield return parent;
+                current = parent;
+            }
+        }
+
+        private WorkItemRecord? RootFor(WorkItemRecord item) =>
+            AncestorsFor(item).LastOrDefault() ?? item;
+
+        private IEnumerable<WorkItemRecord> DescendantsFor(WorkItemRecord item)
+        {
+            foreach (var child in _items.Where(child => child.ParentWorkItemId == item.Id).OrderBy(child => child.SortOrder).ThenBy(child => child.Key))
+            {
+                yield return child;
+                foreach (var descendant in DescendantsFor(child))
+                {
+                    yield return descendant;
+                }
+            }
+        }
+
+        private string BuildHierarchyPath(WorkItemRecord item)
+        {
+            var parts = AncestorsFor(item).Reverse().Append(item).Select(entry => $"{entry.Key} {entry.Title}");
+            return string.Join(" / ", parts);
+        }
+
+        private WorkItemHierarchyNodeDto ToHierarchyNode(WorkItemRecord item) =>
+            new(
+                ToSummary(item),
+                _items.Where(child => child.ParentWorkItemId == item.Id)
+                    .OrderBy(child => child.SortOrder)
+                    .ThenBy(child => child.Key)
+                    .Select(ToHierarchyNode)
+                    .ToArray());
+
+        private void NormalizeWorkItemHierarchyWithoutLock()
+        {
+            foreach (var item in _items)
+            {
+                var (type, isBug) = NormalizeWorkItemTypeAndBug(item.Type, item.IsBug);
+                item.Type = type;
+                item.IsBug = isBug;
+                if (!CanAssignWorkItemParentWithoutLock(item.Id, item.BoardId, item.Type, item.ParentWorkItemId))
+                {
+                    item.ParentWorkItemId = null;
+                }
+            }
         }
 
         private void AddPreviewEvent(WorkItemRecord item, PreviewDto preview, string eventType, string actor, string message)
@@ -13671,7 +15316,7 @@ namespace Rosenvall.DevOps.Api
             status is "Queued" or "Cloning" or "Implementing" or "Validating" or "Pushing";
 
         private static bool IsImplementationRunPendingStatus(string status) =>
-            status is "Queued" or "Cloning" or "Inspecting" or "Implementing" or "WritingPreviewSource" or "Testing" or "Validating" or "Pushing";
+            status is "Queued" or "Cloning" or "Inspecting" or "Implementing" or "WritingPreviewSource" or "FixingReviewComments" or "Testing" or "Validating" or "Pushing";
 
         private static string NormalizeText(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
@@ -14694,7 +16339,17 @@ namespace Rosenvall.DevOps.Api
         private static bool IsPreviewImplementationAwaitingRecovery(PreviewDto preview) =>
             string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
             (string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
-             string.Equals(preview.FailureReason, "ServerRestart", StringComparison.OrdinalIgnoreCase));
+             (string.Equals(preview.FailureReason, "ServerRestart", StringComparison.OrdinalIgnoreCase) ||
+              IsPreviewSourceTimeoutFailure(preview)));
+
+        private static bool IsPreviewSourceTimeoutFailure(PreviewDto preview) =>
+            ContainsPreviewSourceTimeout(preview.Message) ||
+            ContainsPreviewSourceTimeout(preview.FailureLog);
+
+        private static bool ContainsPreviewSourceTimeout(string? value) =>
+            !string.IsNullOrWhiteSpace(value) &&
+            value.Contains("Preview source job", StringComparison.OrdinalIgnoreCase) &&
+            value.Contains("timed out", StringComparison.OrdinalIgnoreCase);
 
         private void RecoverInterruptedPreviewImplementations()
         {
@@ -14918,13 +16573,12 @@ namespace Rosenvall.DevOps.Api
                 .OrderBy(comment => comment.CreatedAt)
                 .Where(comment =>
                 {
-                    if (!string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase) ||
-                        !string.Equals(comment.Kind, "Result", StringComparison.OrdinalIgnoreCase))
+                    var key = GeneratedRosenvallAiResultCommentKey(comment);
+                    if (key is null)
                     {
                         return true;
                     }
 
-                    var key = $"{comment.WorkItemId:N}\n{comment.Author}\n{comment.Kind}\n{comment.Body}";
                     return seen.Add(key);
                 })
                 .OrderBy(comment => comment.CreatedAt)
@@ -14932,6 +16586,24 @@ namespace Rosenvall.DevOps.Api
 
             _comments.Clear();
             _comments.AddRange(deduped);
+        }
+
+        private static string? GeneratedRosenvallAiResultCommentKey(CommentDto comment) =>
+            string.Equals(comment.Author, "Rosenvall AI", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(comment.Kind, "Result", StringComparison.OrdinalIgnoreCase)
+                ? GeneratedRosenvallAiResultCommentKey(comment.WorkItemId, comment.Body)
+                : null;
+
+        private static string GeneratedRosenvallAiResultCommentKey(Guid workItemId, string body)
+        {
+            var normalizedBody = Regex.Replace(body.Trim(), "\\s+", " ");
+            var planMatch = Regex.Match(normalizedBody, "^Created plan #(\\d+):\\s*(.+?)\\.?$", RegexOptions.IgnoreCase);
+            if (planMatch.Success)
+            {
+                return $"{workItemId:N}\nrosenvall-ai\nresult\ncreated-plan\n{planMatch.Groups[1].Value}\n{planMatch.Groups[2].Value.Trim().TrimEnd('.').ToLowerInvariant()}";
+            }
+
+            return $"{workItemId:N}\nrosenvall-ai\nresult\n{normalizedBody}";
         }
 
         private bool TryLoad()
@@ -14955,11 +16627,16 @@ namespace Rosenvall.DevOps.Api
             _workspaces.AddRange(snapshot.Workspaces);
             _repositories.AddRange(snapshot.Repositories ?? []);
             _boards.AddRange(snapshot.Boards.Select(board => new BoardRecord(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId, board.PublicHostname, board.ImplementationWorkflow)));
-            _items.AddRange(snapshot.Items.Select(item => new WorkItemRecord(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.SortOrder)
+            _items.AddRange(snapshot.Items.Select(item =>
             {
-                AiStatus = item.AiStatus,
-                PullRequestUrl = item.PullRequestUrl
+                var (type, isBug) = NormalizeWorkItemTypeAndBug(item.Type, item.IsBug);
+                return new WorkItemRecord(item.Id, item.BoardId, item.Key, type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.SortOrder, item.ParentWorkItemId, isBug)
+                {
+                    AiStatus = item.AiStatus,
+                    PullRequestUrl = item.PullRequestUrl
+                };
             }));
+            NormalizeWorkItemHierarchyWithoutLock();
             _comments.AddRange(snapshot.Comments);
             DeduplicateGeneratedRosenvallAiResultComments();
             _aiRuns.AddRange(snapshot.AiRuns
@@ -14982,7 +16659,11 @@ namespace Rosenvall.DevOps.Api
             _previewEvents.AddRange(snapshot.PreviewEvents ?? []);
             _pipelineRuns.AddRange(snapshot.PipelineRuns ?? []);
             _implementationRuns.AddRange(snapshot.ImplementationRuns ?? []);
+            _epicRuns.AddRange(snapshot.EpicRuns ?? []);
+            _epicGoalRuns.AddRange(snapshot.EpicGoalRuns ?? []);
             _repositoryCleanupRuns.AddRange(snapshot.RepositoryCleanupRuns ?? []);
+            _pullRequestReviewComments.AddRange(snapshot.PullRequestReviewComments ?? []);
+            _aiPlanReviewComments.AddRange(snapshot.AiPlanReviewComments ?? []);
             _timelineEvents.AddRange(snapshot.TimelineEvents ?? []);
             _users.AddRange(snapshot.Users ?? []);
             _teams.AddRange(snapshot.Teams ?? []);
@@ -15183,7 +16864,7 @@ namespace Rosenvall.DevOps.Api
             var snapshot = new DevOpsSnapshot(
                 _workspaces.ToArray(),
                 _boards.Select(board => new BoardSnapshot(board.Id, board.WorkspaceId, board.Name, board.Columns, board.RepositoryId, board.PublicHostname, board.ImplementationWorkflow)).ToArray(),
-                _items.Select(item => new WorkItemSnapshot(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.AiStatus, item.PullRequestUrl, item.SortOrder)).ToArray(),
+                _items.Select(item => new WorkItemSnapshot(item.Id, item.BoardId, item.Key, item.Type, item.Title, item.Description, item.Status, item.Priority, item.Assignee, item.AiStatus, item.PullRequestUrl, item.SortOrder, item.ParentWorkItemId, item.IsBug)).ToArray(),
                 _comments.ToArray(),
                 _aiRuns.Select(run => new AiRunSnapshot(run.Id, run.WorkItemId, run.Provider, run.Model, run.Status, run.Plan, run.ApprovedBy, run.SequenceNumber, run.CreatedAt, run.ReasoningEffort)).ToArray(),
                 _previews.ToArray(),
@@ -15195,6 +16876,8 @@ namespace Rosenvall.DevOps.Api
                 _timelineEvents.ToArray(),
                 _implementationRuns.ToArray(),
                 _repositoryCleanupRuns.ToArray(),
+                _pullRequestReviewComments.ToArray(),
+                _aiPlanReviewComments.ToArray(),
                 _users.ToArray(),
                 _teams.ToArray(),
                 _boardAccess.ToArray(),
@@ -15208,7 +16891,9 @@ namespace Rosenvall.DevOps.Api
                 _boardAiContexts.ToArray(),
                 _boardRepositoryProfiles.ToArray(),
                 _githubUserAuthorizations.ToArray(),
-                _boardPublicApps.ToArray());
+                _boardPublicApps.ToArray(),
+                _epicRuns.ToArray(),
+                _epicGoalRuns.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
             var jsonBytes = Encoding.UTF8.GetByteCount(json);
             var jsonHash = ComputeSnapshotHash(json);
@@ -15262,7 +16947,7 @@ namespace Rosenvall.DevOps.Api
         public string? Email { get; set; }
     }
 
-    internal sealed class WorkItemRecord(Guid id, Guid boardId, string key, string type, string title, string description, string status, string priority, string? assignee, int sortOrder)
+    internal sealed class WorkItemRecord(Guid id, Guid boardId, string key, string type, string title, string description, string status, string priority, string? assignee, int sortOrder, Guid? parentWorkItemId = null, bool isBug = false)
     {
         public Guid Id { get; } = id;
         public Guid BoardId { get; } = boardId;
@@ -15274,6 +16959,8 @@ namespace Rosenvall.DevOps.Api
         public string Priority { get; set; } = priority;
         public string? Assignee { get; set; } = assignee;
         public int SortOrder { get; set; } = sortOrder;
+        public Guid? ParentWorkItemId { get; set; } = parentWorkItemId;
+        public bool IsBug { get; set; } = isBug;
         public string? AiStatus { get; set; }
         public string? PullRequestUrl { get; set; }
     }
@@ -15283,9 +16970,9 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardTeamAccessRecord(Guid BoardId, Guid TeamId, string Role);
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile);
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null, string? PublicHostname = null, string ImplementationWorkflow = "");
-    internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder);
+    internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder, Guid? ParentWorkItemId = null, bool IsBug = false);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);
     internal sealed record DevelopmentSnapshot(Guid WorkItemId, DevelopmentDto Development);
 }
