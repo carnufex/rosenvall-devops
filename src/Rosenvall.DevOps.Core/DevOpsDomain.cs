@@ -233,7 +233,8 @@ public sealed record PreviewResourceSet(
     string? StaticHtml,
     IReadOnlyList<PreviewSourceFile> SourceFiles,
     bool IncludeNamespace,
-    string PartOf)
+    string PartOf,
+    IReadOnlyDictionary<string, string> NamespaceLabels)
 {
     public static PreviewResourceSet Create(
         string key,
@@ -245,7 +246,8 @@ public sealed record PreviewResourceSet(
         IReadOnlyList<PreviewSourceFile>? sourceFiles = null,
         string? hostnameOverride = null,
         string namespacePrefix = "devops-preview",
-        string partOf = "rosenvall-devops-preview")
+        string partOf = "rosenvall-devops-preview",
+        IReadOnlyDictionary<string, string>? namespaceLabels = null)
     {
         if (string.IsNullOrWhiteSpace(image))
         {
@@ -264,7 +266,8 @@ public sealed record PreviewResourceSet(
             string.IsNullOrWhiteSpace(staticHtml) ? null : staticHtml.Trim(),
             sourceFiles ?? [],
             includeNamespace,
-            string.IsNullOrWhiteSpace(partOf) ? "rosenvall-devops-preview" : partOf.Trim());
+            string.IsNullOrWhiteSpace(partOf) ? "rosenvall-devops-preview" : partOf.Trim(),
+            namespaceLabels ?? new Dictionary<string, string>());
     }
 }
 
@@ -283,6 +286,10 @@ public static class PreviewManifestRenderer
             builder.AppendLine($"  name: {resources.Namespace}");
             builder.AppendLine("  labels:");
             builder.AppendLine($"    app.kubernetes.io/part-of: {resources.PartOf}");
+            foreach (var (key, value) in resources.NamespaceLabels.OrderBy(label => label.Key, StringComparer.Ordinal))
+            {
+                builder.AppendLine($"    {key}: {value}");
+            }
             builder.AppendLine("---");
         }
         if (resources.StaticHtml is not null)

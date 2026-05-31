@@ -14,6 +14,7 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $repoRoot = $root.Path
 $logDir = Join-Path $repoRoot ".codex\devops-logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
+$pidFile = Join-Path $logDir "local-demo.pids.json"
 
 $apiProject = Join-Path $repoRoot "src\Rosenvall.DevOps.Api\Rosenvall.DevOps.Api.csproj"
 $frontendRoot = Join-Path $repoRoot "frontend"
@@ -37,6 +38,7 @@ $previousGitHubAppPrivateKey = $env:GitHub__AppPrivateKey
 $previousGitHubAppSlug = $env:GitHub__AppSlug
 $previousGitHubAppClientId = $env:GitHub__AppClientId
 $previousGitHubAppClientSecret = $env:GitHub__AppClientSecret
+$previousGitHubWebhookSecret = $env:GitHub__WebhookSecret
 $previousGitHubTokenSecretName = $env:GitHub__TokenSecretName
 $previousRepositoriesProvider = $env:Repositories__Provider
 $previousRepositoriesMode = $env:Repositories__Mode
@@ -54,6 +56,7 @@ $previousViteAuthClientId = $env:VITE_AUTH_CLIENT_ID
 $previousViteAuthRedirectUri = $env:VITE_AUTH_REDIRECT_URI
 $previousViteAuthPostLogoutRedirectUri = $env:VITE_AUTH_POST_LOGOUT_REDIRECT_URI
 $previousViteAuthProxyPrefix = $env:VITE_AUTH_PROXY_PREFIX
+$previousAuthenticationMode = $env:Authentication__Mode
 $previousAuthenticationAuthority = $env:Authentication__Authority
 $previousAuthenticationAudience = $env:Authentication__Audience
 
@@ -205,12 +208,14 @@ if (-not $SkipClusterSecrets -and $ApiMode -eq "Local") {
     Set-EnvIfBlank "GitHub__AppSlug" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "app-slug" $kubectlBaseArgs)
     Set-EnvIfBlank "GitHub__AppClientId" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "client-id" $kubectlBaseArgs)
     Set-EnvIfBlank "GitHub__AppClientSecret" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "client-secret" $kubectlBaseArgs)
+    Set-EnvIfBlank "GitHub__WebhookSecret" (Get-KubernetesSecretValue "rosenvall-devops-github-app" "webhook-secret" $kubectlBaseArgs)
     Set-EnvIfBlank "GitHub__TokenSecretName" "rosenvall-devops-github"
     Set-EnvIfBlank "Repositories__Provider" "GitHub"
     Set-EnvIfBlank "Repositories__Mode" "GitHubApp"
 }
 
 if ($EnableAuth -or $ApiMode -eq "ClusterPortForward") {
+    $env:Authentication__Mode = "Required"
     Set-EnvIfBlank "Authentication__Authority" "https://authentik.rosenvall.se/application/o/rosenvall-devops/"
     Set-EnvIfBlank "Authentication__Audience" "rosenvall-devops"
     Set-EnvIfBlank "VITE_AUTH_ENABLED" "true"
@@ -219,6 +224,8 @@ if ($EnableAuth -or $ApiMode -eq "ClusterPortForward") {
     Set-EnvIfBlank "VITE_AUTH_REDIRECT_URI" "http://localhost:$FrontendPort/auth/callback"
     Set-EnvIfBlank "VITE_AUTH_POST_LOGOUT_REDIRECT_URI" "http://localhost:$FrontendPort/"
     Set-EnvIfBlank "VITE_AUTH_PROXY_PREFIX" "/authentik"
+} else {
+    $env:Authentication__Mode = "DisabledForLocalDevelopment"
 }
 
 Get-CimInstance Win32_Process |
@@ -301,6 +308,7 @@ $env:GitHub__AppPrivateKey = $previousGitHubAppPrivateKey
 $env:GitHub__AppSlug = $previousGitHubAppSlug
 $env:GitHub__AppClientId = $previousGitHubAppClientId
 $env:GitHub__AppClientSecret = $previousGitHubAppClientSecret
+$env:GitHub__WebhookSecret = $previousGitHubWebhookSecret
 $env:GitHub__TokenSecretName = $previousGitHubTokenSecretName
 $env:Repositories__Provider = $previousRepositoriesProvider
 $env:Repositories__Mode = $previousRepositoriesMode
@@ -312,6 +320,7 @@ $env:LocalGit__Owner = $previousLocalGitOwner
 $env:LocalGit__Username = $previousLocalGitUsername
 $env:LocalGit__Password = $previousLocalGitPassword
 $env:LocalGit__UnavailableReason = $previousLocalGitUnavailableReason
+$env:Authentication__Mode = $previousAuthenticationMode
 $env:Authentication__Authority = $previousAuthenticationAuthority
 $env:Authentication__Audience = $previousAuthenticationAudience
 
@@ -331,6 +340,18 @@ if (-not (Wait-HttpOk "http://localhost:$FrontendPort")) {
     Write-Warning "Frontend did not start on http://localhost:$FrontendPort. Check $frontendOut and $frontendErr."
 }
 
+$pidSnapshot = [ordered]@{
+    startedAt = (Get-Date).ToString("O")
+    apiMode = $ApiMode
+    apiPort = $ApiPort
+    frontendPort = $FrontendPort
+    forgejoPort = $ForgejoPort
+    apiPid = $api.Id
+    frontendPid = $frontend.Id
+    forgejoPid = if ($null -ne $forgejo) { $forgejo.Id } else { $null }
+}
+$pidSnapshot | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding UTF8
+
 $env:VITE_AUTH_ENABLED = $previousViteAuthEnabled
 $env:VITE_AUTH_AUTHORITY = $previousViteAuthAuthority
 $env:VITE_AUTH_CLIENT_ID = $previousViteAuthClientId
@@ -349,6 +370,7 @@ if ($null -ne $forgejo) {
     Write-Host "Forgejo PID: $($forgejo.Id)"
 }
 Write-Host "Logs:     $logDir"
+Write-Host "PID file: $pidFile"
 if (Test-Path -LiteralPath $homelabKubeconfig) {
     Write-Host "Kubeconfig: $homelabKubeconfig"
 }

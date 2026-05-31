@@ -1,12 +1,16 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Rosenvall.DevOps.Api;
 using Rosenvall.DevOps.Core;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
 
 namespace Rosenvall.DevOps.Tests;
 
@@ -190,6 +194,55 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Work_item_cleanup_manifest_includes_provider_sync_job_and_token_secret()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync cleanup", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Delete sync", "Remove provider sync runtime.", "Todo", "Medium", null));
+        var providerSync = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, item.Id, "ProviderSync", "Running", "Syncing repository.", null))!;
+        var genericPipeline = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, item.Id, "Build", "Running", "Running legacy pipeline.", null))!;
+
+        var manifest = store.RenderWorkItemCleanupManifest(item.Id)!;
+
+        Assert.Contains(RepositoryProviderSyncJobManifestRenderer.JobName(providerSync), manifest);
+        Assert.Contains(RepositoryProviderSyncJobManifestRenderer.TokenSecretName(providerSync), manifest);
+        Assert.Contains(PipelineJobManifestRenderer.JobName(genericPipeline, repository), manifest);
+        Assert.DoesNotContain(PipelineJobManifestRenderer.JobName(providerSync, repository), manifest);
+    }
+
+    [Fact]
+    public void Provider_sync_token_secret_payload_has_metadata_labels_and_data()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync", repository.Id, null, null, null, null, null))!;
+        var run = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, null, "ProviderSync", "Queued", "Syncing repository.", null))!;
+
+        var payload = RepositoryProviderSyncJobManifestRenderer.RenderTokenSecret(run, "source-token", "target-token");
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+        var metadata = root.GetProperty("metadata");
+        var labels = metadata.GetProperty("labels");
+        var data = root.GetProperty("data");
+
+        Assert.Equal("v1", root.GetProperty("apiVersion").GetString());
+        Assert.Equal("Secret", root.GetProperty("kind").GetString());
+        Assert.Equal(RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run), metadata.GetProperty("name").GetString());
+        Assert.Equal(RepositoryImplementationJobManifestRenderer.Namespace, metadata.GetProperty("namespace").GetString());
+        Assert.Equal("rosenvall-devops-provider-sync", labels.GetProperty("app.kubernetes.io/part-of").GetString());
+        Assert.Equal(run.Id.ToString(), labels.GetProperty("rosenvall.devops/pipeline-run").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("source-token")), data.GetProperty("source-token").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("target-token")), data.GetProperty("target-token").GetString());
+        Assert.DoesNotContain("stringData", payload);
+        Assert.DoesNotContain("kubectl.kubernetes.io/last-applied-configuration", payload);
+    }
+
+    [Fact]
     public void Deleting_work_item_removes_only_that_cards_runtime_runs()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -359,6 +412,14 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("value: \"http://localhost:3001/api/v1\"", manifest);
         Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
         Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("pr_http_code=\"$(curl -sS -o \"$pr_response_file\" -w \"%{http_code}\" -X POST \"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("jq -r '.message // .error // .errors[0].message // empty'", manifest);
+        Assert.Contains("pr_number=\"$(jq -r '.number // empty' \"$pr_response_file\")\"", manifest);
+        Assert.Contains("pr_state=\"$(jq -r '.state // empty' \"$pr_response_file\")\"", manifest);
+        Assert.Contains("pr_url=\"$(jq -r '.html_url // empty' \"$pr_response_file\")\"", manifest);
+        Assert.Contains("RDO_FAILURE=Forgejo pull request API failed", manifest);
+        Assert.DoesNotContain("pr_response=\"$(curl -sS -X POST", manifest);
+        Assert.DoesNotContain("pr_response\" | sed -n", manifest);
         Assert.Contains("pr_base_url=\"${ROSENVALL_FORGEJO_API_BASE_URL%/api/v1}\"", manifest);
         Assert.Contains("pr_url=\"$pr_base_url/$ROSENVALL_REPOSITORY/pulls/$pr_number\"", manifest);
         Assert.Contains("-H \"Authorization: Basic $forgejo_auth\"", manifest);
@@ -369,6 +430,88 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("codex exec", manifest);
         Assert.DoesNotContain("npm run build", manifest);
         Assert.DoesNotContain("npm test", manifest);
+    }
+
+    [Fact]
+    public void Preview_promotion_start_is_idempotent_for_same_actor_and_source_preview()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "clock-app",
+            "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/clock-app.git",
+            "main",
+            null,
+            "rdo",
+            "react-preview",
+            "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
+
+        var first = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        var second = store.StartPreviewPromotionRun(item.Id, "crille")!;
+        var action = Assert.Single(store.GetActionLedger(), entry => entry.OperationKind == "preview-promotion");
+
+        Assert.Equal(first.Id, second.Id);
+        Assert.Equal("crille", action.ActorSubject);
+        Assert.Equal(board.Id, action.BoardId);
+        Assert.Equal(item.Id, action.WorkItemId);
+        Assert.Equal(first.Id, action.RunId);
+        Assert.Contains(item.Id.ToString("N"), action.IdempotencyKey);
+        Assert.Contains("preview-promotion", action.IdempotencyKey);
+        Assert.Single(store.GetImplementationRuns(item.Id), run => run.RunKind == "preview-promotion");
+        Assert.Contains(fixture.Reopen().GetActionLedger(), entry => entry.Id == action.Id && entry.RunId == first.Id);
+    }
+
+    [Fact]
+    public void Action_ledger_blocks_duplicate_provider_sync_until_failed_before_run_creation()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var source = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "source-app",
+            "http://forgejo.local/rdo/source-app.git",
+            "main",
+            null,
+            "rdo",
+            "react-preview",
+            "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Source app", source.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var key = $"provider-sync:demo:{board.Id:N}:{source.Id:N}:github:source-app-copy:true";
+
+        var first = store.StartAction("demo", board.Id, null, "provider-sync", key);
+        var duplicate = store.StartAction("demo", board.Id, null, "provider-sync", key);
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action.Id, duplicate.Action.Id);
+        Assert.Single(store.GetActionLedger(), entry => entry.OperationKind == "provider-sync");
+
+        store.MarkActionFailed(first.Action.Id, "GitHub authorization is missing.");
+        var retry = store.StartAction("demo", board.Id, null, "provider-sync", key);
+
+        Assert.True(retry.Started);
+        Assert.NotEqual(first.Action.Id, retry.Action.Id);
+
+        var run = store.RecordPipelineRun(new RecordPipelineRunRequest(source.Id, board.Id, null, "ProviderSync", "Queued", "Queued provider sync.", null))!;
+        store.MarkActionRun(retry.Action.Id, run.Id, "Started");
+        store.MarkActionFailed(retry.Action.Id, "Job submission failed.");
+        var blockedAfterRun = store.StartAction("demo", board.Id, null, "provider-sync", key);
+
+        Assert.False(blockedAfterRun.Started);
+        Assert.Equal(retry.Action.Id, blockedAfterRun.Action.Id);
+        Assert.Equal(run.Id, blockedAfterRun.Action.RunId);
+        Assert.Contains(fixture.Reopen().GetActionLedger(), entry => entry.Id == retry.Action.Id && entry.RunId == run.Id);
     }
 
     [Fact]
@@ -410,6 +553,14 @@ public sealed class DevOpsStoreTests
         Assert.Contains("git push --set-upstream origin", manifest);
         Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
         Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("pr_http_code=\"$(curl -sS -o \"$pr_response_file\" -w \"%{http_code}\" -X POST \"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("jq -r '.message // .error // .errors[0].message // empty'", manifest);
+        Assert.Contains("pr_number=\"$(jq -r '.number // empty' \"$pr_response_file\")\"", manifest);
+        Assert.Contains("pr_state=\"$(jq -r '.state // empty' \"$pr_response_file\")\"", manifest);
+        Assert.Contains("pr_url=\"$(jq -r '.html_url // empty' \"$pr_response_file\")\"", manifest);
+        Assert.Contains("RDO_FAILURE=Forgejo pull request API failed", manifest);
+        Assert.DoesNotContain("pr_response=\"$(curl -sS -X POST", manifest);
+        Assert.DoesNotContain("pr_response\" | sed -n", manifest);
         Assert.Contains("pr_base_url=\"${ROSENVALL_FORGEJO_API_BASE_URL%/api/v1}\"", manifest);
         Assert.Contains("pr_url=\"$pr_base_url/$ROSENVALL_REPOSITORY/pulls/$pr_number\"", manifest);
         Assert.Contains("-H \"Authorization: Basic $forgejo_auth\"", manifest);
@@ -428,6 +579,15 @@ public sealed class DevOpsStoreTests
                 ["LocalGit:RunnerApiBaseUrl"] = "http://forgejo.local/api/v1",
                 ["LocalGit:Password"] = "service-token"
             })
+            .Build(),
+            localGitReadiness: new LocalGitReadinessDto(true, true, true, "http://localhost:3001/api/v1", "Local Git is ready.", 200));
+        var unverified = fixture.Store.GetSettings(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:Enabled"] = "true",
+                ["LocalGit:ApiBaseUrl"] = "http://localhost:3001/api/v1",
+                ["LocalGit:Password"] = "service-token"
+            })
             .Build());
         var unavailable = fixture.Store.GetSettings(new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -437,7 +597,8 @@ public sealed class DevOpsStoreTests
                 ["LocalGit:Password"] = "service-token",
                 ["LocalGit:UnavailableReason"] = "Forgejo is not deployed."
             })
-            .Build());
+            .Build(),
+            localGitReadiness: new LocalGitReadinessDto(true, true, true, "http://localhost:3001/api/v1", "Local Git is ready.", 200));
 
         Assert.Equal("LocalGit", ready.Repositories.Provider);
         Assert.Equal("http://localhost:3001/api/v1", ready.Repositories.ApiBaseUrl);
@@ -445,10 +606,70 @@ public sealed class DevOpsStoreTests
         Assert.True(ready.Repositories.LocalGitAvailable);
         Assert.True(ready.Repositories.CanCreateRepositories);
 
+        Assert.True(unverified.Repositories.LocalGitEnabled);
+        Assert.False(unverified.Repositories.LocalGitAvailable);
+        Assert.False(unverified.Repositories.CanCreateRepositories);
+        Assert.Equal("Local Git is enabled, but Forgejo readiness has not been verified yet.", unverified.Repositories.LocalGitMessage);
+
         Assert.True(unavailable.Repositories.LocalGitEnabled);
         Assert.False(unavailable.Repositories.LocalGitAvailable);
         Assert.False(unavailable.Repositories.CanCreateRepositories);
         Assert.Equal("Forgejo is not deployed.", unavailable.Repositories.LocalGitMessage);
+    }
+
+    [Fact]
+    public async Task Forgejo_readiness_probe_authenticates_service_credential()
+    {
+        HttpRequestMessage? observed = null;
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            observed = request;
+            return JsonResponse("""{"login":"rdo"}""");
+        }));
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:Enabled"] = "true",
+                ["LocalGit:ApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo",
+                ["LocalGit:Password"] = "service-token"
+            })
+            .Build();
+        var client = new ForgejoRepositoryClient(httpClient, configuration);
+
+        var readiness = await client.CheckReadinessAsync(CancellationToken.None);
+
+        Assert.True(readiness.Available);
+        Assert.Equal("Local Git is ready.", readiness.Message);
+        Assert.Equal("http://forgejo.local/api/v1/user", observed?.RequestUri?.ToString());
+        Assert.Equal("Basic", observed?.Headers.Authorization?.Scheme);
+        var credentials = Encoding.UTF8.GetString(Convert.FromBase64String(observed!.Headers.Authorization!.Parameter!));
+        Assert.Equal("rdo:service-token", credentials);
+    }
+
+    [Fact]
+    public async Task Forgejo_readiness_probe_reports_rejected_credentials()
+    {
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent("""{"message":"bad credentials"}""")
+        }));
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:Enabled"] = "true",
+                ["LocalGit:ApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Token"] = "bad-token"
+            })
+            .Build();
+        var client = new ForgejoRepositoryClient(httpClient, configuration);
+
+        var readiness = await client.CheckReadinessAsync(CancellationToken.None);
+
+        Assert.False(readiness.Available);
+        Assert.True(readiness.Configured);
+        Assert.Equal(401, readiness.StatusCode);
+        Assert.Equal("Local Git is enabled, but Forgejo rejected the service credential.", readiness.Message);
     }
 
     [Fact]
@@ -625,6 +846,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("name: ROSENVALL_PULL_REQUEST_NUMBER", manifest);
         Assert.Contains("value: \"7\"", manifest);
         Assert.Contains("RDO_PULL_REQUEST_NUMBER=$ROSENVALL_PULL_REQUEST_NUMBER", manifest);
+        Assert.Contains("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", manifest);
+        Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", manifest);
+        Assert.True(manifest.IndexOf("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", StringComparison.Ordinal) < manifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         Assert.DoesNotContain("/pulls\" -H", manifest);
         Assert.DoesNotContain("npm install", manifest);
     }
@@ -666,6 +891,58 @@ public sealed class DevOpsStoreTests
         Assert.NotNull(approved.Development.PullRequestMergedAt);
         Assert.Equal("crille", approved.Development.PullRequestApprovedBy);
         Assert.Null(approved.Development.PullRequestFailure);
+    }
+
+    [Fact]
+    public void Local_git_approve_pr_deploys_before_merging_open_pull_request()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointStart = program.IndexOf("api.MapPost(\"/work-items/{workItemId:guid}/approve-pr\"", StringComparison.Ordinal);
+        var endpointEnd = program.IndexOf("api.MapPost(\"/work-items/{workItemId:guid}/preview/start\"", endpointStart, StringComparison.Ordinal);
+        var endpoint = program[endpointStart..endpointEnd];
+
+        var sourceReadIndex = endpoint.IndexOf("approvedPrSourceFiles = await ReadDeployablePreviewSourceSnapshotAsync", StringComparison.Ordinal);
+        var applyIndex = endpoint.IndexOf("var productionApply = await previews.ApplyAsync", StringComparison.Ordinal);
+        var mergeIndex = endpoint.IndexOf("var merged = await localGit.MergePullRequestAsync", StringComparison.Ordinal);
+        var markMergedIndex = endpoint.IndexOf("store.MarkPullRequestMergeState(workItemId, \"merged\", true);", StringComparison.Ordinal);
+
+        Assert.True(sourceReadIndex >= 0, "LocalGit approval should read PR source before deploying.");
+        Assert.True(applyIndex >= 0, "LocalGit approval should apply the production app before merging.");
+        Assert.True(mergeIndex >= 0, "LocalGit approval should still merge the LocalGit PR after a successful deploy.");
+        Assert.True(sourceReadIndex < mergeIndex, "Source must be read from the PR branch before merge changes the branch topology.");
+        Assert.True(applyIndex < mergeIndex, "Production deploy failure must leave the LocalGit PR open.");
+        Assert.True(mergeIndex < markMergedIndex, "RDO should only mark LocalGit merged after Forgejo merge succeeds.");
+    }
+
+    [Fact]
+    public void Delivery_mutation_endpoints_derive_audit_actor_from_claims()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("static string AuditActorFromClaims(ClaimsPrincipal user)", program);
+        Assert.Contains("store.StartImplementationRun(workItemId, request with { Actor = actor })", program);
+        Assert.Contains("store.StartPullRequestReviewFixRun(workItemId, request with { Actor = actor })", program);
+        Assert.Contains("store.ApproveAiRun(aiRunId, actor)", program);
+        Assert.Contains("previewImplementationRunner.RunAsync(result, actor, CancellationToken.None)", program);
+        Assert.Contains("store.ApprovePullRequest(workItemId, actor)", program);
+        Assert.Contains("store.StartPreviewPromotionRun(workItemId, actor)", program);
+        Assert.Contains("store.MarkPipelineRunExecuting(pipelineRunId, actor)", program);
+
+        var approvePlanEndpoint = EndpointSnippet(program, "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"");
+        Assert.Contains("var actor = AuditActorFromClaims(user);", approvePlanEndpoint);
+        Assert.DoesNotContain("request.ApprovedBy", approvePlanEndpoint);
+
+        var approvePrEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/approve-pr\"", "api.MapPost(\"/work-items/{workItemId:guid}/preview/start\"");
+        Assert.Contains("var actor = AuditActorFromClaims(user);", approvePrEndpoint);
+        Assert.DoesNotContain("request.ApprovedBy", approvePrEndpoint);
+
+        var previewStartEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/preview/start\"", "api.MapPost(\"/work-items/{workItemId:guid}/preview/stop\"");
+        Assert.Contains("var actor = AuditActorFromClaims(user);", previewStartEndpoint);
+        Assert.DoesNotContain("request.Actor", previewStartEndpoint);
+
+        var pipelineEndpoint = EndpointSnippet(program, "api.MapPost(\"/pipeline-runs/{pipelineRunId:guid}/execute\"", "api.MapGet(\"/pipeline-runs/{pipelineRunId:guid}/manifest\"");
+        Assert.Contains("var actor = AuditActorFromClaims(user);", pipelineEndpoint);
+        Assert.DoesNotContain("request.Actor", pipelineEndpoint);
     }
 
     [Fact]
@@ -799,6 +1076,90 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("app.kubernetes.io/part-of: rosenvall-devops-preview", manifest);
         Assert.DoesNotContain("npm run build", manifest);
         Assert.DoesNotContain("codex exec", manifest);
+    }
+
+    [Fact]
+    public void Production_app_manifest_uses_latest_approved_pr_source_after_review_fix()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var (repository, item, promotionRun) = CreateLocalGitPreviewPullRequest(store);
+        var board = store.GetBoards(store.GetWorkspaces().First().Id).Single(entry => entry.Repository?.Id == repository.Id);
+        var reviewComment = store.AddPullRequestReviewComment(item.Id, new CreatePullRequestReviewCommentRequest(
+            "src/App.tsx",
+            "new",
+            1,
+            "+ export default function App(){return <main>Old preview</main>}",
+            "Use the revised PR source for production."),
+            "crille");
+        var fixRun = store.StartPullRequestReviewFixRun(item.Id, new StartPullRequestReviewFixRequest("crille", "high"))!;
+        store.UpdateImplementationRun(fixRun.Id, "PullRequestReady", "RDO_COMMIT=def456\nRDO_PULL_REQUEST_URL=http://forgejo.local/rdo/demo-app/pulls/7\nRDO_PULL_REQUEST_NUMBER=7\nRDO_PULL_REQUEST_STATE=open");
+        store.UpdatePullRequestReviewComment(item.Id, reviewComment.Id, new UpdatePullRequestReviewCommentRequest(Status: "resolved"), "crille");
+        var approvedPrSource = new[]
+        {
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Fixed PR source</main>}")
+        };
+
+        var app = store.QueueBoardPublicAppDeployment(item.Id, "crille", approvedPrSource, fixRun.CommitSha)!;
+        var manifest = store.RenderBoardPublicAppManifest(board.Id)!;
+        var reopened = fixture.Reopen();
+        var reopenedManifest = reopened.RenderBoardPublicAppManifest(board.Id)!;
+
+        Assert.Equal(fixRun.Id, app.SourceImplementationRunId);
+        Assert.Equal("def456", app.CommitSha);
+        Assert.Contains("Fixed PR source", manifest);
+        Assert.DoesNotContain("Clock</main>", manifest);
+        Assert.Contains("Fixed PR source", reopenedManifest);
+    }
+
+    [Fact]
+    public async Task Deployable_source_snapshot_reader_collects_allowed_files_and_ignores_docs()
+    {
+        var repositoryId = Guid.NewGuid();
+        var trees = new Dictionary<string, RepositorySourceTreeDto>(StringComparer.OrdinalIgnoreCase)
+        {
+            [""] = new RepositorySourceTreeDto(repositoryId, "LocalGit", "main", "", [
+                new RepositorySourceEntryDto("src", "src", "directory"),
+                new RepositorySourceEntryDto("README.md", "README.md", "file"),
+                new RepositorySourceEntryDto("package.json", "package.json", "file")
+            ]),
+            ["src"] = new RepositorySourceTreeDto(repositoryId, "LocalGit", "main", "src", [
+                new RepositorySourceEntryDto("App.tsx", "src/App.tsx", "file")
+            ])
+        };
+        var files = new Dictionary<string, RepositorySourceFileDto>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["README.md"] = new RepositorySourceFileDto(repositoryId, "LocalGit", "main", "README.md", "# demo", "utf-8", 6, false, false),
+            ["package.json"] = new RepositorySourceFileDto(repositoryId, "LocalGit", "main", "package.json", "{\"scripts\":{\"build\":\"vite build\"}}", "utf-8", 33, false, false),
+            ["src/App.tsx"] = new RepositorySourceFileDto(repositoryId, "LocalGit", "main", "src/App.tsx", "export default function App(){return <main/>}", "utf-8", 42, false, false)
+        };
+
+        var source = await DeployablePreviewSourceSnapshotReader.ReadAsync(
+            path => Task.FromResult(trees.GetValueOrDefault(path)),
+            path => Task.FromResult(files.GetValueOrDefault(path)));
+
+        Assert.NotNull(source);
+        Assert.Contains(source, file => file.Path == "package.json");
+        Assert.Contains(source, file => file.Path == "src/App.tsx");
+        Assert.DoesNotContain(source, file => file.Path == "README.md");
+    }
+
+    [Fact]
+    public async Task Deployable_source_snapshot_reader_rejects_truncated_allowed_files()
+    {
+        var repositoryId = Guid.NewGuid();
+        var tree = new RepositorySourceTreeDto(repositoryId, "LocalGit", "main", "", [
+            new RepositorySourceEntryDto("src", "src", "directory")
+        ]);
+        var srcTree = new RepositorySourceTreeDto(repositoryId, "LocalGit", "main", "src", [
+            new RepositorySourceEntryDto("App.tsx", "src/App.tsx", "file")
+        ]);
+
+        var source = await DeployablePreviewSourceSnapshotReader.ReadAsync(
+            path => Task.FromResult<RepositorySourceTreeDto?>(path == "src" ? srcTree : tree),
+            path => Task.FromResult<RepositorySourceFileDto?>(new RepositorySourceFileDto(repositoryId, "LocalGit", "main", path, null, "base64", 2_000_000, false, true)));
+
+        Assert.Null(source);
     }
 
     [Fact]
@@ -1127,6 +1488,33 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_only_pipeline_runs_require_mutating_repository_access()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "rdo/app", "http://forgejo.local/rdo/app.git", "main", null, "rdo"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("App", repository.Id, null, null, null, null, null))!;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var viewer = store.GetOrCreateUser(new UserIdentityRequest("authentik|viewer", "Viewer", "viewer@example.com"));
+        var member = store.GetOrCreateUser(new UserIdentityRequest("authentik|member", "Member", "member@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("App team"), owner.Subject);
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(viewer.Id, "Viewer"));
+        store.UpsertTeamMember(team.Id, new UpsertTeamMemberRequest(member.Id, "Member"));
+        store.UpsertBoardTeamAccess(board.Id, team.Id, "Owner");
+        var repositoryOnlyRequest = new RecordPipelineRunRequest(repository.Id, null, null, "Build", "Queued", "Repository-only build.");
+
+        Assert.True(store.CanViewRepository(repository.Id, viewer.Subject));
+        Assert.False(store.CanActOnRepository(repository.Id, viewer.Subject));
+        Assert.False(store.CanRecordPipelineRun(repositoryOnlyRequest, viewer.Subject));
+        Assert.True(store.CanRecordPipelineRun(repositoryOnlyRequest, member.Subject));
+
+        var run = store.RecordPipelineRun(repositoryOnlyRequest)!;
+        Assert.False(store.CanMutatePipelineRun(run.Id, viewer.Subject));
+        Assert.True(store.CanMutatePipelineRun(run.Id, member.Subject));
+    }
+
+    [Fact]
     public void Settings_expose_forgejo_authentik_and_repository_policy()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -1143,7 +1531,9 @@ public sealed class DevOpsStoreTests
             })
             .Build();
 
-        var settings = fixture.Store.GetSettings(configuration);
+        var settings = fixture.Store.GetSettings(
+            configuration,
+            localGitReadiness: new LocalGitReadinessDto(true, true, true, "https://git.rosenvall.se/api/v1", "Local Git is ready.", 200));
 
         Assert.Equal("LocalGit", settings.Repositories.Provider);
         Assert.Equal("InternalForgejo", settings.Repositories.Mode);
@@ -1153,6 +1543,27 @@ public sealed class DevOpsStoreTests
         Assert.Equal("https://git.rosenvall.se/api/v1", settings.Repositories.ApiBaseUrl);
         Assert.True(settings.Authentik.Enabled);
         Assert.Equal("https://authentik.rosenvall.se/api/v3/core/users/", settings.Authentik.UsersEndpoint);
+    }
+
+    [Fact]
+    public void Appsettings_base_is_kubernetes_safe_and_development_carries_local_kubeconfig_discovery()
+    {
+        var root = FindRepositoryRoot();
+        var baseSettingsPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "appsettings.json");
+        var developmentSettingsPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "appsettings.Development.json");
+        using var baseSettings = JsonDocument.Parse(File.ReadAllText(baseSettingsPath));
+        using var developmentSettings = JsonDocument.Parse(File.ReadAllText(developmentSettingsPath));
+
+        var baseRoot = baseSettings.RootElement;
+        var developmentRoot = developmentSettings.RootElement;
+
+        Assert.Equal("", baseRoot.GetProperty("Preview").GetProperty("KubeconfigPath").GetString());
+        Assert.Equal("", baseRoot.GetProperty("Pipelines").GetProperty("KubeconfigPath").GetString());
+        Assert.Equal("tofu/output/kubeconfig", developmentRoot.GetProperty("Preview").GetProperty("KubeconfigPath").GetString());
+        Assert.Equal("tofu/output/kubeconfig", developmentRoot.GetProperty("Pipelines").GetProperty("KubeconfigPath").GetString());
+        Assert.DoesNotContain("https://git.rosenvall.se", File.ReadAllText(baseSettingsPath), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"Provider\": \"Forgejo\"", File.ReadAllText(baseSettingsPath), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"Mode\": \"LinkExistingFirst\"", File.ReadAllText(baseSettingsPath), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1238,6 +1649,31 @@ public sealed class DevOpsStoreTests
                 Assert.Equal("rosenvall-corp", second.AccountLogin);
                 Assert.Equal("Organization", second.AccountType);
             });
+    }
+
+    [Fact]
+    public void GitHub_webhook_signature_accepts_valid_sha256_signature()
+    {
+        var payload = Encoding.UTF8.GetBytes("""{"action":"closed"}""");
+        var secret = "webhook-secret";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        var signature = "sha256=" + Convert.ToHexString(hmac.ComputeHash(payload)).ToLowerInvariant();
+
+        Assert.True(GitHubWebhookSignatureVerifier.Verify(payload, signature, secret));
+    }
+
+    [Theory]
+    [InlineData(null, "webhook-secret")]
+    [InlineData("", "webhook-secret")]
+    [InlineData("sha1=deadbeef", "webhook-secret")]
+    [InlineData("sha256=not-hex", "webhook-secret")]
+    [InlineData("sha256=0000000000000000000000000000000000000000000000000000000000000000", "webhook-secret")]
+    [InlineData("sha256=0000000000000000000000000000000000000000000000000000000000000000", null)]
+    public void GitHub_webhook_signature_rejects_missing_malformed_or_mismatched_signature(string? signature, string? secret)
+    {
+        var payload = Encoding.UTF8.GetBytes("""{"action":"closed"}""");
+
+        Assert.False(GitHubWebhookSignatureVerifier.Verify(payload, signature, secret));
     }
 
     [Fact]
@@ -1569,7 +2005,9 @@ public sealed class DevOpsStoreTests
         Assert.Contains("chmod 600 /app/codex-home/auth.json", manifest);
         Assert.Contains("mountPath: /app/codex-home", manifest);
         Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
-        Assert.Contains("unset GITHUB_TOKEN", manifest);
+        Assert.Contains("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", manifest);
+        Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", manifest);
+        Assert.True(manifest.IndexOf("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", StringComparison.Ordinal) < manifest.IndexOf("codex exec", StringComparison.Ordinal));
         Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         Assert.Contains("git remote set-url origin \"$auth_remote\"", manifest);
         Assert.DoesNotContain("name: codex-home\n                             persistentVolumeClaim:", manifest);
@@ -1644,29 +2082,88 @@ public sealed class DevOpsStoreTests
 
         var secretManifest = RepositoryImplementationJobManifestRenderer.RenderGitHubTokenSecret(implementationRun, "ghs_short_lived_installation_token");
         var runnerManifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build(), tokenSecretName);
+        using var document = JsonDocument.Parse(secretManifest);
+        var root = document.RootElement;
+        var metadata = root.GetProperty("metadata");
+        var labels = metadata.GetProperty("labels");
+        var data = root.GetProperty("data");
 
-        Assert.Contains("kind: Secret", secretManifest);
-        Assert.Contains("namespace: rosenvall-devops", secretManifest);
-        Assert.Contains("ghs_short_lived_installation_token", secretManifest);
+        Assert.Equal("Secret", root.GetProperty("kind").GetString());
+        Assert.Equal("rosenvall-devops", metadata.GetProperty("namespace").GetString());
+        Assert.Equal(tokenSecretName, metadata.GetProperty("name").GetString());
+        Assert.Equal("rosenvall-devops-implementation", labels.GetProperty("app.kubernetes.io/part-of").GetString());
+        Assert.Equal(implementationRun.Id.ToString(), labels.GetProperty("rosenvall.devops/implementation-run").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("ghs_short_lived_installation_token")), data.GetProperty("token").GetString());
+        Assert.DoesNotContain("ghs_short_lived_installation_token", secretManifest);
+        Assert.DoesNotContain("stringData", secretManifest);
+        Assert.DoesNotContain("kubectl.kubernetes.io/last-applied-configuration", secretManifest);
         Assert.Contains(tokenSecretName, runnerManifest);
         Assert.DoesNotContain("ghs_short_lived_installation_token", runnerManifest);
     }
 
     [Fact]
-    public void GitHub_app_secret_manifest_persists_manifest_credentials()
+    public void GitHub_app_secret_payload_persists_manifest_credentials_without_string_data()
     {
-        var manifest = GitHubAppSecretRenderer.Render(new GitHubManifestAppDto(
+        var payload = GitHubAppSecretRenderer.Render(new GitHubManifestAppDto(
             12345,
             "rosenvall-devops",
             "Rosenvall DevOps",
             "-----BEGIN RSA PRIVATE KEY-----\nprivate-key-body\n-----END RSA PRIVATE KEY-----\n"));
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+        var metadata = root.GetProperty("metadata");
+        var labels = metadata.GetProperty("labels");
+        var data = root.GetProperty("data");
 
-        Assert.Contains("name: rosenvall-devops-github-app", manifest);
-        Assert.Contains("namespace: rosenvall-devops", manifest);
-        Assert.Contains("app-id: \"12345\"", manifest);
-        Assert.Contains("app-slug: \"rosenvall-devops\"", manifest);
-        Assert.Contains("private-key: |", manifest);
-        Assert.Contains("    private-key-body", manifest);
+        Assert.Equal("Secret", root.GetProperty("kind").GetString());
+        Assert.Equal(GitHubAppSecretRenderer.SecretName, metadata.GetProperty("name").GetString());
+        Assert.Equal(GitHubAppSecretRenderer.Namespace, metadata.GetProperty("namespace").GetString());
+        Assert.Equal("rosenvall-devops", labels.GetProperty("app.kubernetes.io/part-of").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("12345")), data.GetProperty("app-id").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("rosenvall-devops")), data.GetProperty("app-slug").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("-----BEGIN RSA PRIVATE KEY-----\nprivate-key-body\n-----END RSA PRIVATE KEY-----\n")), data.GetProperty("private-key").GetString());
+        Assert.DoesNotContain("stringData", payload);
+        Assert.DoesNotContain("private-key-body", payload);
+        Assert.DoesNotContain("kubectl.kubernetes.io/last-applied-configuration", payload);
+    }
+
+    [Fact]
+    public void GitHub_app_secret_payload_persists_webhook_secret_when_returned_by_manifest_conversion()
+    {
+        var payload = GitHubAppSecretRenderer.Render(new GitHubManifestAppDto(
+            12345,
+            "rosenvall-devops",
+            "Rosenvall DevOps",
+            "-----BEGIN RSA PRIVATE KEY-----\nprivate-key-body\n-----END RSA PRIVATE KEY-----\n",
+            WebhookSecret: "github-webhook-secret"));
+        using var document = JsonDocument.Parse(payload);
+
+        Assert.Equal(
+            Convert.ToBase64String(Encoding.UTF8.GetBytes("github-webhook-secret")),
+            document.RootElement.GetProperty("data").GetProperty("webhook-secret").GetString());
+        Assert.DoesNotContain("github-webhook-secret", payload);
+    }
+
+    [Fact]
+    public async Task GitHub_client_reads_webhook_secret_from_manifest_conversion()
+    {
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(_ => JsonResponse("""
+        {
+          "id": 12345,
+          "name": "Rosenvall DevOps",
+          "slug": "rosenvall-devops",
+          "pem": "-----BEGIN RSA PRIVATE KEY-----\nprivate-key-body\n-----END RSA PRIVATE KEY-----\n",
+          "webhook_secret": "github-webhook-secret",
+          "client_id": "client-id",
+          "client_secret": "client-secret"
+        }
+        """)));
+        var github = new GitHubRepositoryClient(httpClient, new ConfigurationBuilder().Build());
+
+        var app = await github.CreateAppFromManifestAsync("temporary-code", CancellationToken.None);
+
+        Assert.NotNull(app);
+        Assert.Equal("github-webhook-secret", app.WebhookSecret);
     }
 
     [Fact]
@@ -1845,18 +2342,46 @@ public sealed class DevOpsStoreTests
         var githubRepository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "demo-user/web", "https://github.com/demo-user/web.git", "main", "https://github.com/demo-user/web", "demo-user", "react-preview", "preview-then-pr"));
         var localRepository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-web", "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/rdo/demo-web.git", "main", null, "rdo", "react-preview", "preview-then-pr"));
         var demoWorkspace = visibleWorkspaces.Single(workspace => workspace.Name == "Demo Sandbox");
+        var realBoard = store.CreateBoard(realWorkspace.Id, new CreateBoardRequest("Real GitHub App", githubRepository.Id, "GitHub", "demo-user/web", githubRepository.RemoteUrl, githubRepository.WebUrl, "main"), owner.Subject);
 
         Assert.DoesNotContain(visibleWorkspaces, workspace => workspace.Id == realWorkspace.Id);
         Assert.False(store.CanCreateWorkspace(demo.Subject));
         Assert.True(store.CanCreateBoardInWorkspace(demoWorkspace.Id, demo.Subject));
         Assert.False(store.CanCreateBoardInWorkspace(realWorkspace.Id, demo.Subject));
         Assert.NotNull(store.CreateBoard(demoWorkspace.Id, new CreateBoardRequest("Demo Website", null, null, null, null, null, null), demo.Subject));
-        Assert.NotNull(store.CreateBoard(demoWorkspace.Id, new CreateBoardRequest("Demo LocalGit Website", localRepository.Id, "LocalGit", "rdo/demo-web", localRepository.RemoteUrl, null, "main", ImplementationProfile: "react-preview", ImplementationWorkflow: "preview-then-pr"), demo.Subject));
+        var demoBoard = store.CreateBoard(demoWorkspace.Id, new CreateBoardRequest("Demo LocalGit Website", localRepository.Id, "LocalGit", "rdo/demo-web", localRepository.RemoteUrl, null, "main", ImplementationProfile: "react-preview", ImplementationWorkflow: "preview-then-pr"), demo.Subject);
+        Assert.NotNull(demoBoard);
         Assert.Null(store.CreateBoard(demoWorkspace.Id, new CreateBoardRequest("Blocked GitHub Website", githubRepository.Id, "GitHub", "demo-user/web", githubRepository.RemoteUrl, githubRepository.WebUrl, "main", ImplementationProfile: "react-preview", ImplementationWorkflow: "preview-then-pr"), demo.Subject));
         Assert.Null(store.CreateBoard(realWorkspace.Id, new CreateBoardRequest("Not Allowed", null, null, null, null, null, null), demo.Subject));
+        Assert.NotNull(realBoard);
+        Assert.True(store.CanViewRepository(localRepository.Id, demo.Subject));
+        Assert.False(store.CanViewRepository(githubRepository.Id, demo.Subject));
+        Assert.True(store.CanSyncRepositoryToProvider(demoBoard.Id, "LocalGit", demo.Subject));
+        Assert.False(store.CanSyncRepositoryToProvider(demoBoard.Id, "GitHub", demo.Subject));
         Assert.False(store.CanUseGitHubInstallation(ownerIntegration.InstallationId, demo.Subject));
         Assert.False(store.CanUseGitHubInstallation(demoIntegration.InstallationId, demo.Subject));
         Assert.Empty(store.GetGitHubIntegrations(demo.Subject));
+    }
+
+    [Fact]
+    public void Demo_sandbox_policy_status_reports_restricted_demo_isolation()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var realWorkspace = store.CreateWorkspace("Real Workspace", "Production", "local", owner.Subject);
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "carnufex/web", "https://github.com/carnufex/web.git", "main", "https://github.com/carnufex/web", "carnufex"));
+        _ = store.CreateBoard(realWorkspace.Id, new CreateBoardRequest("Real App", repository.Id, "GitHub", "carnufex/web", repository.RemoteUrl, repository.WebUrl, "main"), owner.Subject);
+        _ = store.GetOrCreateUserWithDemoSandbox(new UserIdentityRequest("authentik|demo", "Demo", "demo@rosenvall.local"));
+
+        var status = store.GetDemoSandboxPolicyStatus();
+
+        Assert.True(status.Enabled);
+        Assert.True(status.DemoUserPresent);
+        Assert.True(status.Isolated);
+        Assert.Equal("demo@rosenvall.local", status.DemoEmail);
+        Assert.Equal("Demo Sandbox", status.WorkspaceName);
+        Assert.Contains("isolated", status.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -2086,9 +2611,59 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("super-secret-license", JsonSerializer.Serialize(listed));
         Assert.Contains("UNITY_LICENSE", secretManifest);
         Assert.Contains(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("super-secret-license")), secretManifest);
+        Assert.DoesNotContain("stringData", secretManifest);
+        Assert.DoesNotContain("kubectl.kubernetes.io/last-applied-configuration", secretManifest);
         Assert.Contains("UNITY_LICENSE", runnerManifest);
         Assert.Contains("secretKeyRef:", runnerManifest);
+        Assert.Contains("board_secret_UNITY_LICENSE=\"$UNITY_LICENSE\"", runnerManifest);
+        Assert.Contains("unset UNITY_LICENSE", runnerManifest);
+        Assert.True(runnerManifest.IndexOf("unset UNITY_LICENSE", StringComparison.Ordinal) < runnerManifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.True(runnerManifest.IndexOf("UNITY_LICENSE=\"$board_secret_UNITY_LICENSE\"", StringComparison.Ordinal) > runnerManifest.IndexOf("codex exec", StringComparison.Ordinal));
         Assert.DoesNotContain("super-secret-license", runnerManifest);
+    }
+
+    [Fact]
+    public void Board_secret_create_keeps_existing_metadata_until_runtime_secret_write_is_committed()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Secret replace", repository.Id, null, null, null, null, null))!;
+        var existing = store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("TOKEN", "old-secret", repository.Id))!;
+
+        var prepared = store.PrepareBoardSecretCreate(board.Id, new CreateBoardSecretRequest("TOKEN", "new-secret", repository.Id))!;
+
+        Assert.NotEqual(existing.Id, prepared.Id);
+        Assert.Single(store.GetBoardSecrets(board.Id));
+        Assert.Equal(existing.Id, store.GetBoardSecret(board.Id, existing.Id)!.Id);
+
+        var committed = store.CommitBoardSecretCreate(prepared)!;
+
+        Assert.Equal(prepared.Id, committed.Id);
+        Assert.Single(store.GetBoardSecrets(board.Id));
+        Assert.Null(store.GetBoardSecret(board.Id, existing.Id));
+        Assert.Equal(prepared.Id, store.GetBoardSecrets(board.Id).Single().Id);
+    }
+
+    [Fact]
+    public void Board_secret_update_keeps_existing_metadata_until_runtime_secret_write_is_committed()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Secret update", repository.Id, null, null, null, null, null))!;
+        var existing = store.CreateBoardSecret(board.Id, new CreateBoardSecretRequest("TOKEN", "old-secret", repository.Id))!;
+
+        var prepared = store.PrepareBoardSecretUpdate(board.Id, existing.Id)!;
+
+        Assert.Equal(existing.UpdatedAt, store.GetBoardSecret(board.Id, existing.Id)!.UpdatedAt);
+
+        var committed = store.CommitBoardSecretUpdate(prepared)!;
+
+        Assert.Equal(prepared.UpdatedAt, committed.UpdatedAt);
+        Assert.Equal(prepared.UpdatedAt, store.GetBoardSecret(board.Id, existing.Id)!.UpdatedAt);
     }
 
     [Fact]
@@ -2140,6 +2715,25 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("rosenvall-devops-codex-home", manifest);
         Assert.DoesNotContain("rosenvall-devops-github-app", manifest);
         Assert.DoesNotContain("github-user-token-", manifest);
+    }
+
+    [Fact]
+    public void Board_cleanup_manifest_includes_provider_sync_job_and_token_secret()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var source = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync cleanup", source.Id, null, null, null, null, null))!;
+        var providerSync = store.RecordPipelineRun(new RecordPipelineRunRequest(source.Id, board.Id, null, "ProviderSync", "Running", "Syncing repository.", null))!;
+        var genericPipeline = store.RecordPipelineRun(new RecordPipelineRunRequest(source.Id, board.Id, null, "Build", "Running", "Running legacy pipeline.", null))!;
+
+        var manifest = store.RenderBoardCleanupManifest(board.Id, new ConfigurationBuilder().Build())!;
+
+        Assert.Contains(RepositoryProviderSyncJobManifestRenderer.JobName(providerSync), manifest);
+        Assert.Contains(RepositoryProviderSyncJobManifestRenderer.TokenSecretName(providerSync), manifest);
+        Assert.Contains(PipelineJobManifestRenderer.JobName(genericPipeline, source), manifest);
+        Assert.DoesNotContain(PipelineJobManifestRenderer.JobName(providerSync, source), manifest);
     }
 
     [Fact]
@@ -2213,6 +2807,8 @@ public sealed class DevOpsStoreTests
         AssertImplementationManifestEnvListIsWellFormed(manifest);
         Assert.Contains("ROSENVALL_PROMPT_B64", manifest);
         Assert.Contains("CLOUDFLARE_API_TOKEN", manifest);
+        Assert.Contains("unset CLOUDFLARE_API_TOKEN", manifest);
+        Assert.True(manifest.IndexOf("unset CLOUDFLARE_API_TOKEN", StringComparison.Ordinal) < manifest.IndexOf("codex exec", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -2973,6 +3569,38 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_cleanup_token_secret_payload_has_metadata_labels_and_data()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "rosenvalls-homelab", "https://github.com/carnufex/Rosenvalls-Homelab.git", "master", "https://github.com/carnufex/Rosenvalls-Homelab", "carnufex", "gitops-homelab"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Homelab", repository.Id, null, null, null, null, null, ImplementationProfile: "gitops-homelab"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "test", "Create test.rosenvall.se.", "Review", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Plan")!;
+        var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille", repository.Id))!;
+        store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/33");
+        var cleanupRun = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
+
+        var payload = RepositoryCleanupJobManifestRenderer.RenderGitHubTokenSecret(cleanupRun, "ghs_cleanup_installation_token");
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+        var metadata = root.GetProperty("metadata");
+        var labels = metadata.GetProperty("labels");
+        var data = root.GetProperty("data");
+
+        Assert.Equal("Secret", root.GetProperty("kind").GetString());
+        Assert.Equal(RepositoryCleanupJobManifestRenderer.Namespace, metadata.GetProperty("namespace").GetString());
+        Assert.Equal(RepositoryCleanupJobManifestRenderer.GitHubTokenSecretName(cleanupRun), metadata.GetProperty("name").GetString());
+        Assert.Equal("rosenvall-devops-repository-cleanup", labels.GetProperty("app.kubernetes.io/part-of").GetString());
+        Assert.Equal(cleanupRun.Id.ToString(), labels.GetProperty("rosenvall.devops/repository-cleanup-run").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("ghs_cleanup_installation_token")), data.GetProperty("token").GetString());
+        Assert.DoesNotContain("ghs_cleanup_installation_token", payload);
+        Assert.DoesNotContain("stringData", payload);
+        Assert.DoesNotContain("kubectl.kubernetes.io/last-applied-configuration", payload);
+    }
+
+    [Fact]
     public async Task GitHub_client_reads_closes_and_comments_on_pull_requests()
     {
         var requests = new List<(HttpMethod Method, string Path, string Body)>();
@@ -3129,6 +3757,293 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Forgejo_client_reads_source_tree_and_text_files()
+    {
+        var requests = new List<(HttpMethod Method, string Path)>();
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            requests.Add((request.Method, request.RequestUri!.PathAndQuery));
+            if (request.Method == HttpMethod.Get && request.RequestUri!.PathAndQuery.EndsWith("/repos/rdo/demo-app/contents?ref=main", StringComparison.Ordinal))
+            {
+                return JsonResponse("""[{"name":"src","path":"src","type":"dir"},{"name":"README.md","path":"README.md","type":"file","size":42}]""");
+            }
+
+            if (request.Method == HttpMethod.Get && request.RequestUri!.PathAndQuery.EndsWith("/repos/rdo/demo-app/contents/src/App.tsx?ref=main", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"name":"App.tsx","path":"src/App.tsx","type":"file","size":29,"encoding":"base64","content":"ZXhwb3J0IGNvbnN0IGFwcCA9IHRydWU7Cg=="}""");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{}") };
+        }))
+        {
+            BaseAddress = new Uri("http://forgejo.local")
+        };
+        var forgejo = new ForgejoRepositoryClient(httpClient, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:ApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo",
+                ["LocalGit:Password"] = "demo-token"
+            })
+            .Build());
+        var repository = new RepositoryDto(Guid.NewGuid(), "LocalGit", "demo-app", "http://forgejo.local/rdo/demo-app.git", null, "main", DateTimeOffset.UtcNow, "rdo");
+
+        var tree = await forgejo.GetSourceTreeAsync(repository, "main", "", CancellationToken.None);
+        var file = await forgejo.GetSourceFileAsync(repository, "main", "src/App.tsx", CancellationToken.None);
+
+        Assert.NotNull(tree);
+        Assert.Equal("main", tree!.Ref);
+        Assert.Contains(tree.Entries, entry => entry.Path == "src" && entry.Type == "directory");
+        Assert.Contains(tree.Entries, entry => entry.Path == "README.md" && entry.Type == "file" && entry.Size == 42);
+        Assert.NotNull(file);
+        Assert.Equal("src/App.tsx", file!.Path);
+        Assert.Equal("export const app = true;\n", file.Content);
+        Assert.False(file.IsBinary);
+        Assert.Contains(requests, request => request.Method == HttpMethod.Get && request.Path.EndsWith("/contents/src/App.tsx?ref=main", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Source_clients_preserve_provider_failures_for_endpoint_mapping()
+    {
+        using var forgejoHttpClient = new HttpClient(new RoutingHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("forgejo is starting")
+            }))
+        {
+            BaseAddress = new Uri("http://forgejo.local")
+        };
+        var forgejo = new ForgejoRepositoryClient(forgejoHttpClient, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:ApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo",
+                ["LocalGit:Password"] = "demo-token"
+            })
+            .Build());
+        var localRepository = new RepositoryDto(Guid.NewGuid(), "LocalGit", "demo-app", "http://forgejo.local/rdo/demo-app.git", null, "main", DateTimeOffset.UtcNow, "rdo");
+
+        var localError = await Assert.ThrowsAsync<RepositorySourceProviderException>(() => forgejo.GetSourceTreeAsync(localRepository, "main", "", CancellationToken.None));
+
+        Assert.Equal("LocalGit", localError.Provider);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, localError.StatusCode);
+        Assert.Contains("forgejo is starting", localError.Detail);
+
+        using var githubHttpClient = new HttpClient(new RoutingHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.BadGateway)
+            {
+                Content = new StringContent("upstream unavailable")
+            }))
+        {
+            BaseAddress = new Uri("https://api.github.com")
+        };
+        var github = new GitHubRepositoryClient(githubHttpClient, new ConfigurationBuilder().Build());
+        var githubRepository = new RepositoryDto(Guid.NewGuid(), "GitHub", "demo-app", "https://github.com/carnufex/demo-app.git", "https://github.com/carnufex/demo-app", "main", DateTimeOffset.UtcNow, "carnufex");
+
+        var githubError = await Assert.ThrowsAsync<RepositorySourceProviderException>(() => github.GetSourceFileAsync(githubRepository, "main", "src/App.tsx", "ghs_token", CancellationToken.None));
+
+        Assert.Equal("GitHub", githubError.Provider);
+        Assert.Equal(HttpStatusCode.BadGateway, githubError.StatusCode);
+        Assert.Contains("upstream unavailable", githubError.Detail);
+    }
+
+    [Fact]
+    public async Task GitHub_client_reads_source_tree_and_text_files()
+    {
+        var requests = new List<(HttpMethod Method, string Path, string? Authorization)>();
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            requests.Add((request.Method, request.RequestUri!.PathAndQuery, request.Headers.Authorization?.Parameter));
+            if (request.Method == HttpMethod.Get && request.RequestUri!.PathAndQuery.EndsWith("/repos/carnufex/demo-app/contents?ref=main", StringComparison.Ordinal))
+            {
+                return JsonResponse("""[{"name":"src","path":"src","type":"dir"},{"name":"package.json","path":"package.json","type":"file","size":64}]""");
+            }
+
+            if (request.Method == HttpMethod.Get && request.RequestUri!.PathAndQuery.EndsWith("/repos/carnufex/demo-app/contents/package.json?ref=main", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"name":"package.json","path":"package.json","type":"file","size":18,"encoding":"base64","content":"eyJuYW1lIjoiZGVtbyJ9Cg=="}""");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{}") };
+        }))
+        {
+            BaseAddress = new Uri("https://api.github.com")
+        };
+        var github = new GitHubRepositoryClient(httpClient, new ConfigurationBuilder().Build());
+        var repository = new RepositoryDto(Guid.NewGuid(), "GitHub", "demo-app", "https://github.com/carnufex/demo-app.git", "https://github.com/carnufex/demo-app", "main", DateTimeOffset.UtcNow, "carnufex");
+
+        var tree = await github.GetSourceTreeAsync(repository, "main", "", "ghs_token", CancellationToken.None);
+        var file = await github.GetSourceFileAsync(repository, "main", "package.json", "ghs_token", CancellationToken.None);
+
+        Assert.NotNull(tree);
+        Assert.Equal("main", tree!.Ref);
+        Assert.Contains(tree.Entries, entry => entry.Path == "src" && entry.Type == "directory");
+        Assert.NotNull(file);
+        Assert.Equal("package.json", file!.Path);
+        Assert.Equal("{\"name\":\"demo\"}\n", file.Content);
+        Assert.All(requests, request => Assert.Equal("ghs_token", request.Authorization));
+    }
+
+    [Fact]
+    public void Provider_sync_manifest_pushes_heads_and_tags_without_token_literals()
+    {
+        var run = new PipelineRunDto(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"), null, "ProviderSync", "Queued", "Queued provider sync.", null, DateTimeOffset.UtcNow);
+        var source = new RepositoryDto(Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), "LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", null, "main", DateTimeOffset.UtcNow, "rdo");
+        var target = new RepositoryDto(Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"), "LocalGit", "demo-copy", "http://forgejo/rdo/demo-copy.git", null, "main", DateTimeOffset.UtcNow, "rdo");
+
+        var manifest = RepositoryProviderSyncJobManifestRenderer.Render(run, source, target, "provider-sync-token", "http://forgejo.local/api/v1", "rdo");
+        var job = KubernetesYaml.SingleDocument(manifest, "Job");
+        var runner = Assert.Single(job.Spec.Template.Spec.Containers, container => container.Name == "runner");
+
+        Assert.Equal(RepositoryProviderSyncJobManifestRenderer.JobName(run), job.Metadata.Name);
+        Assert.Equal(RepositoryImplementationJobManifestRenderer.Namespace, job.Metadata.Namespace);
+        Assert.Equal("rosenvall-devops-provider-sync", job.Metadata.Labels["app.kubernetes.io/part-of"]);
+        Assert.Equal(run.Id.ToString(), job.Metadata.Labels["rosenvall.devops/pipeline-run"]);
+        Assert.False(job.Spec.Template.Spec.AutomountServiceAccountToken);
+        Assert.Equal("alpine/git:2.47.2", runner.Image);
+        Assert.Contains("ALL", runner.SecurityContext.Capabilities.Drop);
+        Assert.Contains("refs/heads/*:refs/heads/*", manifest);
+        Assert.Contains("refs/tags/*:refs/tags/*", manifest);
+        Assert.Contains("GIT_ASKPASS=\"$workspace/git-askpass.sh\"", manifest);
+        Assert.Contains("git_with_credentials \"$ROSENVALL_SOURCE_PROVIDER\" \"$ROSENVALL_SOURCE_GIT_TOKEN\" git clone --mirror \"$ROSENVALL_SOURCE_REPOSITORY_URL\"", manifest);
+        Assert.Contains("git_with_credentials \"$ROSENVALL_TARGET_PROVIDER\" \"$ROSENVALL_TARGET_GIT_TOKEN\" git -C \"$workspace/repo.git\" push \"$ROSENVALL_TARGET_REPOSITORY_URL\"", manifest);
+        Assert.Contains("provider-sync-token", manifest);
+        Assert.Contains("ROSENVALL_SOURCE_REPOSITORY_URL", manifest);
+        Assert.Contains("ROSENVALL_TARGET_REPOSITORY_URL", manifest);
+        Assert.DoesNotContain("auth_remote", manifest);
+        Assert.DoesNotContain("x-access-token:${token}", manifest);
+        Assert.DoesNotContain("${ROSENVALL_LOCAL_GIT_USERNAME}:${token}@", manifest);
+        Assert.DoesNotContain("ghs_", manifest);
+        Assert.DoesNotContain("demo-token", manifest);
+        Assert.DoesNotContain("refs/pull", manifest, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("refs/merge", manifest, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Repository_source_feature_normalizes_paths_and_clone_commands()
+    {
+        Assert.Equal("src/App.tsx", RepositorySourceFeature.NormalizeSourcePath("/src\\App.tsx"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourcePath("../secret"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourcePath("src/../secret"));
+        Assert.Equal("feature/dark-mode", RepositorySourceFeature.NormalizeSourceRef(" feature/dark-mode ", "main"));
+        Assert.Equal("main", RepositorySourceFeature.NormalizeSourceRef("", "main"));
+        Assert.Equal("0123456789abcdef0123456789abcdef01234567", RepositorySourceFeature.NormalizeSourceRef("0123456789abcdef0123456789abcdef01234567", "main"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature/../secret", "main"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("/feature", "main"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature.lock", "main"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature with space", "main"));
+        Assert.Equal("src/App.tsx", RepositorySourceFeature.EscapeSourcePathForUrl("src/App.tsx"));
+        Assert.Equal("src/App%20Shell.tsx", RepositorySourceFeature.EscapeSourcePathForUrl("src/App Shell.tsx"));
+        Assert.Equal("git clone https://example.test/repo.git", RepositorySourceFeature.BuildCloneCommand("https://example.test/repo.git"));
+        Assert.Equal("git clone \"https://example.test/repo with spaces.git\"", RepositorySourceFeature.BuildCloneCommand("https://example.test/repo with spaces.git"));
+
+        var internalLocalGit = RepositorySourceFeature.BuildCloneInfo(Guid.NewGuid(), "LocalGit", "http://forgejo.rosenvall-devops.svc/rdo/demo.git", null);
+        Assert.Null(internalLocalGit.HumanCloneUrl);
+        Assert.Equal("http://forgejo.rosenvall-devops.svc/rdo/demo.git", internalLocalGit.RunnerCloneUrl);
+        Assert.True(internalLocalGit.InternalOnly);
+        Assert.Equal("rdo-runner", internalLocalGit.RecommendedMode);
+        Assert.Equal("", internalLocalGit.CloneCommand);
+
+        var githubClone = RepositorySourceFeature.BuildCloneInfo(Guid.NewGuid(), "GitHub", "https://github.com/carnufex/demo.git", "https://github.com/carnufex/demo");
+        Assert.Equal("https://github.com/carnufex/demo.git", githubClone.HumanCloneUrl);
+        Assert.Equal("https://github.com/carnufex/demo.git", githubClone.RunnerCloneUrl);
+        Assert.Equal("https://github.com/carnufex/demo", githubClone.WebUrl);
+        Assert.False(githubClone.InternalOnly);
+        Assert.Equal("human", githubClone.RecommendedMode);
+        Assert.Equal("git clone https://github.com/carnufex/demo.git", githubClone.CloneCommand);
+    }
+
+    [Theory]
+    [InlineData("localgit", "LocalGit")]
+    [InlineData("GitHub", "GitHub")]
+    [InlineData("gitlab", "")]
+    public void Repository_source_feature_normalizes_supported_target_providers(string input, string expected)
+    {
+        Assert.Equal(expected, RepositorySourceFeature.NormalizeTargetProvider(input));
+    }
+
+    [Theory]
+    [InlineData("LocalGit", true)]
+    [InlineData("GitHub", true)]
+    [InlineData("GenericGit", false)]
+    public void Repository_source_feature_reports_source_readability_by_provider(string provider, bool expectedReadable)
+    {
+        Assert.Equal(expectedReadable, RepositorySourceFeature.IsSourceReadableProvider(provider));
+        Assert.Equal(expectedReadable ? null : RepositorySourceFeature.UnsupportedSourceProviderMessage, RepositorySourceFeature.SourceUnavailableReason(provider));
+
+        var repository = new RepositorySourceRepositoryDto(Guid.NewGuid(), provider, "demo", "rdo", "main", true, null, RepositorySourceFeature.IsSourceReadableProvider(provider), RepositorySourceFeature.SourceUnavailableReason(provider));
+
+        Assert.Equal(expectedReadable, repository.SourceReadable);
+        Assert.Equal(expectedReadable ? null : RepositorySourceFeature.UnsupportedSourceProviderMessage, repository.SourceUnavailableReason);
+    }
+
+    [Fact]
+    public void Source_and_provider_sync_endpoints_use_repository_source_feature_module()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("RepositorySourceFeature.NormalizeSourcePath", program);
+        Assert.Contains("RepositorySourceFeature.NormalizeSourceRef", program);
+        Assert.Contains("RepositorySourceFeature.EscapeSourcePathForUrl", program);
+        Assert.Contains("RepositorySourceFeature.BuildCloneInfo", program);
+        Assert.Contains("RepositorySourceFeature.NormalizeTargetProvider", program);
+        Assert.Contains("RepositorySourceReadResultAsync", program);
+        Assert.DoesNotContain("static string NormalizeApiSourcePath", program);
+        Assert.DoesNotContain("static string BuildCloneCommand", program);
+    }
+
+    [Fact]
+    public void Provider_sync_run_can_be_marked_succeeded_after_job_completion()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync observer", repository.Id, null, null, null, null, null))!;
+        var run = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, null, "ProviderSync", "Running", "Provider sync job submitted.", null))!;
+
+        var updated = store.MarkPipelineRunSucceeded(run.Id, "provider-sync-monitor", "Provider sync completed.");
+
+        Assert.NotNull(updated);
+        Assert.Equal("Succeeded", updated!.Status);
+        Assert.Equal("Provider sync completed.", updated.Message);
+        Assert.NotNull(updated.CompletedAt);
+        Assert.Contains(store.GetTimeline(board.Id), entry => entry.Kind == "Pipeline" && entry.Message == "Provider sync completed.");
+    }
+
+    [Fact]
+    public void Provider_sync_target_repository_link_is_pending_until_pipeline_succeeds()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var source = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var target = store.CreateRepository(new CreateRepositoryRequest("GitHub", "demo-app-copy", "https://github.com/rdo/demo-app-copy.git", "main", "https://github.com/rdo/demo-app-copy", "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync state", source.Id, null, null, null, null, null))!;
+        store.LinkRepositoryToBoard(board.Id, new LinkBoardRepositoryRequest(target.Id, false, source.ImplementationProfile, "PendingSync"));
+        var run = store.RecordPipelineRun(new RecordPipelineRunRequest(source.Id, board.Id, null, "ProviderSync", "Running", "Syncing repository.", target.WebUrl, TargetRepositoryId: target.Id))!;
+
+        Assert.Contains(store.GetBoardRepositories(board.Id), link => link.RepositoryId == target.Id && link.SyncState == "PendingSync");
+
+        store.MarkPipelineRunFailed(run.Id, "provider-sync-monitor", "Push failed.");
+        Assert.Contains(store.GetBoardRepositories(board.Id), link => link.RepositoryId == target.Id && link.SyncState == "Failed");
+
+        store.MarkPipelineRunSucceeded(run.Id, "provider-sync-monitor", "Provider sync completed.");
+        Assert.Contains(store.GetBoardRepositories(board.Id), link => link.RepositoryId == target.Id && link.SyncState == "Ready");
+    }
+
+    [Fact]
+    public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("builder.Services.AddHostedService<ProviderSyncRunMonitor>();", program);
+        Assert.Contains("public sealed class ProviderSyncRunMonitor", program);
+        Assert.Contains("RepositoryProviderSyncJobManifestRenderer.JobName(run)", program);
+        Assert.Contains("store.MarkPipelineRunSucceeded(run.Id", program);
+    }
+
+    [Fact]
     public async Task GitHub_client_creates_private_repository_with_readme_initialization()
     {
         var requests = new List<(HttpMethod Method, string Path, string Body)>();
@@ -3200,16 +4115,20 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void GitHub_app_secret_renderer_includes_optional_oauth_client_credentials()
     {
-        var manifest = GitHubAppSecretRenderer.Render(new GitHubManifestAppDto(
+        var payload = GitHubAppSecretRenderer.Render(new GitHubManifestAppDto(
             123,
             "rosenvall-devops",
             "Rosenvall DevOps",
             "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
             "Iv1.client",
             "client-secret"));
+        using var document = JsonDocument.Parse(payload);
+        var data = document.RootElement.GetProperty("data");
 
-        Assert.Contains("client-id: \"Iv1.client\"", manifest);
-        Assert.Contains("client-secret: \"client-secret\"", manifest);
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("Iv1.client")), data.GetProperty("client-id").GetString());
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("client-secret")), data.GetProperty("client-secret").GetString());
+        Assert.DoesNotContain(":\"client-secret\"", payload);
+        Assert.DoesNotContain("stringData", payload);
     }
 
     [Fact]
@@ -3382,20 +4301,26 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void GitHub_integrations_include_personal_accounts_for_authorization_but_not_creation()
+    public void GitHub_integrations_show_only_actor_owned_or_matching_authorized_personal_accounts()
     {
         using var fixture = DevOpsStoreFixture.Create();
         fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(111, "crille", "User", "authentik|crille", 3));
         fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(222, "guest", "User", "authentik|guest", 4));
+        fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(223, "authorized-guest", "User", "github-app", 2));
         fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(333, "shared", "Organization", "github-app", 5));
+        fixture.Store.UpsertGitHubUserAuthorization(new GitHubUserAuthorizationDto(Guid.NewGuid(), "authentik|crille", 223, "authorized-guest", "authorized-guest", "Connected", "github-user-token-test", DateTimeOffset.UtcNow));
+        fixture.Store.UpsertGitHubUserAuthorization(new GitHubUserAuthorizationDto(Guid.NewGuid(), "authentik|guest", 111, "guest", "guest", "Connected", "github-user-token-guest", DateTimeOffset.UtcNow));
 
         var crilleIntegrations = fixture.Store.GetGitHubIntegrations("authentik|crille");
 
         Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 111);
-        Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 222);
+        Assert.DoesNotContain(crilleIntegrations, entry => entry.InstallationId == 222);
+        Assert.Contains(crilleIntegrations, entry => entry.InstallationId == 223 && entry.HasUserAuthorization);
         Assert.DoesNotContain(crilleIntegrations, entry => entry.InstallationId == 333);
         Assert.True(fixture.Store.CanUseGitHubInstallation(111, "authentik|crille"));
-        Assert.True(fixture.Store.CanUseGitHubInstallation(222, "authentik|crille"));
+        Assert.False(fixture.Store.CanUseGitHubInstallation(222, "authentik|crille"));
+        Assert.True(fixture.Store.CanUseGitHubInstallation(223, "authentik|crille"));
+        Assert.False(fixture.Store.CanUseGitHubInstallation(111, "authentik|guest"));
         Assert.False(fixture.Store.CanUseGitHubInstallation(333, "authentik|crille"));
         Assert.False(fixture.Store.CanCreateGitHubRepository(222, "authentik|crille"));
         Assert.NotEqual(222, fixture.Store.GetDefaultGitHubInstallationId("authentik|crille"));
@@ -3411,6 +4336,30 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal(222, fixture.Store.GetDefaultGitHubInstallationId());
         Assert.Equal(integration.Id, fixture.Store.GetGitHubIntegrationForRepository(repository)!.Id);
+    }
+
+    [Fact]
+    public void GitHub_app_integration_for_repository_does_not_fall_back_to_default_installation()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var repository = fixture.Store.CreateRepository(new CreateRepositoryRequest("GitHub", "Gatebound", "https://github.com/carnufex/Gatebound.git", "main", "https://github.com/carnufex/Gatebound", "carnufex", "unity"));
+        fixture.Store.CreateGitHubIntegration(new GitHubIntegrationCallbackRequest(111, "other-org", "Organization", "authentik|crille", 3));
+
+        Assert.Equal(111, fixture.Store.GetDefaultGitHubInstallationId());
+        Assert.Null(fixture.Store.GetGitHubIntegrationForRepository(repository));
+    }
+
+    [Fact]
+    public void Source_and_provider_sync_resolve_github_tokens_from_repository_context()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("ResolveGitHubRepositoryReadTokenAsync(store, github, repository, AuthenticatedSubjectOrNull(user)", program);
+        Assert.Contains("ResolveGitHubRepositoryReadTokenAsync(store, github, source, AuthenticatedSubjectOrNull(user)", program);
+        Assert.Contains("GetGitHubIntegrationForRepository(repository)", program);
+        Assert.Contains("!store.CanUseGitHubInstallation(integration.InstallationId, actorSubject)", program);
+        Assert.DoesNotContain("ResolveGitHubRepositoryReadTokenAsync(DevOpsStore store, GitHubRepositoryClient github, string? actorSubject", program);
+        Assert.DoesNotContain("store.GetDefaultGitHubInstallationId(actorSubject) is { } installationId", program);
     }
 
     [Fact]
@@ -3724,6 +4673,10 @@ public sealed class DevOpsStoreTests
     {
         var script = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "start-local-demo.ps1"));
 
+        Assert.Contains("local-demo.pids.json", script);
+        Assert.Contains("apiPid = $api.Id", script);
+        Assert.Contains("frontendPid = $frontend.Id", script);
+        Assert.Contains("forgejoPid", script);
         Assert.Contains("Ai__Codex__PreviewSourceMode", script);
         Assert.Contains("Ai__Codex__PreviewSourceJobTimeoutSeconds", script);
         Assert.Contains("Ai__Codex__KubernetesRunnerImage", script);
@@ -3738,6 +4691,23 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Local_stop_script_stops_recorded_and_port_forward_processes()
+    {
+        var script = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "stop-local-demo.ps1"));
+
+        Assert.Contains("local-demo.pids.json", script);
+        Assert.Contains("Stop-RecordedProcess \"API\" $recorded.apiPid", script);
+        Assert.Contains("Stop-RecordedProcess \"frontend\" $recorded.frontendPid", script);
+        Assert.Contains("Stop-RecordedProcess \"Forgejo port-forward\" $recorded.forgejoPid", script);
+        Assert.Contains("rosenvall-devops-api", script);
+        Assert.Contains("rosenvall-devops-forgejo", script);
+        Assert.Contains("port-forward", script);
+        Assert.Contains("Remove-Item -LiteralPath $pidFile", script);
+        Assert.Contains("Some Rosenvall DevOps local demo processes are still running", script);
+        Assert.Contains("No matching Rosenvall DevOps local demo processes remain", script);
+    }
+
+    [Fact]
     public void Api_dockerfile_does_not_install_preview_base_dependencies_for_preview_promotion()
     {
         var dockerfile = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Dockerfile"));
@@ -3746,6 +4716,169 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("/opt/rosenvall-preview/package.json", dockerfile);
         Assert.DoesNotContain("cd /opt/rosenvall-preview", dockerfile);
         Assert.DoesNotContain("npm install --no-audit --no-fund", dockerfile);
+    }
+
+    [Fact]
+    public void Api_dockerfile_installs_jq_for_runner_json_parsing()
+    {
+        var dockerfile = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Dockerfile"));
+
+        Assert.Contains("ca-certificates curl git jq nodejs npm", dockerfile);
+    }
+
+    [Fact]
+    public void Ci_runs_frontend_tests_before_frontend_build()
+    {
+        var ci = File.ReadAllText(Path.Combine(FindRepositoryRoot(), ".github", "workflows", "ci.yml"));
+        var testIndex = ci.IndexOf("run: npm test -- --runInBand", StringComparison.Ordinal);
+        var buildIndex = ci.IndexOf("run: npm run build", StringComparison.Ordinal);
+
+        Assert.True(testIndex >= 0, "CI should run the frontend unit tests.");
+        Assert.True(buildIndex >= 0, "CI should still run the frontend production build.");
+        Assert.True(testIndex < buildIndex, "Frontend tests should run before the production build.");
+    }
+
+    [Fact]
+    public void Image_publish_workflow_waits_for_successful_ci()
+    {
+        var workflow = File.ReadAllText(Path.Combine(FindRepositoryRoot(), ".github", "workflows", "publish-images.yml"));
+
+        Assert.Contains("workflow_run:", workflow);
+        Assert.Contains("- CI", workflow);
+        Assert.Contains("github.event.workflow_run.conclusion == 'success'", workflow);
+        Assert.Contains("COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}", workflow);
+        Assert.Contains("ref: ${{ env.COMMIT_SHA }}", workflow);
+        Assert.Contains("-api:${{ env.COMMIT_SHA }}", workflow);
+    }
+
+    [Fact]
+    public void Browser_security_headers_are_declared_for_api_and_frontend()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Authentication:Authority"] = "https://authentik.rosenvall.se/application/o/rosenvall-devops/",
+                ["Frontend:AllowedOrigins:0"] = "https://devops.rosenvall.se"
+            })
+            .Build();
+        var headers = new HeaderDictionary();
+
+        BrowserSecurityHeaders.Apply(headers, configuration, includeHsts: true);
+
+        var csp = Assert.Single(headers[BrowserSecurityHeaders.ContentSecurityPolicyHeader]);
+        Assert.Contains("default-src 'self'", csp);
+        Assert.Contains("script-src 'self'", csp);
+        Assert.DoesNotContain("script-src 'self' 'unsafe-inline'", csp);
+        Assert.Contains("https://authentik.rosenvall.se", csp);
+        Assert.Contains("https://api.github.com", csp);
+        Assert.Contains("frame-ancestors 'none'", csp);
+        Assert.Equal("nosniff", headers[BrowserSecurityHeaders.ContentTypeOptionsHeader]);
+        Assert.Equal("DENY", headers[BrowserSecurityHeaders.FrameOptionsHeader]);
+        Assert.Equal("strict-origin-when-cross-origin", headers[BrowserSecurityHeaders.ReferrerPolicyHeader]);
+        Assert.Equal("max-age=31536000; includeSubDomains", headers[BrowserSecurityHeaders.StrictTransportSecurityHeader]);
+
+        var nginx = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "frontend", "nginx.conf"));
+        Assert.Contains("add_header Content-Security-Policy", nginx);
+        Assert.Contains("script-src 'self'", nginx);
+        Assert.DoesNotContain("script-src 'self' 'unsafe-inline'", nginx);
+        Assert.Contains("add_header X-Content-Type-Options \"nosniff\" always;", nginx);
+        Assert.Contains("add_header X-Frame-Options \"DENY\" always;", nginx);
+        Assert.Contains("add_header Strict-Transport-Security", nginx);
+    }
+
+    [Fact]
+    public void Authentication_mode_fails_closed_outside_development()
+    {
+        var missingRequired = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Authentication:Mode"] = "Required"
+            })
+            .Build();
+        var disabledProduction = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Authentication:Mode"] = "DisabledForLocalDevelopment"
+            })
+            .Build();
+        var configured = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Authentication:Mode"] = "Required",
+                ["Authentication:Authority"] = "https://authentik.rosenvall.se/application/o/rosenvall-devops/",
+                ["Authentication:Audience"] = "rosenvall-devops"
+            })
+            .Build();
+
+        Assert.Throws<InvalidOperationException>(() => AuthenticationMode.Resolve(missingRequired, isDevelopment: false));
+        Assert.Throws<InvalidOperationException>(() => AuthenticationMode.Resolve(disabledProduction, isDevelopment: false));
+
+        var resolved = AuthenticationMode.Resolve(configured, isDevelopment: false);
+        Assert.Equal(AuthenticationMode.Required, resolved.Mode);
+        Assert.True(resolved.Enabled);
+        Assert.Equal("https://authentik.rosenvall.se/application/o/rosenvall-devops/", resolved.Authority);
+        Assert.Equal("rosenvall-devops", resolved.Audience);
+    }
+
+    [Fact]
+    public void Authentication_mode_allows_local_development_only_when_explicitly_disabled_or_unconfigured()
+    {
+        var unconfigured = new ConfigurationBuilder().Build();
+        var disabled = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Authentication:Mode"] = "DisabledForLocalDevelopment",
+                ["Authentication:Authority"] = "https://authentik.rosenvall.se/application/o/rosenvall-devops/",
+                ["Authentication:Audience"] = "rosenvall-devops"
+            })
+            .Build();
+        var inferredRequired = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Authentication:Authority"] = "https://authentik.rosenvall.se/application/o/rosenvall-devops/",
+                ["Authentication:Audience"] = "rosenvall-devops"
+            })
+            .Build();
+
+        var local = AuthenticationMode.Resolve(unconfigured, isDevelopment: true);
+        Assert.Equal(AuthenticationMode.DisabledForLocalDevelopment, local.Mode);
+        Assert.False(local.Enabled);
+
+        var explicitlyDisabled = AuthenticationMode.Resolve(disabled, isDevelopment: true);
+        Assert.Equal(AuthenticationMode.DisabledForLocalDevelopment, explicitlyDisabled.Mode);
+        Assert.False(explicitlyDisabled.Enabled);
+
+        var authEnabled = AuthenticationMode.Resolve(inferredRequired, isDevelopment: true);
+        Assert.Equal(AuthenticationMode.Required, authEnabled.Mode);
+        Assert.True(authEnabled.Enabled);
+    }
+
+    [Fact]
+    public void Realtime_mode_fails_closed_for_authenticated_global_broadcasts()
+    {
+        var unsafeRealtime = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Realtime:Enabled"] = "true"
+            })
+            .Build();
+        var explicitlyAcknowledged = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Realtime:Enabled"] = "true",
+                ["Realtime:AllowUnsafeBroadcasts"] = "true"
+            })
+            .Build();
+
+        var failure = Assert.Throws<InvalidOperationException>(() => RealtimeMode.Resolve(unsafeRealtime, authenticationEnabled: true));
+        Assert.Contains("Realtime:AllowUnsafeBroadcasts", failure.Message);
+
+        var disabled = RealtimeMode.Resolve(unsafeRealtime, authenticationEnabled: false);
+        Assert.True(disabled.Enabled);
+
+        var acknowledged = RealtimeMode.Resolve(explicitlyAcknowledged, authenticationEnabled: true);
+        Assert.True(acknowledged.Enabled);
+        Assert.True(acknowledged.UnsafeBroadcastsAllowed);
     }
 
     [Fact]
@@ -3766,6 +4899,7 @@ public sealed class DevOpsStoreTests
 
         var configMap = File.ReadAllText(configMapPath);
 
+        Assert.Contains("Authentication__Mode: Required", configMap);
         Assert.Contains("Preview__KubeconfigPath: \"\"", configMap);
         Assert.Contains("Pipelines__KubeconfigPath: \"\"", configMap);
         Assert.Contains("Ai__Codex__KubernetesSandboxMode: danger-full-access", configMap);
@@ -3793,6 +4927,67 @@ public sealed class DevOpsStoreTests
 
         Assert.Contains("memory: 1Gi", deployment);
         Assert.Contains("memory: 3Gi", deployment);
+    }
+
+    [Fact]
+    public void Homelab_api_deployment_and_image_run_as_non_root_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var deploymentPath = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "rosenvall-devops",
+            "api-deployment.yaml");
+        if (!File.Exists(deploymentPath))
+        {
+            return;
+        }
+
+        var deployment = File.ReadAllText(deploymentPath);
+        var dockerfile = File.ReadAllText(Path.Combine(root.FullName, "src", "Rosenvall.DevOps.Api", "Dockerfile"));
+
+        Assert.Contains("runAsNonRoot: true", deployment);
+        Assert.Contains("runAsUser: 1000", deployment);
+        Assert.Contains("runAsGroup: 1000", deployment);
+        Assert.Contains("fsGroup: 1000", deployment);
+        Assert.Contains("readOnlyRootFilesystem: true", deployment);
+        Assert.Contains("mountPath: /tmp", deployment);
+        Assert.Contains("name: tmp", deployment);
+        Assert.Contains("USER 1000:1000", dockerfile);
+    }
+
+    [Fact]
+    public void Homelab_frontend_deployment_and_image_run_unprivileged_without_extra_capabilities_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var deploymentPath = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "rosenvall-devops",
+            "frontend-deployment.yaml");
+        if (!File.Exists(deploymentPath))
+        {
+            return;
+        }
+
+        var deployment = File.ReadAllText(deploymentPath);
+        var dockerfile = File.ReadAllText(Path.Combine(root.FullName, "frontend", "Dockerfile"));
+
+        Assert.Contains("nginxinc/nginx-unprivileged", dockerfile);
+        Assert.Contains("runAsNonRoot: true", deployment);
+        Assert.Contains("runAsUser: 101", deployment);
+        Assert.Contains("runAsGroup: 101", deployment);
+        Assert.Contains("readOnlyRootFilesystem: true", deployment);
+        Assert.Contains("mountPath: /tmp", deployment);
+        Assert.Contains("name: nginx-cache", deployment);
+        Assert.DoesNotContain("add:", deployment);
+        Assert.DoesNotContain("CHOWN", deployment);
+        Assert.DoesNotContain("SETGID", deployment);
+        Assert.DoesNotContain("SETUID", deployment);
     }
 
     [Fact]
@@ -3877,6 +5072,49 @@ public sealed class DevOpsStoreTests
 
         Assert.Contains("resources: [\"events\"]", rbac);
         Assert.Contains("verbs: [\"get\", \"list\", \"watch\"]", rbac);
+    }
+
+    [Fact]
+    public void Homelab_splits_api_control_plane_rbac_from_runtime_preview_source_publisher_when_available()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var homelabRoot = Path.Combine(
+            root.Parent?.FullName ?? "",
+            "Rosenvalls-Homelab",
+            "kubernetes",
+            "applications",
+            "rosenvall-devops");
+        var serviceAccountPath = Path.Combine(homelabRoot, "serviceaccount.yaml");
+        var deploymentPath = Path.Combine(homelabRoot, "api-deployment.yaml");
+        var rbacPath = Path.Combine(homelabRoot, "preview-rbac.yaml");
+        if (!File.Exists(serviceAccountPath) || !File.Exists(deploymentPath) || !File.Exists(rbacPath))
+        {
+            return;
+        }
+
+        var serviceAccounts = File.ReadAllText(serviceAccountPath);
+        var deployment = File.ReadAllText(deploymentPath);
+        var rbac = File.ReadAllText(rbacPath);
+        var previewManagerBinding = HomelabYamlDocument(rbac, "ClusterRoleBinding", "rosenvall-devops-preview-manager");
+        var runtimeCredentialsBinding = HomelabYamlDocument(rbac, "RoleBinding", "rosenvall-devops-api-credentials");
+        var pipelineTokenCleanupBinding = HomelabYamlDocument(rbac, "RoleBinding", "rosenvall-devops-pipeline-token-cleanup");
+        var previewSourceWriterRole = HomelabYamlDocument(rbac, "Role", "rosenvall-devops-preview-source-result-writer");
+        var previewSourceWriterBinding = HomelabYamlDocument(rbac, "RoleBinding", "rosenvall-devops-preview-source-result-writer");
+
+        Assert.Contains("name: rosenvall-devops-api", serviceAccounts);
+        Assert.Contains("name: rosenvall-devops-runtime", serviceAccounts);
+        Assert.Contains("serviceAccountName: rosenvall-devops-api", deployment);
+
+        Assert.Contains("name: rosenvall-devops-api", previewManagerBinding);
+        Assert.DoesNotContain("name: rosenvall-devops-runtime", previewManagerBinding);
+        Assert.Contains("name: rosenvall-devops-api", runtimeCredentialsBinding);
+        Assert.DoesNotContain("name: rosenvall-devops-runtime", runtimeCredentialsBinding);
+        Assert.Contains("name: rosenvall-devops-api", pipelineTokenCleanupBinding);
+        Assert.DoesNotContain("name: rosenvall-devops-runtime", pipelineTokenCleanupBinding);
+
+        Assert.Contains("resources: [\"configmaps\"]", previewSourceWriterRole);
+        Assert.Contains("verbs: [\"get\", \"create\", \"update\", \"patch\", \"delete\"]", previewSourceWriterRole);
+        Assert.Contains("name: rosenvall-devops-runtime", previewSourceWriterBinding);
     }
 
     [Fact]
@@ -3985,6 +5223,25 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void New_human_comment_ownership_uses_actor_subject_not_client_display_name()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var board = store.GetWorkspaces().SelectMany(workspace => store.GetBoards(workspace.Id)).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "comments", "Edit comments.", "Todo", "Medium", null));
+        var comment = store.AddComment(item.Id, "Owner Name", "Comment", "Original text.", "authentik|owner")!;
+
+        Assert.Equal("authentik|owner", comment.AuthorSubject);
+        Assert.Throws<InvalidOperationException>(() => store.UpdateComment(comment.Id, "authentik|other", "Owner Name", "Spoofed edit."));
+        Assert.Throws<InvalidOperationException>(() => store.DeleteComment(comment.Id, "authentik|other", "Owner Name"));
+
+        var updated = store.UpdateComment(comment.Id, "authentik|owner", "Renamed Owner", "Updated text.");
+
+        Assert.NotNull(updated);
+        Assert.Equal("Updated text.", updated.Body);
+    }
+
+    [Fact]
     public void Ai_and_other_user_comments_cannot_be_edited_or_deleted()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -4024,6 +5281,9 @@ public sealed class DevOpsStoreTests
         Assert.Contains("hello-world", detail.Preview.Namespace);
         Assert.Contains("Local React/Tailwind implementation completed", detail.Comments.Last().Body);
         Assert.Contains("kind: ConfigMap", manifest);
+        Assert.Contains("rosenvall.devops/managed-by: rosenvall-devops", manifest);
+        Assert.Contains($"rosenvall.devops/board-id: {board.Id}", manifest);
+        Assert.Contains($"rosenvall.devops/work-item-id: {item.Id}", manifest);
         Assert.Contains("automountServiceAccountToken: false", manifest);
         Assert.Contains("tailwind.config.ts", manifest);
         Assert.Contains("components.json", manifest);
@@ -4100,17 +5360,30 @@ public sealed class DevOpsStoreTests
         var updatedRun = store.UpdateImplementationRun(
             implementationRun.Id,
             "Failed",
-            "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\nremote https://x-access-token:github_pat_abcdefghijklmnopqrstuvwxyz123456@github.com/rosenvall/secure-demo.git\nAuthorization: Bearer secret-token-value",
-            "failed with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456")!;
+            "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\nremote https://x-access-token:github_pat_abcdefghijklmnopqrstuvwxyz123456@github.com/rosenvall/secure-demo.git\nAuthorization: Bearer secret-token-value\nAuthorization: Basic abc123\ncurl -H 'Authorization: Basic $forgejo_auth'\nremote http://rdo:service-token@forgejo/rdo/app.git\nmirror https://user:secret@example.com/repo.git\nforgejo_abcdefghijklmnopqrstuvwxyz123456",
+            "failed with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456 and Authorization: Basic abc123 for http://rdo:service-token@forgejo/rdo/app.git")!;
         var updatedPreview = store.AppendPreviewTerminalLine(item.Id, "stderr", "CLOUDFLARE_API_TOKEN=abc123 PASSWORD=hunter2");
         store.RecordPreviewFailure(item.Id, "ApplyFailed", "runner", "Authorization: Bearer preview-secret-token");
         var failedPreview = store.GetWorkItemDetail(item.Id)!.Preview!;
 
         Assert.DoesNotContain("ghp_", updatedRun.FailureReason);
-        Assert.DoesNotContain(updatedRun.TerminalLines!, line => line.Message.Contains("ghp_", StringComparison.Ordinal) || line.Message.Contains("github_pat_", StringComparison.Ordinal) || line.Message.Contains("secret-token-value", StringComparison.Ordinal));
+        Assert.DoesNotContain("abc123", updatedRun.FailureReason);
+        Assert.DoesNotContain("service-token", updatedRun.FailureReason);
+        Assert.DoesNotContain(updatedRun.TerminalLines!, line =>
+            line.Message.Contains("ghp_", StringComparison.Ordinal) ||
+            line.Message.Contains("github_pat_", StringComparison.Ordinal) ||
+            line.Message.Contains("secret-token-value", StringComparison.Ordinal) ||
+            line.Message.Contains("abc123", StringComparison.Ordinal) ||
+            line.Message.Contains("service-token", StringComparison.Ordinal) ||
+            line.Message.Contains("user:secret", StringComparison.Ordinal) ||
+            line.Message.Contains("forgejo_abcdefghijklmnopqrstuvwxyz123456", StringComparison.Ordinal));
         Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("GITHUB_TOKEN=[redacted]", StringComparison.Ordinal));
         Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("x-access-token:[redacted]@github.com", StringComparison.Ordinal));
         Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("Authorization: Bearer [redacted]", StringComparison.Ordinal));
+        Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("Authorization: Basic [redacted]", StringComparison.Ordinal));
+        Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("http://[redacted]@forgejo/rdo/app.git", StringComparison.Ordinal));
+        Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("https://[redacted]@example.com/repo.git", StringComparison.Ordinal));
+        Assert.Contains(updatedRun.TerminalLines!, line => line.Message.Contains("[redacted-localgit-token]", StringComparison.Ordinal));
         Assert.DoesNotContain(failedPreview.TerminalLines!, line => line.Message.Contains("abc123", StringComparison.Ordinal) || line.Message.Contains("hunter2", StringComparison.Ordinal) || line.Message.Contains("preview-secret-token", StringComparison.Ordinal));
         Assert.Contains(failedPreview.TerminalLines!, line => line.Message.Contains("CLOUDFLARE_API_TOKEN=[redacted]", StringComparison.Ordinal));
         Assert.Contains(failedPreview.TerminalLines!, line => line.Message.Contains("Authorization: Bearer [redacted]", StringComparison.Ordinal));
@@ -5163,30 +6436,14 @@ public sealed class DevOpsStoreTests
 
     private static void AssertPreviewPromotionRunnerSecurityContextIsWellFormed(string manifest)
     {
-        var lines = manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-        var runnerIndex = Array.FindIndex(lines, line => line.Trim() == "- name: runner");
-        var securityContextIndex = Array.FindIndex(lines, runnerIndex + 1, line => line.Trim() == "securityContext:");
-        var envIndex = Array.FindIndex(lines, securityContextIndex + 1, line => line.Trim() == "env:");
+        var job = KubernetesYaml.SingleDocument(manifest, "Job");
+        var runner = Assert.Single(job.Spec.Template.Spec.Containers, container => container.Name == "runner");
 
-        Assert.True(runnerIndex >= 0, "Manifest should include the preview-promotion runner container.");
-        Assert.True(securityContextIndex > runnerIndex, "Runner container should include securityContext.");
-        Assert.True(envIndex > securityContextIndex, "Runner securityContext should be followed by env.");
-
-        var entries = new[]
-        {
-            "runAsNonRoot: true",
-            "runAsUser: 1000",
-            "runAsGroup: 1000",
-            "allowPrivilegeEscalation: false",
-            "capabilities:"
-        };
-        var expectedIndent = LeadingSpaces(lines[securityContextIndex]) + 2;
-        foreach (var entry in entries)
-        {
-            var line = lines[(securityContextIndex + 1)..envIndex].SingleOrDefault(candidate => candidate.Trim() == entry);
-            Assert.False(string.IsNullOrWhiteSpace(line), $"Runner securityContext should include '{entry}'.");
-            Assert.Equal(expectedIndent, LeadingSpaces(line!));
-        }
+        Assert.True(runner.SecurityContext.RunAsNonRoot);
+        Assert.Equal(1000, runner.SecurityContext.RunAsUser);
+        Assert.Equal(1000, runner.SecurityContext.RunAsGroup);
+        Assert.False(runner.SecurityContext.AllowPrivilegeEscalation);
+        Assert.Contains("ALL", runner.SecurityContext.Capabilities.Drop);
     }
 
     private static int LeadingSpaces(string value)
@@ -5198,6 +6455,119 @@ public sealed class DevOpsStoreTests
         }
 
         return count;
+    }
+
+    private static string HomelabYamlDocument(string manifest, string kind, string metadataName)
+    {
+        foreach (var document in manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Split("\n---\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!document.Split('\n').Any(line => line.Trim() == $"kind: {kind}"))
+            {
+                continue;
+            }
+
+            var lines = document.Split('\n');
+            var metadataIndex = Array.FindIndex(lines, line => line.Trim() == "metadata:");
+            if (metadataIndex < 0)
+            {
+                continue;
+            }
+
+            for (var index = metadataIndex + 1; index < lines.Length; index++)
+            {
+                var line = lines[index];
+                if (!line.StartsWith(' ') && !string.IsNullOrWhiteSpace(line))
+                {
+                    break;
+                }
+
+                if (line.Trim() == $"name: {metadataName}")
+                {
+                    return document;
+                }
+            }
+        }
+
+        throw new InvalidOperationException($"Could not find {kind}/{metadataName}.");
+    }
+
+    private static class KubernetesYaml
+    {
+        private static readonly IDeserializer Deserializer = new DeserializerBuilder()
+            .WithNamingConvention(CamelCaseNamingConvention.Instance)
+            .IgnoreUnmatchedProperties()
+            .Build();
+
+        public static KubernetesDocument SingleDocument(string manifest, string kind)
+        {
+            var matches = ParseDocuments(manifest)
+                .Where(document => string.Equals(document.Kind, kind, StringComparison.Ordinal))
+                .ToArray();
+            return Assert.Single(matches);
+        }
+
+        private static IReadOnlyList<KubernetesDocument> ParseDocuments(string manifest) =>
+            manifest
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Split("\n---\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(document => !string.IsNullOrWhiteSpace(document))
+                .Select(document => Deserializer.Deserialize<KubernetesDocument>(new StringReader(document)))
+                .Where(document => !string.IsNullOrWhiteSpace(document.Kind))
+                .ToArray();
+    }
+
+    private sealed class KubernetesDocument
+    {
+        public string ApiVersion { get; set; } = "";
+        public string Kind { get; set; } = "";
+        public KubernetesMetadata Metadata { get; set; } = new();
+        public string Type { get; set; } = "";
+        public Dictionary<string, string> Data { get; set; } = [];
+        public KubernetesJobSpec Spec { get; set; } = new();
+    }
+
+    private sealed class KubernetesMetadata
+    {
+        public string Name { get; set; } = "";
+        public string Namespace { get; set; } = "";
+        public Dictionary<string, string> Labels { get; set; } = [];
+    }
+
+    private sealed class KubernetesJobSpec
+    {
+        public KubernetesPodTemplate Template { get; set; } = new();
+    }
+
+    private sealed class KubernetesPodTemplate
+    {
+        public KubernetesPodSpec Spec { get; set; } = new();
+    }
+
+    private sealed class KubernetesPodSpec
+    {
+        public bool AutomountServiceAccountToken { get; set; }
+        public List<KubernetesContainer> Containers { get; set; } = [];
+    }
+
+    private sealed class KubernetesContainer
+    {
+        public string Name { get; set; } = "";
+        public string Image { get; set; } = "";
+        public KubernetesSecurityContext SecurityContext { get; set; } = new();
+    }
+
+    private sealed class KubernetesSecurityContext
+    {
+        public bool RunAsNonRoot { get; set; }
+        public int RunAsUser { get; set; }
+        public int RunAsGroup { get; set; }
+        public bool AllowPrivilegeEscalation { get; set; }
+        public KubernetesCapabilities Capabilities { get; set; } = new();
+    }
+
+    private sealed class KubernetesCapabilities
+    {
+        public List<string> Drop { get; set; } = [];
     }
 
     private static string CreateFakeCodexScript(int exitCode, string plan, bool requireSkipGitRepoCheck = false, string? promptCapturePath = null)
@@ -5473,6 +6843,15 @@ exit /b 0
     }
 
     private sealed record FakeKubectl(DirectoryInfo Directory, string Path, string ArgumentsPath);
+
+    private static string EndpointSnippet(string program, string startMarker, string endMarker)
+    {
+        var start = program.IndexOf(startMarker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"Could not find endpoint start marker: {startMarker}");
+        var end = program.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+        Assert.True(end > start, $"Could not find endpoint end marker: {endMarker}");
+        return program[start..end];
+    }
 
     private static string FindRepositoryRoot()
     {

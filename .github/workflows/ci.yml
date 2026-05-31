@@ -24,6 +24,9 @@ jobs:
       - name: Restore .NET
         run: dotnet restore Rosenvall.DevOps.slnx
 
+      - name: Audit .NET packages
+        run: dotnet list Rosenvall.DevOps.slnx package --vulnerable --include-transitive
+
       - name: Test .NET
         run: dotnet test Rosenvall.DevOps.slnx --no-restore --configuration Release
 
@@ -45,6 +48,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Test
+        run: npm test -- --runInBand
 
       - name: Build
         run: npm run build

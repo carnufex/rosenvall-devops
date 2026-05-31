@@ -1,7 +1,8 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemModalTabs, type AiPlanReviewBlock, type ContinuousDiffLine, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemModalTabs, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { highlightCodeLines, plainHighlightedLines, splitDiffLineForHighlight, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
@@ -9,7 +10,13 @@ import {
   Bot,
   Boxes,
   CheckCircle2,
+  Code2,
+  Copy,
   ExternalLink,
+  FileText,
+  Folder,
+  GitBranch,
+  GitCompareArrows,
   GitPullRequest,
   Github,
   History,
@@ -50,7 +57,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-type View = 'dashboard' | 'board' | 'timeline' | 'gitops' | 'ai' | 'environment' | 'configuration' | 'teams' | 'settings';
+type View = 'dashboard' | 'board' | 'source' | 'timeline' | 'gitops' | 'ai' | 'environment' | 'configuration' | 'teams' | 'settings';
 
 type LoadShellOptions = {
   silentBusy?: boolean;
@@ -140,6 +147,70 @@ type BoardRepositoryDto = {
   repository: RepositoryDto;
   profile?: RepositoryProfileDto | null;
   implementationWorkflow?: ImplementationWorkflow | string | null;
+  syncState?: string | null;
+};
+
+type RepositorySourceRepositoryDto = {
+  repositoryId: string;
+  provider: string;
+  name: string;
+  owner?: string | null;
+  defaultBranch: string;
+  isPrimary: boolean;
+  webUrl?: string | null;
+  sourceReadable?: boolean | null;
+  sourceUnavailableReason?: string | null;
+  syncState?: string | null;
+};
+
+type RepositorySourceEntryDto = {
+  name: string;
+  path: string;
+  type: 'directory' | 'file' | string;
+  size?: number | null;
+  sha?: string | null;
+};
+
+type RepositorySourceTreeDto = {
+  repositoryId: string;
+  provider: string;
+  ref: string;
+  path: string;
+  entries: RepositorySourceEntryDto[];
+  message?: string | null;
+};
+
+type RepositorySourceFileDto = {
+  repositoryId: string;
+  provider: string;
+  ref: string;
+  path: string;
+  content?: string | null;
+  encoding: string;
+  size?: number | null;
+  isBinary: boolean;
+  truncated: boolean;
+  message?: string | null;
+};
+
+type RepositoryCloneInfoDto = {
+  repositoryId: string;
+  provider: string;
+  remoteUrl: string;
+  cloneCommand: string;
+  internalOnly: boolean;
+  message: string;
+  humanCloneUrl?: string | null;
+  runnerCloneUrl?: string | null;
+  webUrl?: string | null;
+  recommendedMode?: string | null;
+  explanation?: string | null;
+};
+
+type SyncRepositoryToProviderResponse = {
+  repository: RepositoryDto;
+  run: PipelineStatusDto;
+  message: string;
 };
 
 type BoardTeamAccessDto = {
@@ -249,6 +320,7 @@ type CommentDto = {
   id: string;
   workItemId: string;
   author: string;
+  authorSubject?: string | null;
   kind: string;
   body: string;
   createdAt: string;
@@ -1094,7 +1166,7 @@ function App() {
     },
     executePipeline: async (pipelineRunId) => {
       return runAction('Starting pipeline', async () => {
-        await api.post<PipelineStatusDto>(`/api/pipeline-runs/${pipelineRunId}/execute`, { actor });
+        await api.post<PipelineStatusDto>(`/api/pipeline-runs/${pipelineRunId}/execute`, {});
         await refreshAfterChange();
       });
     },
@@ -1164,7 +1236,7 @@ function App() {
     },
     deleteCard: async (id) => {
       return runAction('Deleting card and cleaning repository state', async () => {
-        const response = await api.post<unknown>(`/api/work-items/${id}/delete-and-clean-up`, { actor });
+        const response = await api.post<unknown>(`/api/work-items/${id}/delete-and-clean-up`, {});
         if (response === undefined || response === null) {
           setSelected({ status: 'closed' });
           await refreshAfterChange();
@@ -1176,7 +1248,7 @@ function App() {
     },
     deleteBoard: async (boardId) => {
       return runAction('Deleting board and cleaning runtime resources', async () => {
-        await api.post<unknown>(`/api/boards/${boardId}/delete-and-clean-up`, { actor });
+        await api.post<unknown>(`/api/boards/${boardId}/delete-and-clean-up`, {});
         setSelected({ status: 'closed' });
         setSelectedBoardId(null);
         await loadShell();
@@ -1196,19 +1268,19 @@ function App() {
     },
     startEpicRun: async (workItemId) => {
       return runAction('Starting epic implementation', async () => {
-        await api.post<EpicRunDto>(`/api/work-items/${workItemId}/epic-runs`, { actor });
+        await api.post<EpicRunDto>(`/api/work-items/${workItemId}/epic-runs`, {});
         await refreshAfterChange(workItemId);
       });
     },
     startEpicGoal: async (workItemId) => {
       return runAction('Starting epic goal', async () => {
-        await api.post<EpicGoalRunDto>(`/api/work-items/${workItemId}/epic-goals`, { actor });
+        await api.post<EpicGoalRunDto>(`/api/work-items/${workItemId}/epic-goals`, {});
         await refreshAfterChange(workItemId);
       });
     },
     cancelEpicGoal: async (goalId, workItemId) => {
       return runAction('Cancelling epic goal', async () => {
-        await api.post<EpicGoalRunDto>(`/api/epic-goals/${goalId}/cancel`, { actor });
+        await api.post<EpicGoalRunDto>(`/api/epic-goals/${goalId}/cancel`, {});
         await refreshAfterChange(workItemId);
       });
     },
@@ -1229,7 +1301,7 @@ function App() {
     approvePlan: async (runId, workItemId) => {
       setBusyAction('Starting preview implementation');
       try {
-        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { approvedBy: actor, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
+        await api.post<WorkItemDetail>(`/api/ai-runs/${runId}/approve`, { reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
         await refreshAfterChange(workItemId);
         addToast('info', 'Preview implementation started. Follow the terminal log in the preview panel.');
       } catch (approveError) {
@@ -1242,7 +1314,7 @@ function App() {
     startImplementationRun: async (workItemId, aiRunId, repositoryId) => {
       setBusyAction('Starting repository implementation');
       try {
-        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, actor, repositoryId, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/implementation-runs`, { aiRunId, repositoryId, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
         await refreshAfterChange(workItemId);
         setApiBanner(null);
         addToast('info', 'Repository implementation started. Follow the implementation run terminal.');
@@ -1277,7 +1349,7 @@ function App() {
       });
     },
     syncBoardRepository: async (boardId, request) => {
-      return runAction('Syncing board to GitHub', async () => {
+      return runAction('Linking existing repository', async () => {
         const board = await api.post<Board>(`/api/boards/${boardId}/repositories/github`, request);
         setSyncBoardOpen(false);
         setSelectedBoardId(board.id);
@@ -1286,7 +1358,7 @@ function App() {
     },
     adoptCleanupPullRequest: async (workItemId, pullRequestUrl) => {
       return runAction('Adopting cleanup pull request', async () => {
-        await api.post<RepositoryCleanupRunDto>(`/api/work-items/${workItemId}/cleanup-runs/adopt`, { actor, pullRequestUrl });
+        await api.post<RepositoryCleanupRunDto>(`/api/work-items/${workItemId}/cleanup-runs/adopt`, { pullRequestUrl });
         await refreshAfterChange(workItemId);
       });
     },
@@ -1328,7 +1400,7 @@ function App() {
     },
     discardPlan: async (runId, workItemId) => {
       return runAction('Discarding plan', async () => {
-        await api.post<AiRun>(`/api/ai-runs/${runId}/discard`, { discardedBy: actor });
+        await api.post<AiRun>(`/api/ai-runs/${runId}/discard`, {});
         await refreshAfterChange(workItemId);
       });
     },
@@ -1340,13 +1412,13 @@ function App() {
         ? 'Merging local PR and deploying app'
         : 'Approving PR and deploying app';
       return runAction(label, async () => {
-        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, { approvedBy: actor });
+        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/approve-pr`, {});
         await refreshAfterChange(workItemId);
       });
     },
     approvePreviewForPr: async (workItemId) => {
       return runAction('Creating pull request from approved preview', async () => {
-        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/preview/approve-for-pr`, { actor });
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/preview/approve-for-pr`, {});
         await refreshAfterChange(workItemId);
         addToast('info', 'Pull request creation started from the approved preview.');
       });
@@ -1379,7 +1451,7 @@ function App() {
     },
     fixPullRequestReviewCommentsWithAi: async (workItemId) => {
       return runAction('Fixing review comments with AI', async () => {
-        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/pull-request/ai-fix-comments`, { actor, reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
+        await api.post<ImplementationRunDto>(`/api/work-items/${workItemId}/pull-request/ai-fix-comments`, { reasoningEffort: resolveActiveAiReasoning(shell.status === 'ready' ? shell.settings : null, selectedAiProvider, selectedAiReasoning) });
         await refreshAfterChange(workItemId);
         addToast('info', 'AI review fix started on the existing pull request branch.');
       });
@@ -1413,7 +1485,7 @@ function App() {
     startPreview: async (workItemId) => {
       return runAction('Starting preview', async () => {
         try {
-          await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/start`, { actor });
+          await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/start`, {});
         } catch (previewError) {
           await refreshAfterChange(workItemId);
           throw previewError;
@@ -1423,13 +1495,13 @@ function App() {
     },
     stopPreview: async (workItemId) => {
       return runAction('Stopping preview', async () => {
-        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/stop`, { actor });
+        await api.post<WorkItemDetail>(`/api/work-items/${workItemId}/preview/stop`, {});
         await refreshAfterChange(workItemId);
       });
     },
     addComment: async (id, body) => {
       return runAction('Posting comment', async () => {
-        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
+        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { body });
         await refreshAfterChange(id);
       });
     },
@@ -1437,7 +1509,7 @@ function App() {
       return runAction('Posting comment and asking AI', async () => {
         if (shell.status !== 'ready') return;
         const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
-        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { author: actor, kind: 'Comment', body });
+        await api.post<CommentDto>(`/api/work-items/${id}/comments`, { body });
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: provider.provider,
           model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
@@ -1448,13 +1520,13 @@ function App() {
     },
     updateComment: async (commentId, workItemId, body) => {
       return runAction('Updating comment', async () => {
-        await api.patch<CommentDto>(`/api/comments/${commentId}`, { actor, body });
+        await api.patch<CommentDto>(`/api/comments/${commentId}`, { body });
         await refreshAfterChange(workItemId);
       });
     },
     deleteComment: async (commentId, workItemId) => {
       return runAction('Deleting comment', async () => {
-        await api.delete(`/api/comments/${commentId}?actor=${encodeURIComponent(actor)}`);
+        await api.delete(`/api/comments/${commentId}`);
         await refreshAfterChange(workItemId);
       });
     },
@@ -1536,6 +1608,7 @@ function App() {
           <>
             {activeView === 'dashboard' && <DashboardView workspace={shell.workspace} board={shell.board} previews={shell.previews} events={shell.events} pipelines={shell.pipelines} metrics={shell.metrics} actions={actions} />}
             {activeView === 'board' && <BoardView board={board} actions={actions} onSyncBoard={() => setSyncBoardOpen(true)} />}
+            {activeView === 'source' && <SourceView board={shell.board} settings={shell.settings} onRefresh={() => loadShell(shell.board.id, { silentBusy: true })} onNotify={addToast} />}
             {activeView === 'timeline' && <TimelineView board={shell.board} timeline={shell.timeline} />}
             {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} actions={actions} onBack={() => setView('board')} />}
             {activeView === 'ai' && <SettingsView scope="ai" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
@@ -1860,7 +1933,7 @@ type SyncBoardRepositoryRequest = {
 function useStateFromHash(): [View, (view: View) => void] {
   const readHash = () => {
     const next = (window.location.hash.replace('#', '') as View) || 'board';
-    return ['dashboard', 'board', 'timeline', 'gitops', 'ai', 'environment', 'configuration', 'teams', 'settings'].includes(next) ? next : 'board';
+    return ['dashboard', 'board', 'source', 'timeline', 'gitops', 'ai', 'environment', 'configuration', 'teams', 'settings'].includes(next) ? next : 'board';
   };
   const [view, setViewState] = React.useState<View>(readHash);
   React.useEffect(() => {
@@ -1902,12 +1975,15 @@ function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSel
       )}
       <button className="primary-action" onClick={onNewCard}><Plus size={16} />New card</button>
       <nav className="side-nav board-nav" aria-label="Board navigation">
-        <NavButton active={view === 'board'} icon={<PanelLeft size={20} />} label="Board" onClick={() => onChange('board')} />
-        <NavButton active={view === 'timeline'} icon={<History size={20} />} label="Timeline" onClick={() => onChange('timeline')} />
-        {showGitOps && <NavButton active={view === 'gitops'} icon={<Boxes size={20} />} label="GitOps" onClick={() => onChange('gitops')} />}
-        <NavButton active={view === 'ai'} icon={<Bot size={20} />} label="AI" onClick={() => onChange('ai')} />
-        <NavButton active={view === 'environment'} icon={<KeyRound size={20} />} label="Environment" onClick={() => onChange('environment')} />
-        <NavButton active={view === 'configuration'} icon={<Settings size={20} />} label="Configuration" onClick={() => onChange('configuration')} />
+        {boardNavigationItems(showGitOps).map((item) => (
+          <NavButton
+            active={view === item.key}
+            icon={boardNavigationIcon(item.key)}
+            key={item.key}
+            label={item.label}
+            onClick={() => onChange(item.key)}
+          />
+        ))}
       </nav>
       <nav className="side-nav global-nav" aria-label="Global navigation">
         <NavButton active={view === 'dashboard'} icon={<LayoutDashboard size={20} />} label="Dashboard" onClick={() => onChange('dashboard')} />
@@ -1916,6 +1992,18 @@ function Sidebar({ view, showGitOps, boards, selectedBoardId, activeBoard, onSel
       </nav>
     </aside>
   );
+}
+
+function boardNavigationIcon(key: ReturnType<typeof boardNavigationItems>[number]['key']) {
+  switch (key) {
+    case 'source': return <Code2 size={20} />;
+    case 'timeline': return <History size={20} />;
+    case 'gitops': return <Boxes size={20} />;
+    case 'ai': return <Bot size={20} />;
+    case 'environment': return <KeyRound size={20} />;
+    case 'configuration': return <Settings size={20} />;
+    default: return <PanelLeft size={20} />;
+  }
 }
 
 function NavButton({ active, icon, label, onClick }: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void }) {
@@ -2135,7 +2223,7 @@ function BoardHeader({ board, subtitle, onSyncBoard, children }: {
         {appUrl && <SafeExternalLink className="primary-action" href={appUrl}><ExternalLink size={16} />Go to app</SafeExternalLink>}
         {!appUrl && appStatus && <span className={appStatus === 'App failed' ? 'state-bad' : appStatus === 'App deploying' ? 'state-warn' : 'state-muted'}>{appStatus}</span>}
         {repositoryUrl && <SafeExternalLink className="secondary" href={repositoryUrl}><ExternalLink size={16} />Go to repository</SafeExternalLink>}
-        {syncable && <button className="secondary" onClick={onSyncBoard} type="button"><Github size={16} />Sync to provider</button>}
+        {syncable && <button className="secondary" onClick={onSyncBoard} type="button"><Github size={16} />{boardRepositoryManagementCopy.linkExistingAction}</button>}
         {children}
       </div>
     </div>
@@ -2231,6 +2319,437 @@ function BoardView({ board, actions, onSyncBoard }: { board: Board; actions: Boa
       </DndContext>
     </section>
   );
+}
+
+function SourceView({ board, settings, onRefresh, onNotify }: {
+  board: Board;
+  settings: SettingsDto;
+  onRefresh: () => Promise<void>;
+  onNotify: (kind: ToastMessage['kind'], message: string) => void;
+}) {
+  const [repositories, setRepositories] = React.useState<RepositorySourceRepositoryDto[]>([]);
+  const [selectedRepositoryId, setSelectedRepositoryId] = React.useState('');
+  const [ref, setRef] = React.useState('');
+  const [draftRef, setDraftRef] = React.useState('');
+  const [path, setPath] = React.useState('');
+  const [tree, setTree] = React.useState<RepositorySourceTreeDto | null>(null);
+  const [file, setFile] = React.useState<RepositorySourceFileDto | null>(null);
+  const [selectedFilePath, setSelectedFilePath] = React.useState('');
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [cloneInfo, setCloneInfo] = React.useState<RepositoryCloneInfoDto | null>(null);
+  const [syncOpen, setSyncOpen] = React.useState(false);
+  const [reloadKey, setReloadKey] = React.useState(0);
+  const fileRequestAbort = React.useRef<AbortController | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(null);
+    api.get<RepositorySourceRepositoryDto[]>(`/api/boards/${board.id}/source/repositories`)
+      .then((result) => {
+        if (!active) return;
+        setRepositories(result);
+        const primary = result.find((repository) => repository.isPrimary) ?? result[0];
+        setSelectedRepositoryId((current) => current && result.some((repository) => repository.repositoryId === current) ? current : primary?.repositoryId ?? '');
+        const initialRef = committedSourceRef('', primary?.defaultBranch);
+        setRef((current) => current || initialRef);
+        setDraftRef((current) => current || initialRef);
+      })
+      .catch((loadError) => {
+        if (!active) return;
+        setError(loadError instanceof Error ? loadError.message : 'Could not load board repositories.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [board.id, reloadKey]);
+
+  const selectedRepository = repositories.find((repository) => repository.repositoryId === selectedRepositoryId) ?? null;
+  const selectedSourceAvailability = selectedRepository ? repositorySourceAvailability(selectedRepository) : null;
+
+  React.useEffect(() => {
+    if (!selectedRepository) return;
+    const nextRef = committedSourceRef('', selectedRepository.defaultBranch);
+    setRef(nextRef);
+    setDraftRef(nextRef);
+    setPath('');
+    setSelectedFilePath('');
+    setFile(null);
+  }, [selectedRepository?.repositoryId]);
+
+  React.useEffect(() => {
+    if (!selectedRepository) return;
+    const availability = repositorySourceAvailability(selectedRepository);
+    if (!availability.readable) {
+      setTree(null);
+      setFile(null);
+      setSelectedFilePath('');
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    let active = true;
+    const controller = new AbortController();
+    const query = new URLSearchParams({ ref: ref || selectedRepository.defaultBranch || 'main', path });
+    setLoading(true);
+    setError(null);
+    api.get<RepositorySourceTreeDto>(`/api/repositories/${selectedRepository.repositoryId}/source/tree?${query.toString()}`, { signal: controller.signal })
+      .then((result) => {
+        if (!active) return;
+        setTree(result);
+        setFile(null);
+      })
+      .catch((loadError) => {
+        if (!active) return;
+        setTree(null);
+        setError(loadError instanceof Error ? loadError.message : 'Could not load source tree.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [selectedRepository?.repositoryId, ref, path]);
+
+  async function openFile(entry: RepositorySourceEntryDto) {
+    if (!selectedRepository) return;
+    fileRequestAbort.current?.abort();
+    const controller = new AbortController();
+    fileRequestAbort.current = controller;
+    setSelectedFilePath(entry.path);
+    setLoading(true);
+    setError(null);
+    try {
+      const query = new URLSearchParams({ ref: ref || selectedRepository.defaultBranch || 'main', path: entry.path });
+      const result = await api.get<RepositorySourceFileDto>(`/api/repositories/${selectedRepository.repositoryId}/source/file?${query.toString()}`, { signal: controller.signal });
+      if (!controller.signal.aborted) {
+        setFile(result);
+      }
+    } catch (loadError) {
+      if (controller.signal.aborted) return;
+      setError(loadError instanceof Error ? loadError.message : 'Could not load source file.');
+    } finally {
+      if (fileRequestAbort.current === controller) {
+        fileRequestAbort.current = null;
+        setLoading(false);
+      }
+    }
+  }
+
+  React.useEffect(() => () => fileRequestAbort.current?.abort(), []);
+
+  function commitRefInput() {
+    if (!selectedRepository) return;
+    const nextRef = committedSourceRef(draftRef, selectedRepository.defaultBranch);
+    setDraftRef(nextRef);
+    setRef(nextRef);
+  }
+
+  async function openCloneDrawer() {
+    if (!selectedRepository) return;
+    try {
+      setCloneInfo(await api.get<RepositoryCloneInfoDto>(`/api/repositories/${selectedRepository.repositoryId}/clone-info`));
+    } catch (cloneError) {
+      onNotify('error', cloneError instanceof Error ? cloneError.message : 'Could not load clone info.');
+    }
+  }
+
+  async function copyText(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      onNotify('success', 'Copied to clipboard.');
+    } catch {
+      onNotify('error', 'Clipboard copy failed.');
+    }
+  }
+
+  const entries = (tree?.entries ?? []).slice().sort((left, right) => {
+    if (left.type !== right.type) return left.type === 'directory' ? -1 : 1;
+    return left.name.localeCompare(right.name);
+  });
+
+  return (
+    <section className="page source-page">
+      <BoardHeader board={board} subtitle={`${boardRepositorySummary(board)} - source browser`}>
+        {selectedRepository && <button className="secondary" onClick={openCloneDrawer} type="button"><Copy size={16} />Clone</button>}
+        {selectedRepository && <button className="secondary" onClick={() => setSyncOpen(true)} type="button"><GitCompareArrows size={16} />{boardRepositoryManagementCopy.copyToProviderAction}</button>}
+      </BoardHeader>
+      <section className="panel source-panel">
+        {repositories.length === 0 && !loading && <EmptyState>No repositories are linked to this board.</EmptyState>}
+        {repositories.length > 0 && (
+          <>
+            <div className="source-toolbar">
+              <label>
+                Repository
+                <select value={selectedRepositoryId} onChange={(event) => setSelectedRepositoryId(event.target.value)}>
+                  {repositories.map((repository) => (
+                    <option key={repository.repositoryId} value={repository.repositoryId}>
+                      {repository.provider} / {repository.owner ? `${repository.owner}/` : ''}{repository.name}{repository.isPrimary ? ' (primary)' : ''}{repositorySourceAvailability(repository).readable ? '' : ' - source unavailable'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Ref
+                <div className="source-ref-input">
+                  <GitBranch size={16} />
+                  <input
+                    disabled={selectedSourceAvailability?.readable === false}
+                    onBlur={commitRefInput}
+                    onChange={(event) => setDraftRef(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        commitRefInput();
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    placeholder="main"
+                    value={draftRef}
+                  />
+                </div>
+              </label>
+              {loading && <span className="source-loading">Loading...</span>}
+            </div>
+            {error && <div className="inline-error">{error}</div>}
+            {selectedSourceAvailability?.readable === false ? (
+              <div className="inline-warning">{selectedSourceAvailability.message}</div>
+            ) : (
+              <>
+                <SourceBreadcrumb path={path} onChange={setPath} />
+                <div className="source-layout">
+                  <aside className="source-tree" aria-label="Source tree">
+                    {path && <button className="source-entry" onClick={() => setPath(parentPath(path))} type="button"><Folder size={16} />..</button>}
+                    {entries.map((entry) => (
+                      <button
+                        className={selectedFilePath === entry.path ? 'source-entry selected' : 'source-entry'}
+                        key={entry.path}
+                        onClick={() => entry.type === 'directory' ? setPath(entry.path) : void openFile(entry)}
+                        type="button"
+                      >
+                        {entry.type === 'directory' ? <Folder size={16} /> : <FileText size={16} />}
+                        <span>{entry.name}</span>
+                        {entry.type !== 'directory' && entry.size != null && <em>{formatBytes(entry.size)}</em>}
+                      </button>
+                    ))}
+                  </aside>
+                  <main className="source-code-viewer">
+                    {!file && <EmptyState>Select a file to inspect source.</EmptyState>}
+                    {file && (
+                      <>
+                        <div className="source-code-head">
+                          <strong>{file.path}</strong>
+                          <span>{file.truncated ? 'truncated' : file.isBinary ? 'binary' : file.encoding}</span>
+                        </div>
+                        {file.message && <p className="source-file-message">{file.message}</p>}
+                        {!file.isBinary && !file.truncated && file.content != null && <LineNumberedCode content={file.content} path={file.path} />}
+                      </>
+                    )}
+                  </main>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </section>
+      {cloneInfo && <CloneDrawer cloneInfo={cloneInfo} onCopy={copyText} onClose={() => setCloneInfo(null)} />}
+      {syncOpen && selectedRepository && (
+        <SyncToProviderModal
+          boardId={board.id}
+          repository={selectedRepository}
+          settings={settings}
+          onClose={() => setSyncOpen(false)}
+          onNotify={onNotify}
+          onSynced={async () => {
+            setSyncOpen(false);
+            await onRefresh();
+            setReloadKey((current) => current + 1);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function SourceBreadcrumb({ path, onChange }: { path: string; onChange: (path: string) => void }) {
+  const parts = path.split('/').filter(Boolean);
+  let current = '';
+  return (
+    <div className="source-breadcrumb">
+      <button onClick={() => onChange('')} type="button">root</button>
+      {parts.map((part) => {
+        current = current ? `${current}/${part}` : part;
+        const target = current;
+        return <button key={target} onClick={() => onChange(target)} type="button">{part}</button>;
+      })}
+    </div>
+  );
+}
+
+function LineNumberedCode({ content, path }: { content: string; path: string }) {
+  const lines = useHighlightedCode(content, path);
+  return (
+    <pre className="source-code">
+      {lines.map((line, index) => (
+        <span className="source-code-line" key={index}>
+          <span className="source-line-number">{index + 1}</span>
+          <code><HighlightedTokens tokens={line} /></code>
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+function useHighlightedCode(content: string, path: string | null | undefined): HighlightedLine[] {
+  const [lines, setLines] = React.useState<HighlightedLine[]>(() => plainHighlightedLines(content));
+
+  React.useEffect(() => {
+    let active = true;
+    setLines(plainHighlightedLines(content));
+    void highlightCodeLines(content, path).then((highlighted) => {
+      if (active) setLines(highlighted);
+    });
+    return () => { active = false; };
+  }, [content, path]);
+
+  return lines;
+}
+
+function HighlightedTokens({ tokens }: { tokens: HighlightedLine }) {
+  return (
+    <>
+      {tokens.map((token, index) => (
+        <span key={`${index}-${token.content}`} style={token.color ? { color: token.color } : undefined}>{token.content}</span>
+      ))}
+    </>
+  );
+}
+
+function CloneDrawer({ cloneInfo, onCopy, onClose }: { cloneInfo: RepositoryCloneInfoDto; onCopy: (value: string) => Promise<void>; onClose: () => void }) {
+  const runnerCloneUrl = cloneInfo.runnerCloneUrl?.trim() || cloneInfo.remoteUrl;
+  const humanCloneUrl = cloneInfo.humanCloneUrl?.trim() || (cloneInfo.internalOnly ? '' : cloneInfo.remoteUrl);
+  const command = humanCloneUrl ? cloneInfo.cloneCommand || buildCloneCommand(humanCloneUrl) : '';
+  const explanation = cloneInfo.explanation ?? cloneInfo.message;
+  return (
+    <div className="drawer-backdrop" role="presentation">
+      <aside className="drawer clone-drawer" aria-label="Clone repository">
+        <div className="drawer-head">
+          <strong>Clone repository</strong>
+          <button className="icon-button" onClick={onClose} type="button"><X size={18} /></button>
+        </div>
+        <p>{explanation}</p>
+        {!humanCloneUrl && <div className="inline-warning">LocalGit is internal-only in v1. This URL is for RDO runners or cluster-network access, not a normal workstation clone.</div>}
+        {humanCloneUrl ? (
+          <>
+            <label>
+              Human clone URL
+              <div className="copy-row"><code>{humanCloneUrl}</code><button className="secondary" onClick={() => void onCopy(humanCloneUrl)} type="button"><Copy size={14} />Copy</button></div>
+            </label>
+            <label>
+              Command
+              <div className="copy-row"><code>{command}</code><button className="secondary" onClick={() => void onCopy(command)} type="button"><Copy size={14} />Copy</button></div>
+            </label>
+          </>
+        ) : (
+          <label>
+            Runner clone URL
+            <div className="copy-row"><code>{runnerCloneUrl}</code><button className="secondary" onClick={() => void onCopy(runnerCloneUrl)} type="button"><Copy size={14} />Copy</button></div>
+          </label>
+        )}
+        {humanCloneUrl && runnerCloneUrl !== humanCloneUrl && (
+          <label>
+            Runner clone URL
+            <div className="copy-row"><code>{runnerCloneUrl}</code><button className="secondary" onClick={() => void onCopy(runnerCloneUrl)} type="button"><Copy size={14} />Copy</button></div>
+          </label>
+        )}
+      </aside>
+    </div>
+  );
+}
+
+function SyncToProviderModal({ boardId, repository, settings, onClose, onNotify, onSynced }: {
+  boardId: string;
+  repository: RepositorySourceRepositoryDto;
+  settings: SettingsDto;
+  onClose: () => void;
+  onNotify: (kind: ToastMessage['kind'], message: string) => void;
+  onSynced: () => Promise<void>;
+}) {
+  const providerOptions = ['LocalGit', 'GitHub'].filter((provider) => provider.toLowerCase() !== repository.provider.toLowerCase());
+  const [targetProvider, setTargetProvider] = React.useState(providerOptions[0] ?? 'LocalGit');
+  const [targetName, setTargetName] = React.useState(repository.name);
+  const [privateRepo, setPrivateRepo] = React.useState(true);
+  const [pending, setPending] = React.useState(false);
+  const localGitUnavailable = targetProvider === 'LocalGit' && !settings.repositories.localGitAvailable;
+
+  async function submit() {
+    setPending(true);
+    try {
+      await api.post<SyncRepositoryToProviderResponse>(`/api/boards/${boardId}/repositories/sync-to-provider`, {
+        sourceRepositoryId: repository.repositoryId,
+        targetProvider,
+        targetName,
+        private: privateRepo
+      });
+      onNotify('success', boardRepositoryManagementCopy.copyToProviderQueued);
+      await onSynced();
+    } catch (syncError) {
+      onNotify('error', syncError instanceof Error ? syncError.message : 'Could not queue repository copy.');
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <ModalFrame title={boardRepositoryManagementCopy.copyToProviderTitle} onClose={onClose}>
+      <div className="modal-section">
+        <p className="muted-copy">Branches and tags are copied to a new repository. RDO links the target as a secondary board repository; primary stays unchanged.</p>
+        <div className="form-grid two">
+          <label>
+            Source repository
+            <input value={`${repository.provider} / ${repository.owner ? `${repository.owner}/` : ''}${repository.name}`} readOnly />
+          </label>
+          <label>
+            Target provider
+            <select value={targetProvider} onChange={(event) => setTargetProvider(event.target.value)}>
+              {providerOptions.map((provider) => <option key={provider} value={provider}>{provider}</option>)}
+            </select>
+          </label>
+          <label>
+            Target repo name
+            <input value={targetName} onChange={(event) => setTargetName(event.target.value)} />
+          </label>
+          <label className="checkbox-row">
+            <input checked={privateRepo} onChange={(event) => setPrivateRepo(event.target.checked)} type="checkbox" />
+            Private repository
+          </label>
+        </div>
+        {localGitUnavailable && <div className="inline-warning">{settings.repositories.localGitMessage ?? 'LocalGit is unavailable.'}</div>}
+        {targetProvider === 'GitHub' && <div className="inline-warning">Copying to GitHub requires a matching personal GitHub authorization. Organization targets are disabled in v1.</div>}
+        <div className="modal-actions">
+          <button className="primary-action" disabled={pending || localGitUnavailable || !targetName.trim()} onClick={() => void submit()} type="button">
+            {pending ? 'Queueing copy...' : boardRepositoryManagementCopy.copyToProviderSubmit}
+          </button>
+          <button className="secondary" onClick={onClose} type="button">Cancel</button>
+        </div>
+      </div>
+    </ModalFrame>
+  );
+}
+
+function parentPath(path: string) {
+  const parts = path.split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function BoardSelector({ boards, selectedBoardId, onSelect, onAdd }: {
@@ -2783,14 +3302,14 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
 
         {activeTab === 'ai' && (
           <section className="work-item-tab-panel">
-            <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} planReviewComments={detail.aiPlanReviewComments ?? []} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} />
+            <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} planReviewComments={detail.aiPlanReviewComments ?? []} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} onPreviewDeliveryStarted={() => setActiveTab('preview')} />
           </section>
         )}
 
         {activeTab === 'preview' && (
           <section className="work-item-tab-panel">
             {detail.preview
-              ? <PreviewPanel preview={detail.preview} busy={busy} showTerminal={false} orientation="horizontal" onRetry={async () => {
+              ? <PreviewPanel preview={detail.preview} busy={busy} orientation="horizontal" onRetry={async () => {
               const retryPlan = selectedPlan ?? sortedPlans.find((run) => run.status === 'Approved' || run.status === 'PlanReady');
               if (detail.preview?.failureReason === 'ImplementationFailed' && retryPlan) {
                 await actions.approvePlan(retryPlan.id, detail.item.id);
@@ -3320,7 +3839,7 @@ function normalizeRepositoryLogStep(marker: string, steps: Array<{ key: string }
   return steps.some((step) => step.key === marker) ? marker : steps[0]?.key ?? marker;
 }
 
-function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChange, aiRuns, planReviewComments, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions }: {
+function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChange, aiRuns, planReviewComments, selectedPlan, onSelectPlan, busy, busyLabel, aiProvider, aiModel, actions, onPreviewDeliveryStarted }: {
   detail: WorkItemDetail;
   board: Board | null;
   targetRepositoryId: string | null;
@@ -3334,6 +3853,7 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
   aiProvider: string | null;
   aiModel: string | null;
   actions: BoardActions;
+  onPreviewDeliveryStarted: () => void;
 }) {
   const boardRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
   const targetRepository = boardRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? boardRepositories.find((entry) => entry.isPrimary) ?? boardRepositories[0];
@@ -3408,8 +3928,9 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
       return;
     }
 
+    onPreviewDeliveryStarted();
     await actions.approvePlan(selectedPlan.id, detail.item.id);
-  }, [actions, detail.item.id, isRepositoryImplementation, selectedPlan, selectedPlanCanStart, targetRepository?.repositoryId]);
+  }, [actions, detail.item.id, isRepositoryImplementation, onPreviewDeliveryStarted, selectedPlan, selectedPlanCanStart, targetRepository?.repositoryId]);
   const commentsByAnchor = React.useMemo(() => selectedPlanComments.reduce<Record<string, AiPlanReviewCommentDto[]>>((map, comment) => {
     map[comment.anchorKey] ??= [];
     map[comment.anchorKey].push(comment);
@@ -4358,7 +4879,7 @@ function CreateBoardModal({ teams, githubIntegrations, settings, me, actions, on
             </>
           )}
         </div>
-        {usesNoRepository && <p className="provider-status">This board starts preview-only. You can sync it to GitHub later from the board header.</p>}
+        {usesNoRepository && <p className="provider-status">{boardRepositoryManagementCopy.noRepositoryStatus}</p>}
         {(usesGitHubNew || usesLocalGitNew) && (
           <NewRepositoryOnboardingPanel
             form={form}
@@ -4597,9 +5118,9 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
   }
 
   return (
-    <ModalFrame title="Sync board to GitHub" onClose={onClose}>
+    <ModalFrame title={boardRepositoryManagementCopy.linkExistingTitle} onClose={onClose}>
       <form className="create-form" onSubmit={(event) => void submit(event)}>
-        <div className="provider-status">Link an existing GitHub repository. Creating new repositories from Rosenvall DevOps is disabled for now.</div>
+        <div className="provider-status">{boardRepositoryManagementCopy.linkExistingDescription}</div>
         <div className="form-grid two">
           <label className="full-width">GitHub repository<select value={selectedRepoKey} onChange={(event) => setSelectedRepoKey(event.target.value)}>
             <option value="">{pickerStatus === 'loading' ? 'Loading repositories...' : 'Select repository...'}</option>
@@ -4614,7 +5135,7 @@ function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegra
         </div>
         {pickerMessage && <p className={pickerStatus === 'error' ? 'failure-reason' : 'provider-status'}>{pickerMessage}</p>}
         <div className="modal-actions">
-          <button className="primary-action" disabled={!canSync || submitting}><Github size={16} />Sync to GitHub</button>
+          <button className="primary-action" disabled={!canSync || submitting}><Github size={16} />{submitting ? 'Linking repository...' : boardRepositoryManagementCopy.linkExistingSubmit}</button>
           <button className="secondary" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -5546,56 +6067,98 @@ function PullRequestDiffReview({ state, busy, busyLabel, onSelectFile, onRetry, 
           <div className="diff-view" aria-label="Unified diff" onScroll={handleScroll} ref={scrollRef}>
             {parsed.sections.length === 0 && <pre>No diff content returned.</pre>}
             {parsed.sections.map((section) => (
-              <section className="diff-section" key={section.path} ref={(element) => { sectionRefs.current[section.path] = element; }}>
-                <header className="diff-file-header">
-                  <strong>{section.path}</strong>
-                  <span>{section.file?.status ?? 'modified'} {section.file?.additions ? `+${section.file.additions}` : ''}{section.file?.deletions ? ` -${section.file.deletions}` : ''}</span>
-                </header>
-                <div className="diff-lines">
-                  {section.lines.map((line) => {
-                    const lineNumber = line.side === 'old' ? line.oldLine : line.newLine ?? line.oldLine ?? 0;
-                    const side = line.side === 'old' ? 'old' : 'new';
-                    const lineComments = lineNumber ? commentsByLine.get(reviewLineKey(section.path, side, lineNumber)) ?? [] : [];
-                    const isComposerLine = composer?.filePath === section.path && composer.side === side && composer.lineNumber === lineNumber;
-                    return (
-                      <React.Fragment key={line.id}>
-                        <button className={`diff-line ${line.kind}${line.commentable ? ' commentable' : ''}`} disabled={!line.commentable} onClick={() => openComposer(section.path, line)} type="button">
-                          <span className="diff-line-number">{line.oldLine ?? ''}</span>
-                          <span className="diff-line-number">{line.newLine ?? ''}</span>
-                          <code>{line.text || ' '}</code>
-                        </button>
-                        {isComposerLine && (
-                          <div className="diff-comment-composer">
-                            <textarea value={composerBody} onChange={(event) => setComposerBody(event.target.value)} placeholder="Comment on this line..." />
-                            <div>
-                              <button className="primary-action" disabled={!composerBody.trim()} onClick={() => void saveComposer()} type="button">Save comment</button>
-                              <button className="secondary" onClick={() => setComposer(null)} type="button">Cancel</button>
-                            </div>
-                          </div>
-                        )}
-                        {lineComments.map((comment) => (
-                          <div className={comment.status === 'resolved' ? 'diff-comment resolved' : 'diff-comment'} key={comment.id}>
-                            <div>
-                              <strong>{comment.author}</strong>
-                              <span>{comment.status}</span>
-                            </div>
-                            <p>{comment.body}</p>
-                            <div>
-                              {comment.status !== 'resolved' && <button className="link-button" onClick={() => void onUpdateComment(comment.id, { status: 'resolved' })} type="button">Resolve</button>}
-                              {comment.status === 'resolved' && <button className="link-button" onClick={() => void onUpdateComment(comment.id, { status: 'open' })} type="button">Reopen</button>}
-                              <button className="link-button danger-link" onClick={() => void onDeleteComment(comment.id)} type="button">Delete</button>
-                            </div>
-                          </div>
-                        ))}
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
-              </section>
+              <PullRequestDiffSectionView
+                commentsByLine={commentsByLine}
+                composer={composer}
+                composerBody={composerBody}
+                key={section.path}
+                onCloseComposer={() => setComposer(null)}
+                onComposerBodyChange={setComposerBody}
+                onDeleteComment={onDeleteComment}
+                onOpenComposer={openComposer}
+                onSaveComposer={saveComposer}
+                onUpdateComment={onUpdateComment}
+                section={section}
+                sectionRef={(element) => { sectionRefs.current[section.path] = element; }}
+              />
             ))}
           </div>
         </div>
     </div>
+  );
+}
+
+function PullRequestDiffSectionView({ section, sectionRef, commentsByLine, composer, composerBody, onComposerBodyChange, onOpenComposer, onSaveComposer, onCloseComposer, onUpdateComment, onDeleteComment }: {
+  section: ContinuousDiffSection;
+  sectionRef: (element: HTMLElement | null) => void;
+  commentsByLine: Map<string, PullRequestReviewCommentDto[]>;
+  composer: { filePath: string; side: string; lineNumber: number; diffLine: string } | null;
+  composerBody: string;
+  onComposerBodyChange: (value: string) => void;
+  onOpenComposer: (sectionPath: string, line: ContinuousDiffLine) => void;
+  onSaveComposer: () => Promise<void>;
+  onCloseComposer: () => void;
+  onUpdateComment: (commentId: string, request: { body?: string | null; status?: string | null }) => Promise<void>;
+  onDeleteComment: (commentId: string) => Promise<void>;
+}) {
+  const highlightContent = React.useMemo(() => section.lines.map((line) => {
+    const part = splitDiffLineForHighlight(line.text, line.kind);
+    return part.highlightable ? part.code : '';
+  }).join('\n'), [section.lines]);
+  const highlightedLines = useHighlightedCode(highlightContent, section.path);
+
+  return (
+    <section className="diff-section" ref={sectionRef}>
+      <header className="diff-file-header">
+        <strong>{section.path}</strong>
+        <span>{section.file?.status ?? 'modified'} {section.file?.additions ? `+${section.file.additions}` : ''}{section.file?.deletions ? ` -${section.file.deletions}` : ''}</span>
+      </header>
+      <div className="diff-lines">
+        {section.lines.map((line, index) => {
+          const lineNumber = line.side === 'old' ? line.oldLine : line.newLine ?? line.oldLine ?? 0;
+          const side = line.side === 'old' ? 'old' : 'new';
+          const lineComments = lineNumber ? commentsByLine.get(reviewLineKey(section.path, side, lineNumber)) ?? [] : [];
+          const isComposerLine = composer?.filePath === section.path && composer.side === side && composer.lineNumber === lineNumber;
+          const diffCode = splitDiffLineForHighlight(line.text, line.kind);
+          return (
+            <React.Fragment key={line.id}>
+              <button className={`diff-line ${line.kind}${line.commentable ? ' commentable' : ''}`} disabled={!line.commentable} onClick={() => onOpenComposer(section.path, line)} type="button">
+                <span className="diff-line-number">{line.oldLine ?? ''}</span>
+                <span className="diff-line-number">{line.newLine ?? ''}</span>
+                <code>
+                  {diffCode.highlightable
+                    ? <><span className="diff-prefix">{diffCode.prefix}</span><HighlightedTokens tokens={highlightedLines[index] ?? [{ content: diffCode.code || ' ' }]} /></>
+                    : diffCode.code || ' '}
+                </code>
+              </button>
+              {isComposerLine && (
+                <div className="diff-comment-composer">
+                  <textarea value={composerBody} onChange={(event) => onComposerBodyChange(event.target.value)} placeholder="Comment on this line..." />
+                  <div>
+                    <button className="primary-action" disabled={!composerBody.trim()} onClick={() => void onSaveComposer()} type="button">Save comment</button>
+                    <button className="secondary" onClick={onCloseComposer} type="button">Cancel</button>
+                  </div>
+                </div>
+              )}
+              {lineComments.map((comment) => (
+                <div className={comment.status === 'resolved' ? 'diff-comment resolved' : 'diff-comment'} key={comment.id}>
+                  <div>
+                    <strong>{comment.author}</strong>
+                    <span>{comment.status}</span>
+                  </div>
+                  <p>{comment.body}</p>
+                  <div>
+                    {comment.status !== 'resolved' && <button className="link-button" onClick={() => void onUpdateComment(comment.id, { status: 'resolved' })} type="button">Resolve</button>}
+                    {comment.status === 'resolved' && <button className="link-button" onClick={() => void onUpdateComment(comment.id, { status: 'open' })} type="button">Reopen</button>}
+                    <button className="link-button danger-link" onClick={() => void onDeleteComment(comment.id)} type="button">Delete</button>
+                  </div>
+                </div>
+              ))}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

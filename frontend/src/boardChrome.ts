@@ -62,6 +62,61 @@ export type WorkItemModalTab = {
   label: string;
 };
 
+export type BoardNavigationItem = {
+  key: 'board' | 'source' | 'timeline' | 'gitops' | 'ai' | 'environment' | 'configuration';
+  label: string;
+};
+
+export function boardNavigationItems(showGitOps: boolean): BoardNavigationItem[] {
+  const items: BoardNavigationItem[] = [
+    { key: 'board', label: 'Board' },
+    { key: 'source', label: 'Source' },
+    { key: 'timeline', label: 'Timeline' }
+  ];
+  if (showGitOps) {
+    items.push({ key: 'gitops', label: 'GitOps' });
+  }
+  items.push(
+    { key: 'ai', label: 'AI' },
+    { key: 'environment', label: 'Environment' },
+    { key: 'configuration', label: 'Configuration' }
+  );
+  return items;
+}
+
+export function buildCloneCommand(remoteUrl: string) {
+  const value = remoteUrl.trim();
+  return /\s/.test(value) ? `git clone "${value.replaceAll('"', '\\"')}"` : `git clone ${value}`;
+}
+
+export type SourceRepositoryCapability = {
+  provider: string;
+  sourceReadable?: boolean | null;
+  sourceUnavailableReason?: string | null;
+  syncState?: string | null;
+};
+
+export function repositorySourceAvailability(repository: SourceRepositoryCapability) {
+  const provider = repository.provider.trim().toLowerCase();
+  const providerSupported = provider === 'localgit' || provider === 'github';
+  const syncState = repository.syncState?.trim() || 'Ready';
+  const syncReady = syncState.toLowerCase() === 'ready';
+  const readable = syncReady && (repository.sourceReadable ?? providerSupported);
+  return {
+    readable,
+    message: readable
+      ? null
+      : repository.sourceUnavailableReason ||
+        (syncReady
+          ? 'Source browsing is available for LocalGit and GitHub repositories.'
+          : `Repository sync is ${syncState}. Source browsing is available after sync succeeds.`)
+  };
+}
+
+export function committedSourceRef(value: string | null | undefined, fallback: string | null | undefined) {
+  return value?.trim() || fallback?.trim() || 'main';
+}
+
 export type WorkItemAutosaveStatus = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
 
 export function workItemAutosaveStatusLabel(status: WorkItemAutosaveStatus) {
@@ -184,6 +239,15 @@ export type AiPlanReviewBlock = {
   text: string;
 };
 
+export type ReviewCommentCount = {
+  total: number;
+  unresolved: number;
+};
+
+export type ReviewCommentStateChrome = {
+  status?: string | null;
+};
+
 export type OverviewPreviewChrome = {
   status?: string | null;
   message?: string | null;
@@ -285,8 +349,35 @@ export function approvePullRequestActionLabel(development: DevelopmentChrome): s
   return isLocalGitDevelopmentRecord(development) ? 'Merge local PR and deploy app' : 'Approve PR';
 }
 
+export function isReviewCommentResolved(comment: ReviewCommentStateChrome): boolean {
+  return comment.status?.toLowerCase() === 'resolved';
+}
+
+export function unresolvedReviewItemCount(comments: readonly ReviewCommentStateChrome[]): number {
+  return comments.filter((comment) => !isReviewCommentResolved(comment)).length;
+}
+
+export function reviewCommentCountsByAnchor<TComment extends ReviewCommentStateChrome>(
+  comments: readonly TComment[],
+  anchorFor: (comment: TComment) => string | null | undefined
+): Record<string, ReviewCommentCount> {
+  return comments.reduce<Record<string, ReviewCommentCount>>((counts, comment) => {
+    const key = anchorFor(comment);
+    if (!key) {
+      return counts;
+    }
+
+    counts[key] ??= { total: 0, unresolved: 0 };
+    counts[key].total += 1;
+    if (!isReviewCommentResolved(comment)) {
+      counts[key].unresolved += 1;
+    }
+    return counts;
+  }, {});
+}
+
 export function unresolvedReviewCommentCount(comments: readonly Pick<PullRequestReviewCommentChrome, 'status'>[]): number {
-  return comments.filter((comment) => comment.status?.toLowerCase() !== 'resolved').length;
+  return unresolvedReviewItemCount(comments);
 }
 
 export function canApprovePullRequestWithComments(comments: readonly Pick<PullRequestReviewCommentChrome, 'status'>[]): boolean {
@@ -294,15 +385,7 @@ export function canApprovePullRequestWithComments(comments: readonly Pick<PullRe
 }
 
 export function reviewCommentCountsByFile(comments: readonly Pick<PullRequestReviewCommentChrome, 'filePath' | 'status'>[]): Record<string, { total: number; unresolved: number }> {
-  return comments.reduce<Record<string, { total: number; unresolved: number }>>((counts, comment) => {
-    const key = comment.filePath;
-    counts[key] ??= { total: 0, unresolved: 0 };
-    counts[key].total += 1;
-    if (comment.status?.toLowerCase() !== 'resolved') {
-      counts[key].unresolved += 1;
-    }
-    return counts;
-  }, {});
+  return reviewCommentCountsByAnchor(comments, (comment) => comment.filePath);
 }
 
 export function splitAiPlanReviewBlocks(plan: string | null | undefined): AiPlanReviewBlock[] {
@@ -323,9 +406,7 @@ export function splitAiPlanReviewBlocks(plan: string | null | undefined): AiPlan
 }
 
 export function unresolvedAiPlanReviewCommentCount(comments: readonly Pick<AiPlanReviewCommentChrome, 'aiRunId' | 'status'>[], aiRunId?: string | null): number {
-  return comments.filter((comment) =>
-    (!aiRunId || comment.aiRunId === aiRunId) &&
-    comment.status?.toLowerCase() !== 'resolved').length;
+  return unresolvedReviewItemCount(comments.filter((comment) => !aiRunId || comment.aiRunId === aiRunId));
 }
 
 export function canApproveAiPlanWithComments(aiRunId: string | null | undefined, comments: readonly Pick<AiPlanReviewCommentChrome, 'aiRunId' | 'status'>[]): boolean {
@@ -333,15 +414,7 @@ export function canApproveAiPlanWithComments(aiRunId: string | null | undefined,
 }
 
 export function planReviewCommentCountsByRun(comments: readonly Pick<AiPlanReviewCommentChrome, 'aiRunId' | 'status'>[]): Record<string, { total: number; unresolved: number }> {
-  return comments.reduce<Record<string, { total: number; unresolved: number }>>((counts, comment) => {
-    const key = comment.aiRunId;
-    counts[key] ??= { total: 0, unresolved: 0 };
-    counts[key].total += 1;
-    if (comment.status?.toLowerCase() !== 'resolved') {
-      counts[key].unresolved += 1;
-    }
-    return counts;
-  }, {});
+  return reviewCommentCountsByAnchor(comments, (comment) => comment.aiRunId);
 }
 
 export function buildOverviewDeliverySummary({ board, development, preview }: {
@@ -708,6 +781,18 @@ export function canSyncBoardToProvider(board: BoardChromeBoard): boolean {
   return !board.repository && Boolean(board.providerCapabilities?.includes('sync-github'));
 }
 
+export const boardRepositoryManagementCopy = {
+  linkExistingAction: 'Link existing repository',
+  linkExistingTitle: 'Link existing GitHub repository',
+  linkExistingDescription: 'Connect this board to an existing GitHub repository. This only updates board metadata; it does not copy git refs or create repositories.',
+  linkExistingSubmit: 'Link repository',
+  noRepositoryStatus: 'This board starts preview-only. You can link an existing repository later from the board header.',
+  copyToProviderAction: 'Copy repository to provider',
+  copyToProviderTitle: 'Copy repository to provider',
+  copyToProviderSubmit: 'Copy repository',
+  copyToProviderQueued: 'Repository copy job queued.'
+} as const;
+
 export function canCreateRepositoryInInstallation(integration: GitHubRepositoryCreationIntegration | null | undefined): boolean {
   return Boolean(integration?.canCreateRepositories && (!integration.requiresUserAuthorizationForRepositoryCreation || integration.hasUserAuthorization));
 }
@@ -745,6 +830,13 @@ export function githubUserAuthorizationResultFromUrl(url: string): GitHubUserAut
 }
 
 export function apiUnavailableBannerMessage(error: unknown): string | null {
+  const status = typeof error === 'object' && error !== null && typeof (error as { status?: unknown }).status === 'number'
+    ? (error as { status: number }).status
+    : null;
+  if (status === 503) {
+    return 'API is restarting or unavailable. Latest known board state is still shown.';
+  }
+
   const message = error instanceof Error ? error.message : String(error ?? '');
   const normalized = message.toLowerCase();
   if (normalized.includes('memory pressured')) {

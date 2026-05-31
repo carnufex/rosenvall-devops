@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryUrl, boardSyncLabel, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemModalTabs } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemModalTabs } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -85,12 +85,50 @@ test('work item modal tabs are stable and focused', () => {
   assert.deepEqual(workItemModalTabs.map((tab) => tab.label), ['Overview', 'AI', 'Preview', 'Pull request', 'Logs']);
 });
 
+test('board navigation includes Source between board and timeline', () => {
+  assert.deepEqual(boardNavigationItems(false).map((item) => item.key), ['board', 'source', 'timeline', 'ai', 'environment', 'configuration']);
+  assert.deepEqual(boardNavigationItems(true).map((item) => item.key), ['board', 'source', 'timeline', 'gitops', 'ai', 'environment', 'configuration']);
+});
+
+test('clone command keeps source URL literal and quotes whitespace safely', () => {
+  assert.equal(buildCloneCommand('https://github.com/carnufex/demo.git'), 'git clone https://github.com/carnufex/demo.git');
+  assert.equal(buildCloneCommand('https://example.test/repo with spaces.git'), 'git clone "https://example.test/repo with spaces.git"');
+});
+
+test('source availability keeps unsupported providers visible but unreadable', () => {
+  assert.deepEqual(repositorySourceAvailability({ provider: 'LocalGit' }), { readable: true, message: null });
+  assert.deepEqual(repositorySourceAvailability({ provider: 'GitHub', sourceReadable: true }), { readable: true, message: null });
+  assert.deepEqual(repositorySourceAvailability({ provider: 'GenericGit' }), {
+    readable: false,
+    message: 'Source browsing is available for LocalGit and GitHub repositories.'
+  });
+  assert.deepEqual(repositorySourceAvailability({ provider: 'GitHub', sourceReadable: false, sourceUnavailableReason: 'GitHub source access is unavailable.' }), {
+    readable: false,
+    message: 'GitHub source access is unavailable.'
+  });
+  assert.deepEqual(repositorySourceAvailability({ provider: 'LocalGit', syncState: 'PendingSync' }), {
+    readable: false,
+    message: 'Repository sync is PendingSync. Source browsing is available after sync succeeds.'
+  });
+});
+
+test('source ref commits trim input and fall back to repository default', () => {
+  assert.equal(committedSourceRef(' feature/dark-mode ', 'main'), 'feature/dark-mode');
+  assert.equal(committedSourceRef('   ', 'develop'), 'develop');
+  assert.equal(committedSourceRef('', ''), 'main');
+});
+
 test('work item autosave status copy is compact and action oriented', () => {
   assert.equal(workItemAutosaveStatusLabel('idle'), 'All changes saved');
   assert.equal(workItemAutosaveStatusLabel('dirty'), 'Unsaved changes');
   assert.equal(workItemAutosaveStatusLabel('saving'), 'Saving...');
   assert.equal(workItemAutosaveStatusLabel('saved'), 'Saved');
   assert.equal(workItemAutosaveStatusLabel('error'), 'Autosave failed');
+});
+
+test('api unavailable banner uses structured status when available', () => {
+  assert.equal(apiUnavailableBannerMessage({ status: 503, requestPath: '/api/workspaces', message: 'Capacity unavailable' }), 'API is restarting or unavailable. Latest known board state is still shown.');
+  assert.equal(apiUnavailableBannerMessage({ status: 422, requestPath: '/api/source', message: 'Validation failed' }), null);
 });
 
 test('ai plan review blocks are stable paragraph and list anchors', () => {
@@ -138,6 +176,23 @@ test('ai plan review uses the collapsible markdown surface', () => {
   assert.doesNotMatch(styles, /\.annotated-plan|\.ai-plan-body|\.plan-review-document|\.plan-review-block-group|\.plan-review-composer/);
 });
 
+test('preview tab keeps the inline terminal while logs remain full width', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+  const previewTab = appSource.match(/\{activeTab === 'preview'[\s\S]*?\{activeTab === 'pull-request'/)?.[0] ?? '';
+  const logsTab = appSource.match(/\{activeTab === 'logs'[\s\S]*?<\/section>\s*\)\}/)?.[0] ?? '';
+
+  assert.match(previewTab, /<PreviewPanel/);
+  assert.doesNotMatch(previewTab, /showTerminal=\{false\}/);
+  assert.match(logsTab, /<WorkItemLogsTab/);
+});
+
+test('starting preview delivery from ai tab can switch to preview tab', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /<AiPlanPanel[\s\S]*onPreviewDeliveryStarted=\{\(\) => setActiveTab\('preview'\)\}/);
+  assert.match(appSource, /onPreviewDeliveryStarted\(\);\s*await actions\.approvePlan/);
+});
+
 test('overview delivery summary is compact and keeps delivery links grouped', () => {
   const summary = buildOverviewDeliverySummary({
     board: {
@@ -171,6 +226,33 @@ test('overview delete action shares the comment action row', () => {
 
   assert.match(appSource, /className="comment-actions"[\s\S]*delete-action-inline/);
   assert.doesNotMatch(appSource, /overview-danger-actions/);
+});
+
+test('normal work item comments no longer send client-supplied identity fields', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /api\.post<CommentDto>\(`\/api\/work-items\/\$\{id\}\/comments`, \{ body \}\)/);
+  assert.match(appSource, /api\.patch<CommentDto>\(`\/api\/comments\/\$\{commentId\}`, \{ body \}\)/);
+  assert.match(appSource, /api\.delete\(`\/api\/comments\/\$\{commentId\}`\)/);
+  assert.doesNotMatch(appSource, /\/comments\/\$\{commentId\}\?actor=/);
+  assert.doesNotMatch(appSource, /api\.post<CommentDto>\(`\/api\/work-items\/\$\{id\}\/comments`, \{ author: actor, kind: 'Comment', body \}\)/);
+});
+
+test('delivery mutations no longer send client-supplied audit identity fields', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /\/delete-and-clean-up`, \{\}/);
+  assert.match(appSource, /\/preview\/start`, \{\}/);
+  assert.match(appSource, /\/preview\/stop`, \{\}/);
+  assert.match(appSource, /\/preview\/approve-for-pr`, \{\}/);
+  assert.match(appSource, /\/approve-pr`, \{\}/);
+  assert.match(appSource, /\/api\/pipeline-runs\/\$\{pipelineRunId\}\/execute`, \{\}/);
+  assert.match(appSource, /\/api\/ai-runs\/\$\{runId\}\/approve`, \{ reasoningEffort:/);
+  assert.match(appSource, /\/implementation-runs`, \{ aiRunId, repositoryId, reasoningEffort:/);
+  assert.match(appSource, /\/pull-request\/ai-fix-comments`, \{ reasoningEffort:/);
+  assert.match(appSource, /\/cleanup-runs\/adopt`, \{ pullRequestUrl \}/);
+  assert.doesNotMatch(appSource, /\{ actor \}/);
+  assert.doesNotMatch(appSource, /approvedBy: actor|discardedBy: actor/);
 });
 
 test('continuous pull request diff parser exposes file sections and commentable lines', () => {
@@ -213,6 +295,21 @@ test('review comment helpers count unresolved comments by file and gate approval
   assert.deepEqual(reviewCommentCountsByFile(comments), {
     'src/App.tsx': { total: 2, unresolved: 1 },
     'src/main.tsx': { total: 1, unresolved: 1 }
+  });
+});
+
+test('shared review primitives count unresolved comments by arbitrary anchors', () => {
+  const comments = [
+    { id: '1', anchor: 'src/App.tsx', status: 'open' },
+    { id: '2', anchor: 'src/App.tsx', status: 'resolved' },
+    { id: '3', anchor: 'block-2', status: 'OPEN' },
+    { id: '4', anchor: null, status: 'open' }
+  ];
+
+  assert.equal(unresolvedReviewItemCount(comments), 3);
+  assert.deepEqual(reviewCommentCountsByAnchor(comments, (comment) => comment.anchor), {
+    'src/App.tsx': { total: 2, unresolved: 1 },
+    'block-2': { total: 1, unresolved: 1 }
   });
 });
 
@@ -337,6 +434,13 @@ test('activity renders plan references only for actual plan creation results', (
 test('repo-less board can sync only when provider capability allows it', () => {
   assert.equal(canSyncBoardToProvider({ id: 'preview', name: 'Preview', providerCapabilities: ['preview', 'sync-github'] }), true);
   assert.equal(canSyncBoardToProvider({ id: 'demo', name: 'Demo', repository: { provider: 'Sample' }, providerCapabilities: ['preview'] }), false);
+});
+
+test('repository management copy separates linking from provider copy', () => {
+  assert.equal(boardRepositoryManagementCopy.linkExistingAction, 'Link existing repository');
+  assert.equal(boardRepositoryManagementCopy.linkExistingTitle, 'Link existing GitHub repository');
+  assert.equal(boardRepositoryManagementCopy.copyToProviderAction, 'Copy repository to provider');
+  assert.equal(boardRepositoryManagementCopy.noRepositoryStatus.includes('sync'), false);
 });
 
 test('github repository creation requires a matching personal authorization', () => {

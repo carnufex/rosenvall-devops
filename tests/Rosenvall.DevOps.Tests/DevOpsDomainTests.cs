@@ -102,6 +102,30 @@ public sealed class DevOpsDomainTests
     }
 
     [Fact]
+    public void Preview_manifest_renders_redundant_namespace_cleanup_labels()
+    {
+        var boardId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var workItemId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        var resources = PreviewResourceSet.Create(
+            "TASK-4821",
+            "Implement OAuth2 Flow for Partner API Integrations",
+            "ghcr.io/rosenvall/demo@sha256:abc",
+            namespaceLabels: new Dictionary<string, string>
+            {
+                ["rosenvall.devops/managed-by"] = "rosenvall-devops",
+                ["rosenvall.devops/board-id"] = boardId.ToString(),
+                ["rosenvall.devops/work-item-id"] = workItemId.ToString()
+            });
+
+        var manifest = PreviewManifestRenderer.Render(resources);
+
+        Assert.Contains("app.kubernetes.io/part-of: rosenvall-devops-preview", manifest);
+        Assert.Contains("rosenvall.devops/managed-by: rosenvall-devops", manifest);
+        Assert.Contains($"rosenvall.devops/board-id: {boardId}", manifest);
+        Assert.Contains($"rosenvall.devops/work-item-id: {workItemId}", manifest);
+    }
+
+    [Fact]
     public void Preview_manifest_can_run_vite_react_tailwind_project()
     {
         var resources = PreviewResourceSet.Create(

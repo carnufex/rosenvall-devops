@@ -33,6 +33,8 @@ spec:
               value: Production
             - name: Frontend__AllowedOrigins__0
               value: https://devops.rosenvall.se
+            - name: Authentication__Mode
+              value: Required
             - name: Authentication__Authority
               value: https://authentik.rosenvall.se/application/o/rosenvall-devops/
             - name: Authentication__Audience
@@ -90,6 +92,12 @@ spec:
                 secretKeyRef:
                   name: rosenvall-devops-github-app
                   key: app-slug
+                  optional: true
+            - name: GitHub__WebhookSecret
+              valueFrom:
+                secretKeyRef:
+                  name: rosenvall-devops-github-app
+                  key: webhook-secret
                   optional: true
             - name: GitHub__TokenSecretName
               value: rosenvall-devops-github
