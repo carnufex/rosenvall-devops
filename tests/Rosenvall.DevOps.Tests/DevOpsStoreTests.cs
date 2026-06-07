@@ -913,24 +913,50 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Local_git_approve_pr_deploys_before_merging_open_pull_request()
+    public void Local_git_approve_pr_waits_for_public_app_readiness_before_merge_and_completion()
     {
         var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
         var endpointStart = program.IndexOf("api.MapPost(\"/work-items/{workItemId:guid}/approve-pr\"", StringComparison.Ordinal);
         var endpointEnd = program.IndexOf("api.MapPost(\"/work-items/{workItemId:guid}/preview/start\"", endpointStart, StringComparison.Ordinal);
         var endpoint = program[endpointStart..endpointEnd];
+        var reconcilerStart = program.IndexOf("public sealed class BoardPublicAppDeploymentReconciler", StringComparison.Ordinal);
+        var reconcilerEnd = program.IndexOf("public sealed class ProviderSyncRunMonitor", reconcilerStart, StringComparison.Ordinal);
+        var reconciler = program[reconcilerStart..reconcilerEnd];
 
         var sourceReadIndex = endpoint.IndexOf("approvedPrSourceFiles = await ReadDeployablePreviewSourceSnapshotAsync", StringComparison.Ordinal);
         var applyIndex = endpoint.IndexOf("var productionApply = await previews.ApplyAsync", StringComparison.Ordinal);
-        var mergeIndex = endpoint.IndexOf("var merged = await localGit.MergePullRequestAsync", StringComparison.Ordinal);
-        var markMergedIndex = endpoint.IndexOf("store.MarkPullRequestMergeState(workItemId, \"merged\", true);", StringComparison.Ordinal);
+        var waitIndex = endpoint.IndexOf("store.MarkBoardPublicAppWaitingForReadiness", StringComparison.Ordinal);
+        var mergeGateIndex = reconciler.IndexOf("if (!await MergeLocalGitPullRequestIfNeededAsync", StringComparison.Ordinal);
+        var markRunningIndex = reconciler.IndexOf("store.UpdateBoardPublicAppHealth(app.BoardId, health);", mergeGateIndex, StringComparison.Ordinal);
 
         Assert.True(sourceReadIndex >= 0, "LocalGit approval should read PR source before deploying.");
         Assert.True(applyIndex >= 0, "LocalGit approval should apply the production app before merging.");
-        Assert.True(mergeIndex >= 0, "LocalGit approval should still merge the LocalGit PR after a successful deploy.");
-        Assert.True(sourceReadIndex < mergeIndex, "Source must be read from the PR branch before merge changes the branch topology.");
-        Assert.True(applyIndex < mergeIndex, "Production deploy failure must leave the LocalGit PR open.");
-        Assert.True(mergeIndex < markMergedIndex, "RDO should only mark LocalGit merged after Forgejo merge succeeds.");
+        Assert.True(waitIndex >= 0, "LocalGit approval should wait for readiness after Kubernetes accepts the manifest.");
+        Assert.True(mergeGateIndex >= 0, "Readiness reconcile should run the LocalGit merge gate after the production app is healthy.");
+        Assert.True(markRunningIndex >= 0, "Readiness reconcile should mark the public app running after merge checks.");
+        Assert.Contains("var merged = await localGit.MergePullRequestAsync", reconciler);
+        Assert.DoesNotContain("localGit.MergePullRequestAsync", endpoint);
+        Assert.DoesNotContain("store.MarkBoardPublicAppRunning", endpoint);
+        Assert.True(applyIndex < waitIndex, "Production apply must happen before readiness waiting is recorded.");
+        Assert.True(mergeGateIndex < markRunningIndex, "RDO should only mark the production app running after any LocalGit merge succeeds.");
+    }
+
+    [Fact]
+    public void GitHub_webhook_queues_public_app_readiness_instead_of_marking_running_after_apply()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointStart = program.IndexOf("app.MapPost(\"/integrations/github/webhook\"", StringComparison.Ordinal);
+        var endpointEnd = program.IndexOf("app.MapGet(\"/integrations/github/user-authorization/callback\"", endpointStart, StringComparison.Ordinal);
+        var endpoint = program[endpointStart..endpointEnd];
+
+        var applyIndex = endpoint.IndexOf("var apply = await previews.ApplyAsync", StringComparison.Ordinal);
+        var waitIndex = endpoint.IndexOf("store.MarkBoardPublicAppWaitingForReadiness", StringComparison.Ordinal);
+
+        Assert.True(applyIndex >= 0, "GitHub webhook should still apply the production app manifest.");
+        Assert.True(waitIndex >= 0, "GitHub webhook should hand off to readiness monitoring after apply succeeds.");
+        Assert.True(applyIndex < waitIndex, "Kubernetes apply must happen before readiness waiting is recorded.");
+        Assert.DoesNotContain("store.MarkBoardPublicAppRunning", endpoint);
+        Assert.DoesNotContain("store.ApprovePullRequest", endpoint);
     }
 
     [Fact]

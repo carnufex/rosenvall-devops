@@ -209,21 +209,7 @@ app.MapPost("/integrations/github/webhook", async (HttpRequest httpRequest, ICon
         return Results.Ok();
     }
 
-    store.MarkBoardPublicAppRunning(publicApp.BoardId, apply.Message);
-    if (publicApp.SourceWorkItemId is { } workItemId)
-    {
-        var manifest = store.RenderPreviewManifest(workItemId);
-        if (!string.IsNullOrWhiteSpace(manifest))
-        {
-            await previews.DeleteAsync(manifest, cancellationToken);
-        }
-
-        var detail = store.ApprovePullRequest(workItemId, "github");
-        if (detail is not null)
-        {
-            await hub.Clients.All.SendAsync("workItemChanged", detail.Item, cancellationToken);
-        }
-    }
+    store.MarkBoardPublicAppWaitingForReadiness(publicApp.BoardId, apply.Message);
 
     return Results.Ok();
 });
@@ -2325,7 +2311,6 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
     var approvalContext = store.GetPullRequestApprovalContext(workItemId);
     var isLocalGitApproval = approvalContext?.Repository?.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) == true;
     IReadOnlyList<PreviewSourceFile>? approvedPrSourceFiles = null;
-    GitHubPullRequestDto? localGitPullRequestToMerge = null;
     if (isLocalGitApproval && store.HasUnresolvedPullRequestReviewComments(workItemId))
     {
         return Results.Problem("Resolve all review comments before approving the pull request.", statusCode: StatusCodes.Status409Conflict);
@@ -2355,7 +2340,7 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
                 return Results.Problem(message, statusCode: StatusCodes.Status409Conflict);
             }
 
-            localGitPullRequestToMerge = pullRequest;
+            store.MarkPullRequestMergeState(workItemId, pullRequest.State, false);
         }
 
         var sourceReference = pullRequest.Merged
@@ -2404,7 +2389,7 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
             store.MarkBoardPublicAppFailed(publicApp.BoardId, "ManifestMissing", message);
             if (isLocalGitApproval)
             {
-                store.MarkPullRequestMergeState(workItemId, localGitPullRequestToMerge?.State ?? "merged", localGitPullRequestToMerge is null, message);
+                store.MarkPullRequestMergeState(workItemId, "open", false, message);
             }
             return Results.Problem(message, statusCode: StatusCodes.Status409Conflict);
         }
@@ -2415,26 +2400,21 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
             store.MarkBoardPublicAppFailed(publicApp.BoardId, "DeployFailed", productionApply.Message);
             if (isLocalGitApproval)
             {
-                store.MarkPullRequestMergeState(workItemId, localGitPullRequestToMerge?.State ?? "merged", localGitPullRequestToMerge is null, productionApply.Message);
+                store.MarkPullRequestMergeState(workItemId, "open", false, productionApply.Message);
             }
             return Results.Problem(productionApply.Message, statusCode: StatusCodes.Status502BadGateway);
         }
 
-        if (localGitPullRequestToMerge is not null)
+        var waitingBoard = store.MarkBoardPublicAppWaitingForReadiness(publicApp.BoardId, productionApply.Message);
+        var waitingDetail = store.GetWorkItemDetail(workItemId);
+        if (waitingDetail is null)
         {
-            var merged = await localGit.MergePullRequestAsync(localGitPullRequestToMerge, cancellationToken);
-            if (!merged)
-            {
-                var message = "Production app deployed, but LocalGit pull request merge failed in Forgejo. Retry after Forgejo is available.";
-                store.MarkBoardPublicAppFailed(publicApp.BoardId, "MergeFailed", message);
-                store.MarkPullRequestMergeState(workItemId, "merge-failed", false, message);
-                return Results.Problem(message, statusCode: StatusCodes.Status502BadGateway);
-            }
-
-            store.MarkPullRequestMergeState(workItemId, "merged", true);
+            return Results.NotFound();
         }
 
-        store.MarkBoardPublicAppRunning(publicApp.BoardId, productionApply.Message);
+        await hub.Clients.All.SendAsync("boardChanged", waitingBoard);
+        await hub.Clients.All.SendAsync("workItemChanged", waitingDetail.Item);
+        return Results.Ok(waitingDetail);
     }
 
     var manifest = store.RenderPreviewManifest(workItemId);
@@ -6412,9 +6392,15 @@ namespace Rosenvall.DevOps.Api
                 var health = await previews.CheckHealthAsync(ToPreviewHealthTarget(app), cancellationToken);
                 if (string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase))
                 {
-                    store.UpdateBoardPublicAppHealth(app.BoardId, health);
                     if (app.SourceWorkItemId is { } workItemId && !store.IsPullRequestApproved(workItemId))
                     {
+                        if (!await MergeLocalGitPullRequestIfNeededAsync(app, workItemId, cancellationToken))
+                        {
+                            continue;
+                        }
+
+                        store.UpdateBoardPublicAppHealth(app.BoardId, health);
+
                         var previewManifest = store.RenderPreviewManifest(workItemId);
                         if (!string.IsNullOrWhiteSpace(previewManifest))
                         {
@@ -6423,12 +6409,72 @@ namespace Rosenvall.DevOps.Api
 
                         store.ApprovePullRequest(workItemId, "public-app-reconcile");
                     }
+                    else
+                    {
+                        store.UpdateBoardPublicAppHealth(app.BoardId, health);
+                    }
                 }
                 else
                 {
                     store.UpdateBoardPublicAppHealth(app.BoardId, health);
                 }
             }
+        }
+
+        private async Task<bool> MergeLocalGitPullRequestIfNeededAsync(BoardPublicAppDto app, Guid workItemId, CancellationToken cancellationToken)
+        {
+            var approvalContext = store.GetPullRequestApprovalContext(workItemId);
+            if (approvalContext?.Repository is not { } repository ||
+                !repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var development = approvalContext.Value.Development;
+            GitHubPullRequestDto? pullRequest = null;
+            if (!string.IsNullOrWhiteSpace(development.PullRequestUrl))
+            {
+                pullRequest = await localGit.GetPullRequestAsync(repository, development.PullRequestUrl, cancellationToken);
+            }
+
+            if (pullRequest is null && development.PullRequestNumber is { } pullRequestNumber)
+            {
+                pullRequest = await localGit.GetPullRequestAsync(repository, pullRequestNumber, development.PullRequestUrl, cancellationToken);
+            }
+
+            if (pullRequest is null)
+            {
+                var message = "Production app is ready, but the LocalGit pull request could not be read from Forgejo. Retry after Forgejo is available.";
+                store.MarkBoardPublicAppFailed(app.BoardId, "MergeFailed", message);
+                store.MarkPullRequestMergeState(workItemId, "unknown", false, message);
+                return false;
+            }
+
+            if (pullRequest.Merged)
+            {
+                store.MarkPullRequestMergeState(workItemId, "merged", true);
+                return true;
+            }
+
+            if (!pullRequest.State.Equals("open", StringComparison.OrdinalIgnoreCase))
+            {
+                var message = $"Production app is ready, but LocalGit pull request is {pullRequest.State} and cannot be merged by RDO.";
+                store.MarkBoardPublicAppFailed(app.BoardId, "MergeFailed", message);
+                store.MarkPullRequestMergeState(workItemId, pullRequest.State, false, message);
+                return false;
+            }
+
+            var merged = await localGit.MergePullRequestAsync(pullRequest, cancellationToken);
+            if (!merged)
+            {
+                var message = "Production app is ready, but LocalGit pull request merge failed in Forgejo. Retry after Forgejo is available.";
+                store.MarkBoardPublicAppFailed(app.BoardId, "MergeFailed", message);
+                store.MarkPullRequestMergeState(workItemId, "merge-failed", false, message);
+                return false;
+            }
+
+            store.MarkPullRequestMergeState(workItemId, "merged", true);
+            return true;
         }
 
         private static PreviewDto ToPreviewHealthTarget(BoardPublicAppDto app) =>
