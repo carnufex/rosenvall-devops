@@ -3959,9 +3959,14 @@ namespace Rosenvall.DevOps.Api
                                   {{secretShellUnset}}
                                   codex_log="$workspace/codex-output.log"
                                   set +e
-                                  {{codexCommand}} > "$codex_log" 2>&1
+                                  {{codexCommand}} > "$codex_log" 2>&1 &
+                                  codex_pid=$!
+                                  sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
+                                  rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
+                                  wait "$codex_pid"
                                   codex_status=$?
                                   set -e
+                                  rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
                                   cat "$codex_log"
                                   if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
                                   if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
@@ -4738,9 +4743,14 @@ namespace Rosenvall.DevOps.Api
                                  unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN
                                  codex_log="$workspace/codex-output.log"
                                  set +e
-                                 {{codexCommand}} > "$codex_log" 2>&1
+                                 {{codexCommand}} > "$codex_log" 2>&1 &
+                                 codex_pid=$!
+                                 sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
+                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
+                                 wait "$codex_pid"
                                  codex_status=$?
                                  set -e
+                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
                                  cat "$codex_log"
                                  if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
                                  if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
@@ -5040,9 +5050,14 @@ namespace Rosenvall.DevOps.Api
                                  unset GITHUB_TOKEN
                                  codex_log="$workspace/codex-output.log"
                                  set +e
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md" > "$codex_log" 2>&1
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md" > "$codex_log" 2>&1 &
+                                 codex_pid=$!
+                                 sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
+                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
+                                 wait "$codex_pid"
                                  codex_status=$?
                                  set -e
+                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
                                  cat "$codex_log"
                                  if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
                                  if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
@@ -11320,9 +11335,14 @@ namespace Rosenvall.DevOps.Api
                                  echo "RDO_STEP=Implementing"
                                  codex_log="$workspace/codex-output.log"
                                  set +e
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md" > "$codex_log" 2>&1
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md" > "$codex_log" 2>&1 &
+                                 codex_pid=$!
+                                 sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
+                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
+                                 wait "$codex_pid"
                                  codex_status=$?
                                  set -e
+                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
                                  cat "$codex_log"
                                  if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
                                  if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi

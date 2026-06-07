@@ -849,6 +849,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", manifest);
         Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", manifest);
         Assert.True(manifest.IndexOf("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", StringComparison.Ordinal) < manifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.Contains("codex_pid=$!", manifest);
+        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", manifest);
+        Assert.Contains("wait \"$codex_pid\"", manifest);
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) > manifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < manifest.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
         Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         Assert.DoesNotContain("/pulls\" -H", manifest);
         Assert.DoesNotContain("npm install", manifest);
@@ -2008,6 +2013,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", manifest);
         Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", manifest);
         Assert.True(manifest.IndexOf("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", StringComparison.Ordinal) < manifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.Contains("codex_pid=$!", manifest);
+        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", manifest);
+        Assert.Contains("wait \"$codex_pid\"", manifest);
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) > manifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < manifest.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
         Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         Assert.Contains("git remote set-url origin \"$auth_remote\"", manifest);
         Assert.DoesNotContain("name: codex-home\n                             persistentVolumeClaim:", manifest);
@@ -3172,6 +3182,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
         Assert.Contains("unset GITHUB_TOKEN", manifest);
+        Assert.Contains("codex_pid=$!", manifest);
+        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", manifest);
+        Assert.Contains("wait \"$codex_pid\"", manifest);
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) > manifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < manifest.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
         Assert.Contains("GITHUB_TOKEN=\"$github_token_for_runner\"", manifest);
         Assert.Contains("git remote set-url origin \"$auth_remote\"", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
@@ -5996,6 +6011,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("codex exec --ephemeral", manifest);
         Assert.Contains("--sandbox danger-full-access", manifest);
         Assert.Contains("codex-output.log", manifest);
+        Assert.Contains("codex_pid=$!", manifest);
+        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", manifest);
+        Assert.Contains("wait \"$codex_pid\"", manifest);
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) > manifest.IndexOf("codex exec", StringComparison.Ordinal));
+        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < manifest.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
         Assert.Contains("const skippedFiles = new Set(['seed.json', 'prompt.md', 'result.json', 'codex-output.log']);", manifest);
         Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.Contains("name: kube-api-access", manifest);
