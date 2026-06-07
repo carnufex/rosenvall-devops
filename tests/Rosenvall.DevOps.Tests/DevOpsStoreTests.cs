@@ -1335,7 +1335,7 @@ public sealed class DevOpsStoreTests
         var endpointEnd = program.IndexOf("api.MapPost(\"/work-items/{workItemId:guid}/preview/start\"", endpointStart, StringComparison.Ordinal);
         var endpoint = program[endpointStart..endpointEnd];
         var reconcilerStart = program.IndexOf("public sealed class BoardPublicAppDeploymentReconciler", StringComparison.Ordinal);
-        var reconcilerEnd = program.IndexOf("public sealed class ImplementationRunMonitor", reconcilerStart, StringComparison.Ordinal);
+        var reconcilerEnd = program.IndexOf("public sealed class DevOpsStateDbContext", reconcilerStart, StringComparison.Ordinal);
         var reconciler = program[reconcilerStart..reconcilerEnd];
 
         var sourceReadIndex = endpoint.IndexOf("approvedPrSourceFiles = await ReadDeployablePreviewSourceSnapshotAsync", StringComparison.Ordinal);
@@ -5679,6 +5679,26 @@ public sealed class DevOpsStoreTests
         Assert.Contains("public sealed class PreviewHealthMonitor", runtime);
         Assert.Contains("store.GetPreviewsAwaitingHealthCheck()", runtime);
         Assert.Contains("previews.CheckHealthAsync(preview, cancellationToken)", runtime);
+    }
+
+    [Fact]
+    public void Implementation_run_monitor_lives_in_runtime_monitor_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var runtimePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "ImplementationRunMonitor.cs");
+
+        Assert.Contains("builder.Services.AddHostedService<ImplementationRunMonitor>();", program);
+        Assert.DoesNotContain("public sealed class ImplementationRunMonitor", program);
+        Assert.True(File.Exists(runtimePath), "Implementation and repository cleanup monitoring should live in Runtime/Monitors/ImplementationRunMonitor.cs instead of Program.cs.");
+
+        var runtime = File.ReadAllText(runtimePath);
+        Assert.Contains("public sealed class ImplementationRunMonitor", runtime);
+        Assert.Contains("store.GetImplementationRunsAwaitingStatus()", runtime);
+        Assert.Contains("store.GetRepositoryCleanupRunsAwaitingStatus()", runtime);
+        Assert.Contains("RepositoryImplementationJobManifestRenderer.JobName(run, detail)", runtime);
+        Assert.Contains("RepositoryCleanupJobManifestRenderer.JobName(run, detail)", runtime);
+        Assert.Contains("KubernetesFailureClassifier.Classify", runtime);
     }
 
     [Fact]
