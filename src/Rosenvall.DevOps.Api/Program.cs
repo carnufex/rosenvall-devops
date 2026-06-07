@@ -4912,11 +4912,11 @@ namespace Rosenvall.DevOps.Api
     public sealed class PreviewEnvironmentOrchestrator(IConfiguration configuration, ILogger<PreviewEnvironmentOrchestrator> logger)
     {
         public Task<PreviewCleanupResult> ApplyAsync(string manifest, CancellationToken cancellationToken) =>
-            RunKubectlAsync("apply -f -", manifest, cancellationToken);
+            RunKubectlAsync(["apply", "-f", "-"], manifest, cancellationToken);
 
         public async Task<PreviewCleanupResult> DeleteAsync(string manifest, CancellationToken cancellationToken)
         {
-            return await RunKubectlAsync("delete -f - --ignore-not-found=true", manifest, cancellationToken);
+            return await RunKubectlAsync(["delete", "-f", "-", "--ignore-not-found=true"], manifest, cancellationToken);
         }
 
         public async Task<PreviewHealthCheckResult> CheckHealthAsync(PreviewDto preview, CancellationToken cancellationToken)
@@ -4926,7 +4926,7 @@ namespace Rosenvall.DevOps.Api
                 return PreviewHealthCheckResult.Failed("MissingPreviewMetadata", "Preview namespace or resource name is missing.");
             }
 
-            var deployment = await RunKubectlOutputAsync($"get deployment {preview.ResourceName} -n {preview.Namespace} -o json", cancellationToken);
+            var deployment = await RunKubectlOutputAsync(["get", "deployment", preview.ResourceName, "-n", preview.Namespace, "-o", "json"], cancellationToken);
             if (!deployment.Succeeded)
             {
                 if (!string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) &&
@@ -4941,19 +4941,19 @@ namespace Rosenvall.DevOps.Api
                 return PreviewHealthCheckResult.Provisioning("Waiting for deployment.", deployment.Message);
             }
 
-            var pods = await RunKubectlOutputAsync($"get pods -n {preview.Namespace} -l app.kubernetes.io/name={preview.ResourceName} -o json", cancellationToken);
+            var pods = await RunKubectlOutputAsync(["get", "pods", "-n", preview.Namespace, "-l", $"app.kubernetes.io/name={preview.ResourceName}", "-o", "json"], cancellationToken);
             if (!pods.Succeeded)
             {
                 return PreviewHealthCheckResult.Provisioning("Waiting for pod.", pods.Message);
             }
 
-            var service = await RunKubectlOutputAsync($"get service {preview.ResourceName} -n {preview.Namespace} -o json", cancellationToken);
+            var service = await RunKubectlOutputAsync(["get", "service", preview.ResourceName, "-n", preview.Namespace, "-o", "json"], cancellationToken);
             if (!service.Succeeded)
             {
                 return PreviewHealthCheckResult.Provisioning("Waiting for service.", service.Message);
             }
 
-            var httpRoute = await RunKubectlOutputAsync($"get httproute {preview.ResourceName} -n {preview.Namespace} -o json", cancellationToken);
+            var httpRoute = await RunKubectlOutputAsync(["get", "httproute", preview.ResourceName, "-n", preview.Namespace, "-o", "json"], cancellationToken);
             if (!httpRoute.Succeeded)
             {
                 return PreviewHealthCheckResult.Provisioning("Waiting for HTTPRoute.", httpRoute.Message);
@@ -4962,7 +4962,7 @@ namespace Rosenvall.DevOps.Api
             return await AnalyzeHealthAsync(preview, deployment.Message, pods.Message, service.Message, httpRoute.Message, cancellationToken);
         }
 
-        private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
+        private async Task<PreviewCleanupResult> RunKubectlAsync(IReadOnlyList<string> arguments, string manifest, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Preview:KubectlPath"] ?? "kubectl";
             var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
@@ -4971,24 +4971,11 @@ namespace Rosenvall.DevOps.Api
                 return PreviewCleanupResult.Failed($"Preview orchestration failed: {kubeconfig.MissingMessage}");
             }
 
-            var arguments = kubeconfig.UseInClusterAuth
-                ? command
-                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
-
             try
             {
                 using var process = new Process
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = kubectlPath,
-                        Arguments = arguments,
-                        RedirectStandardInput = true,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
+                    StartInfo = BuildStartInfo(kubectlPath, kubeconfig, arguments, redirectStandardInput: true)
                 };
 
                 process.Start();
@@ -5030,7 +5017,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        private async Task<PreviewCleanupResult> RunKubectlOutputAsync(string command, CancellationToken cancellationToken)
+        private async Task<PreviewCleanupResult> RunKubectlOutputAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Preview:KubectlPath"] ?? "kubectl";
             var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
@@ -5039,23 +5026,11 @@ namespace Rosenvall.DevOps.Api
                 return PreviewCleanupResult.Failed(kubeconfig.MissingMessage);
             }
 
-            var arguments = kubeconfig.UseInClusterAuth
-                ? command
-                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
-
             try
             {
                 using var process = new Process
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = kubectlPath,
-                        Arguments = arguments,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
+                    StartInfo = BuildStartInfo(kubectlPath, kubeconfig, arguments, redirectStandardInput: false)
                 };
 
                 process.Start();
@@ -5183,13 +5158,13 @@ namespace Rosenvall.DevOps.Api
                 return null;
             }
 
-            var previous = await RunKubectlOutputAsync($"logs -n {@namespace} {podName} -c {containerName} --tail=40 --previous", cancellationToken);
+            var previous = await RunKubectlOutputAsync(["logs", "-n", @namespace, podName, "-c", containerName, "--tail=40", "--previous"], cancellationToken);
             if (previous.Succeeded && !string.IsNullOrWhiteSpace(previous.Message))
             {
                 return previous.Message;
             }
 
-            var current = await RunKubectlOutputAsync($"logs -n {@namespace} {podName} -c {containerName} --tail=40", cancellationToken);
+            var current = await RunKubectlOutputAsync(["logs", "-n", @namespace, podName, "-c", containerName, "--tail=40"], cancellationToken);
             return current.Succeeded && !string.IsNullOrWhiteSpace(current.Message) ? current.Message : previous.Message;
         }
 
@@ -5286,20 +5261,46 @@ namespace Rosenvall.DevOps.Api
             message.Contains("namespaces", StringComparison.OrdinalIgnoreCase) &&
             message.Contains("not found", StringComparison.OrdinalIgnoreCase);
 
+        private static ProcessStartInfo BuildStartInfo(string kubectlPath, KubernetesKubeconfigResolution kubeconfig, IReadOnlyList<string> arguments, bool redirectStandardInput)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = kubectlPath,
+                RedirectStandardInput = redirectStandardInput,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            if (!kubeconfig.UseInClusterAuth)
+            {
+                startInfo.ArgumentList.Add("--kubeconfig");
+                startInfo.ArgumentList.Add(kubeconfig.Path ?? "");
+            }
+
+            foreach (var argument in arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+
+            return startInfo;
+        }
+
     }
 
     public sealed class PipelineJobOrchestrator(IConfiguration configuration, ILogger<PipelineJobOrchestrator> logger)
     {
         public Task<PreviewCleanupResult> ApplyAsync(string manifest, CancellationToken cancellationToken) =>
-            RunKubectlAsync("apply -f -", manifest, cancellationToken);
+            RunKubectlAsync(["apply", "-f", "-"], manifest, cancellationToken);
 
         public Task<PreviewCleanupResult> DeleteAsync(string manifest, CancellationToken cancellationToken) =>
-            RunKubectlAsync("delete -f - --ignore-not-found=true", manifest, cancellationToken);
+            RunKubectlAsync(["delete", "-f", "-", "--ignore-not-found=true"], manifest, cancellationToken);
 
-        public Task<PreviewCleanupResult> GetOutputAsync(string command, CancellationToken cancellationToken) =>
-            RunKubectlOutputAsync(command, cancellationToken);
+        public Task<PreviewCleanupResult> GetOutputAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken) =>
+            RunKubectlOutputAsync(arguments, cancellationToken);
 
-        private async Task<PreviewCleanupResult> RunKubectlOutputAsync(string command, CancellationToken cancellationToken)
+        private async Task<PreviewCleanupResult> RunKubectlOutputAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Pipelines:KubectlPath"] ?? configuration["Preview:KubectlPath"] ?? "kubectl";
             var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
@@ -5308,23 +5309,11 @@ namespace Rosenvall.DevOps.Api
                 return PreviewCleanupResult.Failed($"Pipeline job command failed: {kubeconfig.MissingMessage}");
             }
 
-            var arguments = kubeconfig.UseInClusterAuth
-                ? command
-                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
-
             try
             {
                 using var process = new Process
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = kubectlPath,
-                        Arguments = arguments,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
+                    StartInfo = BuildStartInfo(kubectlPath, kubeconfig, arguments, redirectStandardInput: false)
                 };
 
                 process.Start();
@@ -5344,7 +5333,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
+        private async Task<PreviewCleanupResult> RunKubectlAsync(IReadOnlyList<string> arguments, string manifest, CancellationToken cancellationToken)
         {
             var kubectlPath = configuration["Pipelines:KubectlPath"] ?? configuration["Preview:KubectlPath"] ?? "kubectl";
             var kubeconfig = KubernetesKubeconfigResolver.Resolve(configuration["Pipelines:KubeconfigPath"] ?? configuration["Preview:KubeconfigPath"] ?? KubernetesKubeconfigResolver.DefaultKubeconfigPath);
@@ -5353,24 +5342,11 @@ namespace Rosenvall.DevOps.Api
                 return PreviewCleanupResult.Failed($"Pipeline job submission failed: {kubeconfig.MissingMessage}");
             }
 
-            var arguments = kubeconfig.UseInClusterAuth
-                ? command
-                : $"--kubeconfig \"{kubeconfig.Path}\" {command}";
-
             try
             {
                 using var process = new Process
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = kubectlPath,
-                        Arguments = arguments,
-                        RedirectStandardInput = true,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
+                    StartInfo = BuildStartInfo(kubectlPath, kubeconfig, arguments, redirectStandardInput: true)
                 };
 
                 process.Start();
@@ -5410,6 +5386,32 @@ namespace Rosenvall.DevOps.Api
                 logger.LogWarning(ex, "Pipeline job submission failed.");
                 return PreviewCleanupResult.Failed($"Pipeline job submission failed: {ex.Message}");
             }
+        }
+
+        private static ProcessStartInfo BuildStartInfo(string kubectlPath, KubernetesKubeconfigResolution kubeconfig, IReadOnlyList<string> arguments, bool redirectStandardInput)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = kubectlPath,
+                RedirectStandardInput = redirectStandardInput,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            if (!kubeconfig.UseInClusterAuth)
+            {
+                startInfo.ArgumentList.Add("--kubeconfig");
+                startInfo.ArgumentList.Add(kubeconfig.Path ?? "");
+            }
+
+            foreach (var argument in arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+
+            return startInfo;
         }
 
         private static async Task<string> ReadKubectlExitAsync(Process process, Task<string> outputTask, Task<string> errorTask, CancellationToken cancellationToken)
@@ -10030,7 +10032,7 @@ namespace Rosenvall.DevOps.Api
             }
 
             var shouldCreateJob = true;
-            var existingJob = await jobs.GetOutputAsync($"get job {jobName} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+            var existingJob = await jobs.GetOutputAsync(["get", "job", jobName, "-n", PreviewSourceJobManifestRenderer.Namespace, "-o", "json"], cancellationToken);
             if (existingJob.Succeeded)
             {
                 using var document = JsonDocument.Parse(existingJob.Message);
@@ -10070,7 +10072,7 @@ namespace Rosenvall.DevOps.Api
             var emittedLogLines = 0;
             while (DateTimeOffset.UtcNow - startedAt < timeout)
             {
-                var logsResult = await jobs.GetOutputAsync($"logs -n {PreviewSourceJobManifestRenderer.Namespace} job/{jobName} --all-containers --tail=240", cancellationToken);
+                var logsResult = await jobs.GetOutputAsync(["logs", "-n", PreviewSourceJobManifestRenderer.Namespace, $"job/{jobName}", "--all-containers", "--tail=240"], cancellationToken);
                 if (logsResult.Succeeded && !string.IsNullOrWhiteSpace(logsResult.Message))
                 {
                     var lines = logsResult.Message.Split('\n', StringSplitOptions.RemoveEmptyEntries);
@@ -10082,7 +10084,7 @@ namespace Rosenvall.DevOps.Api
                     emittedLogLines = lines.Length;
                 }
 
-                var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+                var jobResult = await jobs.GetOutputAsync(["get", "job", jobName, "-n", PreviewSourceJobManifestRenderer.Namespace, "-o", "json"], cancellationToken);
                 if (jobResult.Succeeded)
                 {
                     using var document = JsonDocument.Parse(jobResult.Message);
@@ -10121,7 +10123,7 @@ namespace Rosenvall.DevOps.Api
 
         private async Task<IReadOnlyList<PreviewSourceFile>?> TryReadResultAsync(AiRun run, Func<PreviewTerminalLineDto, Task>? onTerminalLine, CancellationToken cancellationToken, string? message = null)
         {
-            var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+            var result = await jobs.GetOutputAsync(["get", "configmap", PreviewSourceJobManifestRenderer.ResultConfigMapName(run), "-n", PreviewSourceJobManifestRenderer.Namespace, "-o", "json"], cancellationToken);
             if (!result.Succeeded)
             {
                 return null;
@@ -10133,7 +10135,7 @@ namespace Rosenvall.DevOps.Api
 
         private async Task<IReadOnlyList<PreviewSourceFile>> ReadRequiredResultAsync(AiRun run, CancellationToken cancellationToken)
         {
-            var result = await jobs.GetOutputAsync($"get configmap {PreviewSourceJobManifestRenderer.ResultConfigMapName(run)} -n {PreviewSourceJobManifestRenderer.Namespace} -o json", cancellationToken);
+            var result = await jobs.GetOutputAsync(["get", "configmap", PreviewSourceJobManifestRenderer.ResultConfigMapName(run), "-n", PreviewSourceJobManifestRenderer.Namespace, "-o", "json"], cancellationToken);
             if (!result.Succeeded)
             {
                 throw new AiPlanProviderUnavailableException($"{PreviewSourceJobFailureMessage(result.Message, "result lookup")} No preview was deployed.");

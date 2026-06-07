@@ -31,7 +31,7 @@ public sealed class ProviderSyncRunMonitor(DevOpsStore store, PipelineJobOrchest
         {
             var jobName = RepositoryProviderSyncJobManifestRenderer.JobName(run);
             var jobNamespace = RepositoryImplementationJobManifestRenderer.Namespace;
-            var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {jobNamespace} -o json", cancellationToken);
+            var jobResult = await jobs.GetOutputAsync(["get", "job", jobName, "-n", jobNamespace, "-o", "json"], cancellationToken);
             if (!jobResult.Succeeded)
             {
                 if (!string.Equals(run.Status, "Queued", StringComparison.OrdinalIgnoreCase))
@@ -42,7 +42,7 @@ public sealed class ProviderSyncRunMonitor(DevOpsStore store, PipelineJobOrchest
                 continue;
             }
 
-            var logsResult = await jobs.GetOutputAsync($"logs -n {jobNamespace} job/{jobName} --all-containers --tail=160", cancellationToken);
+            var logsResult = await jobs.GetOutputAsync(["logs", "-n", jobNamespace, $"job/{jobName}", "--all-containers", "--tail=160"], cancellationToken);
             var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
             using var document = JsonDocument.Parse(jobResult.Message);
             var succeeded = StatusInt(document.RootElement, "succeeded");

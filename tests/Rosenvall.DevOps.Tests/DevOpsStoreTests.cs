@@ -5197,6 +5197,33 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Pipeline_job_orchestrator_uses_structured_kubectl_arguments()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var orchestratorStart = program.IndexOf("public sealed class PipelineJobOrchestrator", StringComparison.Ordinal);
+        var orchestratorEnd = program.IndexOf("public sealed class DevOpsStateDbContext", orchestratorStart, StringComparison.Ordinal);
+        Assert.True(orchestratorStart >= 0 && orchestratorEnd > orchestratorStart, "PipelineJobOrchestrator source block should be present.");
+        var orchestrator = program[orchestratorStart..orchestratorEnd];
+
+        Assert.Contains("ProcessStartInfo", orchestrator);
+        Assert.Contains("ArgumentList.Add", orchestrator);
+        Assert.DoesNotContain("Arguments =", orchestrator);
+        Assert.DoesNotContain("GetOutputAsync(string command", orchestrator);
+        Assert.DoesNotContain("RunKubectlOutputAsync(string command", orchestrator);
+    }
+
+    [Fact]
+    public void GitOps_status_reader_passes_label_selector_as_a_single_kubectl_argument()
+    {
+        var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Features", "GitOps", "GitOpsStatusReader.cs"));
+
+        Assert.Contains("GetOutputAsync(arguments", source);
+        Assert.Contains("arguments.Add(settings.ArgoApplicationSelector)", source);
+        Assert.DoesNotContain("Replace(\"\\\"\"", source);
+        Assert.DoesNotContain("$\"get applications.argoproj.io", source);
+    }
+
+    [Fact]
     public void Kubernetes_kubeconfig_resolver_finds_sibling_homelab_kubeconfig_for_default_path()
     {
         var temp = Directory.CreateTempSubdirectory("rdo-kubeconfig-");

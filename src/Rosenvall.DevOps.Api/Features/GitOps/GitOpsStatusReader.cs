@@ -13,10 +13,14 @@ public sealed class GitOpsStatusReader(PipelineJobOrchestrator jobs)
             return new GitOpsApplicationsResponseDto([], "GitOps settings are not configured for this board.");
         }
 
-        var selector = string.IsNullOrWhiteSpace(settings.ArgoApplicationSelector)
-            ? ""
-            : $" -l \"{settings.ArgoApplicationSelector.Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
-        var result = await jobs.GetOutputAsync($"get applications.argoproj.io -n {settings.ArgoNamespace}{selector} -o json", cancellationToken);
+        var arguments = new List<string> { "get", "applications.argoproj.io", "-n", settings.ArgoNamespace, "-o", "json" };
+        if (!string.IsNullOrWhiteSpace(settings.ArgoApplicationSelector))
+        {
+            arguments.Add("-l");
+            arguments.Add(settings.ArgoApplicationSelector);
+        }
+
+        var result = await jobs.GetOutputAsync(arguments, cancellationToken);
         if (!result.Succeeded)
         {
             return FromKubectlFailure(result.Message);

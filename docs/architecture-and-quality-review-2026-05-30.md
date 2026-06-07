@@ -150,6 +150,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-05-30: Started the runtime service-account split. Homelab now has separate `rosenvall-devops-api`, `rosenvall-devops-runtime`, and `rosenvall-devops-frontend` service accounts; preview manager and runtime secret cleanup bindings moved to the API identity, while the runtime identity is limited to a namespaced ConfigMap writer role for preview-source result publishing. Further identity split work remains for narrower API-side orchestration.
 - 2026-05-30: Completed the frontend container hardening slice. The frontend Dockerfile now uses `nginxinc/nginx-unprivileged`, and the Homelab frontend Deployment runs as UID/GID 101 with no added capabilities, read-only root filesystem, writable `/tmp` and nginx cache mounts, and its own non-RBAC service account.
 - 2026-05-30: Completed the first appsettings drift slice. Base API settings now default preview/pipeline kubeconfig paths to in-cluster auth and use LocalGit/InternalForgejo repository intent without the stale external `git.rosenvall.se` defaults; `appsettings.Development.json` carries the local `tofu/output/kubeconfig` discovery contract.
+- 2026-06-07: Closed the structured kubectl argument slice. Preview and pipeline orchestration now populate `ProcessStartInfo.ArgumentList`, `PipelineJobOrchestrator.GetOutputAsync` accepts structured argument lists, and GitOps label selectors are passed as a single `-l` argument without command-string quote rewriting.
 - 2026-06-07: Started the Epic/Goal state-machine hardening slice. `Rosenvall.DevOps.Core` now has a pure `EpicGoalStateMachine` with explicit `PlanningChildren`, `RunningChildren`, `WaitingForReview`, `Blocked`, `Complete` and `Cancelled` outcomes, `StartEpicGoal` uses it for new goal status, and the frontend treats those explicit active states as running goals. A hosted reconciler that queues child AI/implementation work remains the next step for this finding.
 
 ## Priority Findings
@@ -2465,6 +2466,8 @@ Recommended fix:
   - generated `public/asset.svg` still allowed.
 
 ### P1: `kubectl` Commands Should Use `ArgumentList`, Not String Arguments
+
+Status 2026-06-07: Closed. `PreviewEnvironmentOrchestrator` and `PipelineJobOrchestrator` now build `ProcessStartInfo.ArgumentList` directly, `PipelineJobOrchestrator.GetOutputAsync` takes structured argument lists, and GitOps/preview/implementation/provider-sync monitors pass namespaces, selectors, jsonpath expressions and job names as separate arguments. Regression tests cover the structured pipeline API and GitOps label-selector handling.
 
 Evidence:
 

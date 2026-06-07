@@ -39,19 +39,19 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
 
             var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, detail);
             var implementationNamespace = RepositoryImplementationJobManifestRenderer.Namespace;
-            var logsResult = await jobs.GetOutputAsync($"logs -n {implementationNamespace} job/{jobName} --all-containers --tail=160", cancellationToken);
+            var logsResult = await jobs.GetOutputAsync(["logs", "-n", implementationNamespace, $"job/{jobName}", "--all-containers", "--tail=160"], cancellationToken);
             var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
             if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)
             {
-                var podName = await FirstKubectlLineAsync($"get pods -n {implementationNamespace} -l job-name={jobName} -o jsonpath='{{.items[0].metadata.name}}'", cancellationToken);
+                var podName = await FirstKubectlLineAsync(["get", "pods", "-n", implementationNamespace, "-l", $"job-name={jobName}", "-o", "jsonpath={.items[0].metadata.name}"], cancellationToken);
                 var jobCondition = await LastJobConditionAsync(implementationNamespace, jobName, cancellationToken);
                 var podCondition = string.IsNullOrWhiteSpace(podName)
                     ? null
                     : await PodDiagnosticSummaryAsync(implementationNamespace, podName, cancellationToken);
                 var condition = string.Join("; ", new[] { jobCondition, podCondition }.Where(value => !string.IsNullOrWhiteSpace(value)));
                 var events = string.IsNullOrWhiteSpace(podName)
-                    ? await FirstKubectlLineAsync($"describe job {jobName} -n {implementationNamespace}", cancellationToken)
-                    : await FirstKubectlLineAsync($"get events -n {implementationNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp --no-headers", cancellationToken);
+                    ? await FirstKubectlLineAsync(["describe", "job", jobName, "-n", implementationNamespace], cancellationToken)
+                    : await FirstKubectlLineAsync(["get", "events", "-n", implementationNamespace, "--field-selector", $"involvedObject.name={podName}", "--sort-by=.lastTimestamp", "--no-headers"], cancellationToken);
                 var stuck = store.MarkImplementationRunStuck(run.Id, jobName, podName, condition, events);
                 if (stuck is not null)
                 {
@@ -63,7 +63,7 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
 
             var nextStatus = StatusFromLogs(logs, run.Status);
 
-            var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {implementationNamespace} -o json", cancellationToken);
+            var jobResult = await jobs.GetOutputAsync(["get", "job", jobName, "-n", implementationNamespace, "-o", "json"], cancellationToken);
             if (jobResult.Succeeded)
             {
                 using var document = JsonDocument.Parse(jobResult.Message);
@@ -107,19 +107,19 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
 
             var jobName = RepositoryCleanupJobManifestRenderer.JobName(run, detail);
             var cleanupNamespace = RepositoryCleanupJobManifestRenderer.Namespace;
-            var logsResult = await jobs.GetOutputAsync($"logs -n {cleanupNamespace} job/{jobName} --all-containers --tail=160", cancellationToken);
+            var logsResult = await jobs.GetOutputAsync(["logs", "-n", cleanupNamespace, $"job/{jobName}", "--all-containers", "--tail=160"], cancellationToken);
             var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
             if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)
             {
-                var podName = await FirstKubectlLineAsync($"get pods -n {cleanupNamespace} -l job-name={jobName} -o jsonpath='{{.items[0].metadata.name}}'", cancellationToken);
+                var podName = await FirstKubectlLineAsync(["get", "pods", "-n", cleanupNamespace, "-l", $"job-name={jobName}", "-o", "jsonpath={.items[0].metadata.name}"], cancellationToken);
                 var jobCondition = await LastJobConditionAsync(cleanupNamespace, jobName, cancellationToken);
                 var podCondition = string.IsNullOrWhiteSpace(podName)
                     ? null
                     : await PodDiagnosticSummaryAsync(cleanupNamespace, podName, cancellationToken);
                 var condition = string.Join("; ", new[] { jobCondition, podCondition }.Where(value => !string.IsNullOrWhiteSpace(value)));
                 var events = string.IsNullOrWhiteSpace(podName)
-                    ? await FirstKubectlLineAsync($"describe job {jobName} -n {cleanupNamespace}", cancellationToken)
-                    : await FirstKubectlLineAsync($"get events -n {cleanupNamespace} --field-selector involvedObject.name={podName} --sort-by=.lastTimestamp --no-headers", cancellationToken);
+                    ? await FirstKubectlLineAsync(["describe", "job", jobName, "-n", cleanupNamespace], cancellationToken)
+                    : await FirstKubectlLineAsync(["get", "events", "-n", cleanupNamespace, "--field-selector", $"involvedObject.name={podName}", "--sort-by=.lastTimestamp", "--no-headers"], cancellationToken);
                 var stuck = store.MarkRepositoryCleanupRunStuck(run.Id, jobName, podName, condition, events);
                 if (stuck is not null)
                 {
@@ -130,7 +130,7 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
             }
             var nextStatus = StatusFromLogs(logs, run.Status);
 
-            var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {cleanupNamespace} -o json", cancellationToken);
+            var jobResult = await jobs.GetOutputAsync(["get", "job", jobName, "-n", cleanupNamespace, "-o", "json"], cancellationToken);
             if (jobResult.Succeeded)
             {
                 using var document = JsonDocument.Parse(jobResult.Message);
@@ -162,7 +162,7 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
         }
     }
 
-    private async Task<string?> FirstKubectlLineAsync(string arguments, CancellationToken cancellationToken)
+    private async Task<string?> FirstKubectlLineAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
         var result = await jobs.GetOutputAsync(arguments, cancellationToken);
         return result.Succeeded
@@ -172,7 +172,7 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
 
     private async Task<string?> LastJobConditionAsync(string cleanupNamespace, string jobName, CancellationToken cancellationToken)
     {
-        var jobResult = await jobs.GetOutputAsync($"get job {jobName} -n {cleanupNamespace} -o json", cancellationToken);
+        var jobResult = await jobs.GetOutputAsync(["get", "job", jobName, "-n", cleanupNamespace, "-o", "json"], cancellationToken);
         if (!jobResult.Succeeded)
         {
             return jobResult.Message;
@@ -199,7 +199,7 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
 
     private async Task<string?> PodDiagnosticSummaryAsync(string podNamespace, string podName, CancellationToken cancellationToken)
     {
-        var podResult = await jobs.GetOutputAsync($"get pod {podName} -n {podNamespace} -o json", cancellationToken);
+        var podResult = await jobs.GetOutputAsync(["get", "pod", podName, "-n", podNamespace, "-o", "json"], cancellationToken);
         if (!podResult.Succeeded)
         {
             return podResult.Message;
