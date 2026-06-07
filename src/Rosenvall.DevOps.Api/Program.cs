@@ -2826,6 +2826,40 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
             statusCode: StatusCodes.Status409Conflict);
     }
 
+    var boardId = store.GetWorkItemBoardId(workItemId);
+    if (boardId is null)
+    {
+        return Results.NotFound();
+    }
+
+    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+    var actionKey = RepositoryImplementationActionIdempotencyKey(actorSubject, workItemId, request.AiRunId, request.RepositoryId);
+    var quota = ReadRepositoryImplementationActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        boardId,
+        workItemId,
+        "repository-implementation",
+        actionKey,
+        blockAfterRunCreation: false,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.RepositoryImplementationActionKinds);
+    if (!actionStart.Started)
+    {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
+        return Results.Conflict(new
+        {
+            message = "Repository implementation is already queued or running for this request.",
+            operationId = actionStart.Action?.Id,
+            runId = actionStart.Action?.RunId
+        });
+    }
+
     ImplementationRunDto? run;
     try
     {
@@ -2833,13 +2867,16 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
     }
     catch (InvalidOperationException ex)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, ex.Message);
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
     }
 
     if (run is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
         return Results.NotFound();
     }
+    store.MarkActionRun(actionStart.Action!.Id, run.Id, "Queued");
 
     if (store.RenderPreviousImplementationRunCleanupManifest(workItemId, run.Id) is { } retryCleanupManifest)
     {
@@ -2848,6 +2885,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         {
             var failure = $"Retry cleanup failed: {KubernetesFailureClassifier.Classify(cleanup.Message)}";
             var failed = store.UpdateImplementationRun(run.Id, "Failed", cleanup.Message, failure);
+            store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? failure);
             await hub.Clients.All.SendAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? failure, statusCode: StatusCodes.Status502BadGateway);
         }
@@ -2862,6 +2900,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         if (string.IsNullOrWhiteSpace(localGitCredential))
         {
             var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Could not resolve Local Git credentials for repository implementation.");
+            store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Could not resolve Local Git credentials for repository implementation.");
             await hub.Clients.All.SendAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? "Could not resolve Local Git credentials.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
@@ -2877,6 +2916,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         {
             var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
             var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
+            store.MarkActionFailed(actionStart.Action!.Id, failure);
             await hub.Clients.All.SendAsync("implementationRunChanged", failed);
             return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
         }
@@ -2887,6 +2927,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         if (string.IsNullOrWhiteSpace(token))
         {
             var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: $"Could not mint GitHub App installation token for {integration.AccountLogin}.");
+            store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Could not mint GitHub App installation token.");
             await hub.Clients.All.SendAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? "Could not mint GitHub App installation token.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
@@ -2902,6 +2943,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         {
             var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
             var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
+            store.MarkActionFailed(actionStart.Action!.Id, failure);
             await hub.Clients.All.SendAsync("implementationRunChanged", failed);
             return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
         }
@@ -2911,6 +2953,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
     if (manifest is null)
     {
         var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Implementation manifest could not be rendered.");
+        store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Implementation manifest could not be rendered.");
         return Results.Problem(failed?.FailureReason ?? "Implementation manifest could not be rendered.", statusCode: StatusCodes.Status409Conflict);
     }
 
@@ -2919,11 +2962,13 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
     {
         var failure = KubernetesFailureClassifier.Classify(apply.Message);
         var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
+        store.MarkActionFailed(actionStart.Action!.Id, failure);
         await hub.Clients.All.SendAsync("implementationRunChanged", failed);
         return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
+    store.MarkActionRun(actionStart.Action!.Id, run.Id, "Running");
     await hub.Clients.All.SendAsync("implementationRunChanged", updated);
     return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
 });
@@ -3021,6 +3066,9 @@ static string ProviderSyncActionIdempotencyKey(string actor, Guid boardId, Guid 
     return $"provider-sync:{EffectiveActorSubject(actor).Trim()}:{boardId:N}:{sourceRepositoryId:N}:{(string.IsNullOrWhiteSpace(targetProvider) ? "provider" : targetProvider.Trim().ToLowerInvariant())}:{normalizedName}:{isPrivate.ToString().ToLowerInvariant()}";
 }
 
+static string RepositoryImplementationActionIdempotencyKey(string actor, Guid workItemId, Guid aiRunId, Guid? repositoryId) =>
+    $"repository-implementation:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{aiRunId:N}:{repositoryId?.ToString("N") ?? "default"}";
+
 static string AiPlanActionIdempotencyKey(string actor, Guid workItemId, string provider, string model, string? reasoningEffort) =>
     $"ai-plan:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}";
 
@@ -3049,6 +3097,14 @@ static ExpensiveActionQuotaOptions ReadProviderSyncActionQuota(IConfiguration co
     var enabled = configuration.GetValue("Actions:Quotas:ProviderSync:Enabled", true);
     var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:ProviderSync:MaxStartedPerActor", 4));
     var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:ProviderSync:WindowSeconds", 900));
+    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+}
+
+static ExpensiveActionQuotaOptions ReadRepositoryImplementationActionQuota(IConfiguration configuration)
+{
+    var enabled = configuration.GetValue("Actions:Quotas:RepositoryImplementation:Enabled", true);
+    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:RepositoryImplementation:MaxStartedPerActor", 4));
+    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:RepositoryImplementation:WindowSeconds", 900));
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
 
@@ -3576,6 +3632,7 @@ namespace Rosenvall.DevOps.Api
         public const string QuotaExceeded = "QuotaExceeded";
         public static readonly IReadOnlyList<string> AiPlanningActionKinds = ["ai-plan", "ai-plan-revise"];
         public static readonly IReadOnlyList<string> ProviderSyncActionKinds = ["provider-sync"];
+        public static readonly IReadOnlyList<string> RepositoryImplementationActionKinds = ["repository-implementation"];
     }
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);

@@ -571,6 +571,72 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_implementation_action_ledger_allows_failed_retry_but_blocks_duplicate_before_run()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Implementation quota", "Avoid duplicate repository runs.", "Todo", "Medium", null));
+        var aiRunId = Guid.NewGuid();
+        var repositoryId = Guid.NewGuid();
+        var key = $"repository-implementation:demo:{item.Id:N}:{aiRunId:N}:{repositoryId:N}";
+
+        var first = store.StartAction("demo", board.Id, item.Id, "repository-implementation", key, blockAfterRunCreation: false);
+        var duplicateBeforeRun = store.StartAction("demo", board.Id, item.Id, "repository-implementation", key, blockAfterRunCreation: false);
+
+        Assert.True(first.Started);
+        Assert.False(duplicateBeforeRun.Started);
+        Assert.Equal(first.Action!.Id, duplicateBeforeRun.Action!.Id);
+
+        store.MarkActionFailed(first.Action.Id, "Runner failed before run creation.");
+        var retry = store.StartAction("demo", board.Id, item.Id, "repository-implementation", key, blockAfterRunCreation: false);
+
+        Assert.True(retry.Started);
+        Assert.NotEqual(first.Action.Id, retry.Action!.Id);
+    }
+
+    [Fact]
+    public void Repository_implementation_action_ledger_enforces_per_actor_quota()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Implementation quota", "Avoid duplicate repository runs.", "Todo", "Medium", null));
+        var firstKey = $"repository-implementation:demo:{item.Id:N}:{Guid.NewGuid():N}:default";
+        var secondKey = $"repository-implementation:demo:{item.Id:N}:{Guid.NewGuid():N}:default";
+
+        var first = store.StartAction("demo", board.Id, item.Id, "repository-implementation", firstKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "repository-implementation" });
+        var duplicate = store.StartAction("demo", board.Id, item.Id, "repository-implementation", firstKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "repository-implementation" });
+        var overQuota = store.StartAction("demo", board.Id, item.Id, "repository-implementation", secondKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "repository-implementation" });
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action!.Id, duplicate.Action!.Id);
+        Assert.False(overQuota.Started);
+        Assert.Null(overQuota.Action);
+        Assert.Equal("QuotaExceeded", overQuota.BlockReason);
+    }
+
+    [Fact]
+    public void Repository_implementation_endpoint_uses_action_quota_before_starting_run()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/implementation-runs\"", "api.MapGet(\"/previews/{workItemId:guid}/manifest\"");
+
+        Assert.Contains("ReadRepositoryImplementationActionQuota(configuration)", endpoint);
+        Assert.Contains("\"repository-implementation\"", endpoint);
+        Assert.Contains("RepositoryImplementationActionIdempotencyKey(actorSubject, workItemId, request.AiRunId, request.RepositoryId)", endpoint);
+        Assert.Contains("ActionLedgerBlockReasons.RepositoryImplementationActionKinds", endpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", endpoint);
+        Assert.Contains("blockAfterRunCreation: false", endpoint);
+        Assert.True(endpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < endpoint.IndexOf("store.StartImplementationRun", StringComparison.Ordinal));
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, run.Id, \"Queued\")", endpoint);
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, run.Id, \"Running\")", endpoint);
+    }
+
+    [Fact]
     public void Ai_plan_action_ledger_blocks_only_in_flight_duplicate_provider_calls()
     {
         using var fixture = DevOpsStoreFixture.Create();
