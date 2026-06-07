@@ -1380,8 +1380,8 @@ public sealed class DevOpsStoreTests
         var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
 
         Assert.Contains("static string AuditActorFromClaims(ClaimsPrincipal user)", program);
-        Assert.Contains("store.StartImplementationRun(workItemId, request with { Actor = actor })", program);
-        Assert.Contains("store.StartPullRequestReviewFixRun(workItemId, request with { Actor = actor })", program);
+        Assert.Contains("store.StartImplementationRun(workItemId, request, actor)", program);
+        Assert.Contains("store.StartPullRequestReviewFixRun(workItemId, request, actor)", program);
         Assert.Contains("store.ApproveAiRun(aiRunId, actor)", program);
         Assert.Contains("previewImplementationRunner.RunAsync(result, actor, CancellationToken.None)", program);
         Assert.Contains("store.ApprovePullRequest(workItemId, actor)", program);
@@ -1403,6 +1403,33 @@ public sealed class DevOpsStoreTests
         var pipelineEndpoint = EndpointSnippet(program, "api.MapPost(\"/pipeline-runs/{pipelineRunId:guid}/execute\"", "api.MapGet(\"/pipeline-runs/{pipelineRunId:guid}/manifest\"");
         Assert.Contains("var actor = AuditActorFromClaims(user);", pipelineEndpoint);
         Assert.DoesNotContain("request.Actor", pipelineEndpoint);
+    }
+
+    [Fact]
+    public void Public_delivery_request_contracts_do_not_accept_client_supplied_audit_identity()
+    {
+        var publicDeliveryRequestTypes = new[]
+        {
+            typeof(StartPullRequestReviewFixRequest),
+            typeof(ApproveAiRunRequest),
+            typeof(DiscardAiRunRequest),
+            typeof(ApprovePullRequestRequest),
+            typeof(PreviewActionRequest),
+            typeof(DeleteAndCleanupRequest),
+            typeof(AdoptCleanupPullRequestRequest),
+            typeof(ExecutePipelineRunRequest),
+            typeof(StartImplementationRunRequest)
+        };
+
+        foreach (var requestType in publicDeliveryRequestTypes)
+        {
+            Assert.Null(requestType.GetProperty("Actor"));
+            Assert.Null(requestType.GetProperty("ApprovedBy"));
+            Assert.Null(requestType.GetProperty("DiscardedBy"));
+        }
+
+        Assert.NotNull(typeof(StartPullRequestReviewFixRequest).GetProperty("ReasoningEffort"));
+        Assert.NotNull(typeof(ApproveAiRunRequest).GetProperty("ReasoningEffort"));
     }
 
     [Fact]

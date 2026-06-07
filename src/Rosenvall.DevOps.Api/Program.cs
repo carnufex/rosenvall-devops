@@ -2090,7 +2090,7 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
     ImplementationRunDto? run;
     try
     {
-        run = store.StartPullRequestReviewFixRun(workItemId, request with { Actor = actor });
+        run = store.StartPullRequestReviewFixRun(workItemId, request, actor);
     }
     catch (InvalidOperationException ex)
     {
@@ -3080,7 +3080,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
     ImplementationRunDto? run;
     try
     {
-        run = store.StartImplementationRun(workItemId, request with { Actor = actor });
+        run = store.StartImplementationRun(workItemId, request, actor);
     }
     catch (InvalidOperationException ex)
     {
@@ -3937,18 +3937,52 @@ namespace Rosenvall.DevOps.Api
     public sealed record UpdateAiPlanReviewCommentRequest(string? Body = null, string? Status = null);
     public sealed record CreatePullRequestReviewCommentRequest(string FilePath, string Side, int LineNumber, string DiffLine, string Body);
     public sealed record UpdatePullRequestReviewCommentRequest(string? Body = null, string? Status = null);
-    public sealed record StartPullRequestReviewFixRequest(string? Actor = null, string? ReasoningEffort = null);
+    public sealed record StartPullRequestReviewFixRequest(string? ReasoningEffort = null)
+    {
+        internal string? ActorForStore { get; init; }
+
+        public StartPullRequestReviewFixRequest(string? actor, string? reasoningEffort)
+            : this(reasoningEffort)
+        {
+            ActorForStore = actor;
+        }
+    }
+
     public sealed record StartAiPlanRequest(string Provider, string Model, string? ReasoningEffort = null);
     public sealed record ReviseAiPlanRequest(string Message, string Provider, string Model, string? ReasoningEffort = null, Guid? AiRunId = null);
-    public sealed record ApproveAiRunRequest(string? ApprovedBy = null, string? ReasoningEffort = null);
-    public sealed record DiscardAiRunRequest(string? DiscardedBy = null);
-    public sealed record ApprovePullRequestRequest(string? ApprovedBy = null);
-    public sealed record PreviewActionRequest(string? Actor = null);
-    public sealed record DeleteAndCleanupRequest(string? Actor = null);
-    public sealed record AdoptCleanupPullRequestRequest(string? Actor = null, string? PullRequestUrl = null, Guid? SourceImplementationRunId = null);
+    public sealed record ApproveAiRunRequest(string? ReasoningEffort = null)
+    {
+        public ApproveAiRunRequest(string? approvedBy, string? reasoningEffort)
+            : this(reasoningEffort)
+        {
+        }
+    }
+
+    public sealed record DiscardAiRunRequest();
+    public sealed record ApprovePullRequestRequest();
+    public sealed record PreviewActionRequest();
+    public sealed record DeleteAndCleanupRequest();
+    public sealed record AdoptCleanupPullRequestRequest(string? PullRequestUrl = null, Guid? SourceImplementationRunId = null)
+    {
+        public AdoptCleanupPullRequestRequest(string? actor, string? pullRequestUrl, Guid? sourceImplementationRunId)
+            : this(pullRequestUrl, sourceImplementationRunId)
+        {
+        }
+    }
+
     public sealed record RecordPipelineRunRequest(Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0, Guid? TargetRepositoryId = null);
-    public sealed record ExecutePipelineRunRequest(string? Actor = null);
-    public sealed record StartImplementationRunRequest(Guid AiRunId, string? Actor = null, Guid? RepositoryId = null, string? ReasoningEffort = null);
+    public sealed record ExecutePipelineRunRequest();
+    public sealed record StartImplementationRunRequest(Guid AiRunId, Guid? RepositoryId = null, string? ReasoningEffort = null)
+    {
+        internal string? ActorForStore { get; init; }
+
+        public StartImplementationRunRequest(Guid aiRunId, string? actor, Guid? repositoryId = null, string? reasoningEffort = null)
+            : this(aiRunId, repositoryId, reasoningEffort)
+        {
+            ActorForStore = actor;
+        }
+    }
+
     public sealed record GitHubIntegrationCallbackRequest(long InstallationId, string AccountLogin, string AccountType, string InstalledBy, int RepositoriesCount = 0, string Status = "Installed");
     public sealed record SnapshotStoreDiagnostics(long? JsonBytes, long PersistWriteCount, long PersistSkipCount, DateTimeOffset? LastPersistedAt);
     public sealed record UpdateAiSessionProviderRequest(string ProviderSessionId);
@@ -14514,7 +14548,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public ImplementationRunDto? StartImplementationRun(Guid workItemId, StartImplementationRunRequest request)
+        public ImplementationRunDto? StartImplementationRun(Guid workItemId, StartImplementationRunRequest request, string? actorOverride = null)
         {
             lock (_lock)
             {
@@ -14541,7 +14575,7 @@ namespace Rosenvall.DevOps.Api
                     throw new InvalidOperationException("Resolve all AI plan review comments before starting implementation.");
                 }
 
-                var actor = NormalizeText(request.Actor, "system");
+                var actor = NormalizeText(actorOverride ?? request.ActorForStore, "system");
                 if (aiRun.Status != AiRunStatus.Approved)
                 {
                     aiRun.Approve(actor);
@@ -15086,7 +15120,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public ImplementationRunDto? StartPullRequestReviewFixRun(Guid workItemId, StartPullRequestReviewFixRequest request)
+        public ImplementationRunDto? StartPullRequestReviewFixRun(Guid workItemId, StartPullRequestReviewFixRequest request, string? actorOverride = null)
         {
             lock (_lock)
             {
@@ -15117,7 +15151,7 @@ namespace Rosenvall.DevOps.Api
                     throw new InvalidOperationException("An approved AI plan is required before fixing pull request review comments.");
                 }
 
-                var actor = NormalizeText(request.Actor, "system");
+                var actor = NormalizeText(actorOverride ?? request.ActorForStore, "system");
                 var now = DateTimeOffset.UtcNow;
                 var attemptNumber = _implementationRuns.Count(run => run.WorkItemId == item.Id && run.RunKind == "pr-review-fix") + 1;
                 var runDto = new ImplementationRunDto(
