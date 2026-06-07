@@ -1330,13 +1330,12 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Local_git_approve_pr_waits_for_public_app_readiness_before_merge_and_completion()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var reconciler = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "BoardPublicAppDeploymentReconciler.cs"));
         var endpointStart = program.IndexOf("api.MapPost(\"/work-items/{workItemId:guid}/approve-pr\"", StringComparison.Ordinal);
         var endpointEnd = program.IndexOf("api.MapPost(\"/work-items/{workItemId:guid}/preview/start\"", endpointStart, StringComparison.Ordinal);
         var endpoint = program[endpointStart..endpointEnd];
-        var reconcilerStart = program.IndexOf("public sealed class BoardPublicAppDeploymentReconciler", StringComparison.Ordinal);
-        var reconcilerEnd = program.IndexOf("public sealed class DevOpsStateDbContext", reconcilerStart, StringComparison.Ordinal);
-        var reconciler = program[reconcilerStart..reconcilerEnd];
 
         var sourceReadIndex = endpoint.IndexOf("approvedPrSourceFiles = await ReadDeployablePreviewSourceSnapshotAsync", StringComparison.Ordinal);
         var applyIndex = endpoint.IndexOf("var productionApply = await previews.ApplyAsync", StringComparison.Ordinal);
@@ -5699,6 +5698,26 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RepositoryImplementationJobManifestRenderer.JobName(run, detail)", runtime);
         Assert.Contains("RepositoryCleanupJobManifestRenderer.JobName(run, detail)", runtime);
         Assert.Contains("KubernetesFailureClassifier.Classify", runtime);
+    }
+
+    [Fact]
+    public void Board_public_app_deployment_reconciler_lives_in_runtime_monitor_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var runtimePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "BoardPublicAppDeploymentReconciler.cs");
+
+        Assert.Contains("builder.Services.AddHostedService<BoardPublicAppDeploymentReconciler>();", program);
+        Assert.DoesNotContain("public sealed class BoardPublicAppDeploymentReconciler", program);
+        Assert.True(File.Exists(runtimePath), "Board public app deployment reconciliation should live in Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs instead of Program.cs.");
+
+        var runtime = File.ReadAllText(runtimePath);
+        Assert.Contains("public sealed class BoardPublicAppDeploymentReconciler", runtime);
+        Assert.Contains("store.GetBoardPublicAppsAwaitingDeployment()", runtime);
+        Assert.Contains("store.GetBoardPublicAppsAwaitingReadiness()", runtime);
+        Assert.Contains("MergeLocalGitPullRequestIfNeededAsync", runtime);
+        Assert.Contains("store.QueueBoardPublicAppDeploymentForPullRequest", runtime);
+        Assert.Contains("DeployablePreviewSourceSnapshotReader.ReadAsync", runtime);
     }
 
     [Fact]
