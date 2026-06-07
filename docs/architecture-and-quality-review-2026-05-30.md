@@ -166,6 +166,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Closed the shared .NET build-policy slice. Root `Directory.Build.props` now centralizes nullable reference types, implicit usings, latest analyzer level, deterministic builds and a narrow warnings-as-errors ratchet for unawaited tasks plus unreachable code, while root `.editorconfig` defines shared C# plus frontend formatting/style conventions.
 - 2026-06-07: Closed the frontend lint quality-gate slice. Frontend now has ESLint 9 flat config with TypeScript, React hooks and JSX accessibility plugins, `npm run lint -- --max-warnings=0` behavior through the package script, and CI runs lint after frontend tests and before build. The initial App.tsx hook/a11y/unused-symbol warning baseline has been cleaned up, so lint warnings now fail the gate.
 - 2026-06-07: Continued the demo sandbox policy slice by adding a central `UserAccessProfileDto` for actor capabilities. Demo users now get one policy surface for allowed workspaces, allowed repository providers, team/workspace creation, external repository linking, GitHub integration access and GitHub provider-copy permissions; board creation, provider sync, GitHub visibility and team creation checks consume that policy. Remaining follow-up: move the policy out of `DevOpsStore` into a dedicated authorization module as the backend split continues.
+- 2026-06-07: Closed the initial EF migration startup slice. API startup now calls `DevOpsStateDatabaseInitializer.MigrateAsync` instead of `EnsureCreatedAsync`, the API project carries an initial `InitialDevOpsState` EF migration for the snapshot `Documents` table, and the initializer baselines legacy SQLite/PostgreSQL databases that were previously created by `EnsureCreated` before applying future migrations.
 
 ## Priority Findings
 
@@ -3232,6 +3233,8 @@ Recommended fix:
 - Keep formatting mechanical and separate from feature PRs to avoid noisy diffs.
 
 ### P1: EF Uses `EnsureCreated` Even Though PostgreSQL Is Configurable
+
+Status 2026-06-07: Closed for the current snapshot schema. Startup now runs EF migrations through `DevOpsStateDatabaseInitializer`, the API project includes an initial `InitialDevOpsState` migration and model snapshot, and the initializer can baseline legacy SQLite/PostgreSQL databases that already have the snapshot `Documents` table from `EnsureCreated`. Follow-up when typed persistent tables are added: add real schema-evolution migrations and a PostgreSQL CI/container smoke test.
 
 Evidence:
 

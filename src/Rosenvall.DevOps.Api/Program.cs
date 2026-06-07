@@ -101,8 +101,8 @@ app.Logger.LogInformation("CORS allowed origins: {AllowedOrigins}", string.Join(
 using (var scope = app.Services.CreateScope())
 {
     var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DevOpsStateDbContext>>();
-    await using var db = await dbFactory.CreateDbContextAsync();
-    await db.Database.EnsureCreatedAsync();
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DevOpsStateDatabase");
+    await DevOpsStateDatabaseInitializer.MigrateAsync(dbFactory, logger);
 }
 
 if (!app.Environment.IsDevelopment())
