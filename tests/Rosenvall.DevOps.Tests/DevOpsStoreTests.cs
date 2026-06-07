@@ -5417,6 +5417,54 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Local_doctor_script_checks_local_runtime_drift_contract()
+    {
+        var scriptPath = Path.Combine(FindRepositoryRoot(), "scripts", "doctor-local-demo.ps1");
+
+        Assert.True(File.Exists(scriptPath), "Local runtime diagnosis should live in scripts/doctor-local-demo.ps1.");
+
+        var script = File.ReadAllText(scriptPath);
+        Assert.Contains("http://localhost:$ApiPort/healthz", script);
+        Assert.Contains("http://localhost:$ApiPort/api/status", script);
+        Assert.Contains("http://localhost:$FrontendPort", script);
+        Assert.Contains("Authentication mode", script);
+        Assert.Contains("Forgejo port-forward", script);
+        Assert.Contains("Kubeconfig", script);
+        Assert.Contains("runner image", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("/api/boards", script);
+        Assert.Contains("/source/repositories", script);
+        Assert.Contains("/pull-request/diff", script);
+    }
+
+    [Fact]
+    public void Deployed_version_script_and_release_checklist_compare_runtime_identity()
+    {
+        var root = FindRepositoryRoot();
+        var scriptPath = Path.Combine(root, "scripts", "check-deployed-version.ps1");
+        var checklistPath = Path.Combine(root, "docs", "release-checklist.md");
+
+        Assert.True(File.Exists(scriptPath), "Deployed-version comparison should live in scripts/check-deployed-version.ps1.");
+        Assert.True(File.Exists(checklistPath), "Release checklist should live in docs/release-checklist.md.");
+
+        var script = File.ReadAllText(scriptPath);
+        Assert.Contains("git rev-parse HEAD", script);
+        Assert.Contains("/api/status", script);
+        Assert.Contains("ghcr.io/carnufex/rosenvall-devops-api", script);
+        Assert.Contains("ghcr.io/carnufex/rosenvall-devops-frontend", script);
+        Assert.Contains("@sha256:", script);
+        Assert.Contains("Homelab", script);
+        Assert.Contains("Release", script);
+
+        var checklist = File.ReadAllText(checklistPath);
+        Assert.Contains("CI passed", checklist);
+        Assert.Contains("Images published with SHA", checklist);
+        Assert.Contains("Homelab digest pins updated", checklist);
+        Assert.Contains("ArgoCD synced", checklist);
+        Assert.Contains("/api/status", checklist);
+        Assert.Contains("frontend", checklist, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Api_dockerfile_does_not_install_preview_base_dependencies_for_preview_promotion()
     {
         var dockerfile = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Dockerfile"));
