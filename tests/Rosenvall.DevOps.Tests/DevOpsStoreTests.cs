@@ -5084,6 +5084,7 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("ResolveGitHubRepositoryReadTokenAsync(DevOpsStore store, GitHubRepositoryClient github, string? actorSubject", sourceEndpoints);
         Assert.DoesNotContain("store.GetDefaultGitHubInstallationId(actorSubject) is { } installationId", program);
         Assert.DoesNotContain("store.GetDefaultGitHubInstallationId(actorSubject) is { } installationId", sourceEndpoints);
+        Assert.DoesNotContain("return github.ConfiguredToken;", sourceEndpoints);
     }
 
     [Fact]

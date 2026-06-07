@@ -329,7 +329,7 @@ public static class RepositorySourceEndpoints
             return await github.CreateInstallationTokenAsync(integration.InstallationId, cancellationToken);
         }
 
-        return github.ConfiguredToken;
+        return null;
     }
 
     private static bool CanViewBoardRequest(DevOpsStore store, Guid boardId, ClaimsPrincipal user) =>

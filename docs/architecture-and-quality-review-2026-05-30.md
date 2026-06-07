@@ -97,6 +97,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the runner manifest hardening with a versioned shared shell library. Repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync Jobs now source `/opt/rdo-runner/lib.sh` from the API runner image for git credential handling, JSON escaping and changed-file collection; provider-sync also moved onto the configured digest-pinned runner image so it can use the same shared helpers.
 - 2026-06-07: Continued the runtime monitor split by moving `ProviderSyncRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ProviderSyncRunMonitor.cs`, keeping provider-sync Job adoption and completion/failure polling out of `Program.cs`.
 - 2026-06-07: Closed the Source ref validation finding. Source tree/file endpoints normalize read refs through `RepositorySourceFeature.NormalizeSourceRef`, accepting ordinary branch/tag/SHA values while rejecting whitespace-only refs, control characters, `..`, `@{`, leading/trailing slash and lockfile-style suffixes; regression coverage now includes those rejection cases.
+- 2026-06-07: Closed the repository-scoped GitHub Source credential findings. GitHub Source tree/file and provider-sync source credentials now resolve only from the linked repository's matching GitHub App installation and actor authorization; the Source read helper no longer falls back to actor default installations or the process-wide configured GitHub token. `GetGitHubIntegrationForRepository` also no longer falls back to the newest integration when owner metadata is missing.
 - 2026-06-07: Continued the runtime monitor split by moving `ImplementationRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ImplementationRunMonitor.cs`, keeping repository implementation and cleanup Job status polling, stuck-run diagnostics and realtime run updates out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `BoardPublicAppDeploymentReconciler` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs`, keeping public app deployment/readiness reconciliation, LocalGit merge gating and merged-PR source adoption out of `Program.cs`.
 - 2026-05-30: Started ticket 8 typed manifest assertions. Backend tests now parse selected Kubernetes runtime YAML with `YamlDotNet` for preview-promotion Jobs and provider-sync Jobs/Secrets, which caught and fixed provider-sync token Secret labels being rendered outside `metadata.labels`.
@@ -831,6 +832,8 @@ Recommended fix:
 
 ### P1: GitHub Source And Sync Token Resolution Uses Actor Default Installation
 
+Status 2026-06-07: Closed for Source tree/file reads and provider-sync source credentials. `RepositorySourceEndpoints.ResolveGitHubRepositoryReadTokenAsync` now receives the linked repository, resolves `store.GetGitHubIntegrationForRepository(repository)`, checks actor access to that installation, mints only that installation token, and returns no token when no matching repository installation exists. Regression coverage rejects actor-default installation resolution and process-wide `github.ConfiguredToken` fallback in Source reads.
+
 Evidence:
 
 - Source tree/file endpoints call `ResolveGitHubRepositoryReadTokenAsync(store, github, actorSubject, ...)`.
@@ -1390,6 +1393,8 @@ Recommended fix:
 ## Eleventh Pass: Source View And Provider Sync Contracts
 
 ### P1: Source Reads And Provider Sync Need Repository-Scoped Credentials
+
+Status 2026-06-07: Closed for GitHub App linked Source reads and provider-sync source credentials. Source tree/file and provider-sync source token resolution use the repository's matching GitHub App integration and actor authorization. The helper no longer falls back to actor default installations or configured process-wide GitHub tokens; repositories with missing/stale owner metadata now fail closed instead of silently using another installation.
 
 Evidence:
 
@@ -3003,6 +3008,8 @@ Recommended fix:
 
 ### P1: GitHub Source Reads Use Actor Default Installation, Not The Repository's Installation
 
+Status 2026-06-07: Closed. Source read endpoints call `ResolveGitHubRepositoryReadTokenAsync(store, github, repository, actorSubject, ...)`, which uses the repository's matching GitHub App integration, verifies actor access and mints that installation token. It no longer falls back to actor-default installation selection or `github.ConfiguredToken`.
+
 Evidence:
 
 - `ResolveGitHubRepositoryReadTokenAsync(...)` selects `store.GetDefaultGitHubInstallationId(actorSubject)` and falls back to `github.ConfiguredToken`.
@@ -3024,6 +3031,8 @@ Recommended fix:
 - Add a regression with two GitHub integrations where the actor's default installation differs from the repository owner.
 
 ### P1: GitHub Repository Credential Resolution Falls Back To Any Integration
+
+Status 2026-06-07: Closed. `DevOpsStore.GetGitHubIntegrationForRepository` now matches GitHub repositories only to integrations whose account login equals `repository.Owner` and, when an actor is supplied, can be used by that actor. It returns `null` for missing/stale owner metadata instead of falling back to the newest available integration, with regression coverage for exact owner match and no-fallback behavior.
 
 Evidence:
 
