@@ -3668,6 +3668,8 @@ Recommended fix:
 
 ### P2: Source Repository Picker Does Not Separate Unsupported Providers
 
+Status: Closed 2026-06-07. Board Source repository DTOs now expose source capability metadata, `SourceView` checks `repositorySourceAvailability` before loading tree/file data, unsupported or pending-sync repositories stay visible for clone/sync context, and users see an immediate unavailable message instead of a failed source request. Regression coverage lives in `frontend/src/boardChrome.test.ts`.
+
 Evidence:
 
 - `/api/boards/{boardId}/source/repositories` returns all repositories linked to the board.
