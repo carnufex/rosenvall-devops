@@ -1004,171 +1004,6 @@ api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid b
     return store.UnlinkRepositoryFromBoard(boardId, repositoryId) ? Results.NoContent() : Results.NotFound();
 });
 RepositorySourceEndpoints.Map(api);
-api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid boardId, SyncRepositoryToProviderRequest request, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, IRuntimeSecretStore runtimeSecrets, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
-{
-    if (!CanMutateBoardRequest(store, boardId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    var boardRepositories = store.GetBoardRepositories(boardId);
-    var source = boardRepositories.SingleOrDefault(link => link.RepositoryId == request.SourceRepositoryId)?.Repository;
-    if (source is null)
-    {
-        return Results.Problem("The selected source repository is not linked to this board.", statusCode: StatusCodes.Status404NotFound);
-    }
-
-    var targetProvider = RepositorySourceFeature.NormalizeTargetProvider(request.TargetProvider);
-    if (string.IsNullOrWhiteSpace(targetProvider))
-    {
-        return RepositorySourceFeature.Problem(RepositorySourceFeature.InvalidTargetProvider());
-    }
-
-    if (!CanSyncRepositoryToProviderRequest(store, boardId, targetProvider, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    if (RepositorySourceFeature.SameProvider(source.Provider, targetProvider))
-    {
-        return Results.Problem("Choose a different target provider for repository sync.", statusCode: StatusCodes.Status400BadRequest);
-    }
-
-    var sourceToken = source.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase)
-        ? ResolveLocalGitCredential(localGit)
-        : await ResolveGitHubRepositoryReadTokenAsync(store, github, source, AuthenticatedSubjectOrNull(user), cancellationToken);
-    if (string.IsNullOrWhiteSpace(sourceToken))
-    {
-        return Results.Problem("Could not resolve source repository credentials for sync.", statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-
-    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
-    var actionKey = RepositorySourceFeature.ProviderSyncActionIdempotencyKey(actorSubject, boardId, source.Id, targetProvider, request.TargetName, request.Private);
-    var quota = RepositorySourceFeature.ReadProviderSyncActionQuota(configuration);
-    var actionStart = store.StartAction(
-        actorSubject,
-        boardId,
-        null,
-        "provider-sync",
-        actionKey,
-        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
-        quotaWindow: quota.Window,
-        quotaOperationKinds: RepositorySourceFeature.ProviderSyncActionKinds);
-    if (!actionStart.Started)
-    {
-        if (IsQuotaExceeded(actionStart))
-        {
-            return ActionQuotaExceededResult(actionStart);
-        }
-
-        return Results.Conflict(new
-        {
-            message = "Provider sync is already queued or running for this request.",
-            operationId = actionStart.Action?.Id,
-            runId = actionStart.Action?.RunId
-        });
-    }
-
-    RepositoryDto targetTemplate;
-    string targetToken;
-    if (targetProvider == "LocalGit")
-    {
-        var localToken = ResolveLocalGitCredential(localGit);
-        if (!localGit.IsConfigured() || string.IsNullOrWhiteSpace(localToken))
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, "LocalGit is unavailable or missing its service credential.");
-            return Results.Problem("LocalGit is unavailable or missing its service credential.", statusCode: StatusCodes.Status503ServiceUnavailable);
-        }
-
-        var creation = await localGit.CreateRepositoryResultAsync(
-            RepositorySourceFeature.BuildLocalGitProviderSyncCreateRequest(request, source),
-            cancellationToken);
-        if (!creation.Succeeded || creation.Repository is null)
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
-            return Results.Problem(creation.Message, statusCode: creation.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway);
-        }
-
-        targetTemplate = creation.Repository;
-        targetToken = localToken;
-    }
-    else
-    {
-        var installationId = store.GetDefaultGitHubInstallationId(actorSubject);
-        if (installationId is null)
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, "No personal GitHub installation is available for provider sync.");
-            return Results.Problem("No personal GitHub installation is available for provider sync.", statusCode: StatusCodes.Status503ServiceUnavailable);
-        }
-
-        var integration = store.GetGitHubIntegration(installationId.Value);
-        if (integration is null || !IsUserAccount(integration))
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, GitHubOrganizationRepositoryCreationDisabledMessage);
-            return Results.Problem(GitHubOrganizationRepositoryCreationDisabledMessage, statusCode: StatusCodes.Status403Forbidden);
-        }
-
-        var tokenResult = await ResolveRepositoryCreationTokenAsync(store, github, userTokenStore, integration, actorSubject, cancellationToken);
-        if (!tokenResult.Succeeded)
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, tokenResult.Message);
-            return Results.Problem(tokenResult.Message, statusCode: tokenResult.StatusCode);
-        }
-
-        var creation = await github.CreateRepositoryResultAsync(
-            integration,
-            RepositorySourceFeature.BuildGitHubProviderSyncCreateRequest(installationId.Value, request, source, integration),
-            tokenResult.Token,
-            cancellationToken);
-        if (!creation.Succeeded || creation.Repository is null)
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
-            return Results.Problem(creation.Message, statusCode: creation.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway);
-        }
-
-        targetTemplate = creation.Repository;
-        targetToken = tokenResult.Token;
-    }
-
-    var target = store.CreateRepository(RepositorySourceFeature.BuildProviderSyncTargetRepositoryCreateRequest(targetTemplate, source));
-    _ = store.LinkRepositoryToBoard(boardId, RepositorySourceFeature.BuildProviderSyncBoardLinkRequest(target, source));
-
-    var run = store.RecordPipelineRun(RepositorySourceFeature.BuildProviderSyncPipelineRunRequest(boardId, source, target));
-    if (run is null)
-    {
-        store.MarkBoardRepositorySyncState(boardId, target.Id, "Failed");
-        store.MarkActionFailed(actionStart.Action!.Id, "Could not record provider sync run.");
-        return Results.NotFound();
-    }
-    store.MarkActionRun(actionStart.Action!.Id, run.Id, "Queued");
-
-    var secretName = RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run);
-    var secretWrite = await runtimeSecrets.StoreAsync(
-        secretName,
-        RepositoryProviderSyncJobManifestRenderer.TokenSecretData(sourceToken, targetToken),
-        RepositoryProviderSyncJobManifestRenderer.TokenSecretLabels(run),
-        RepositoryImplementationJobManifestRenderer.Namespace,
-        cancellationToken);
-    if (!secretWrite.Succeeded)
-    {
-        var failed = store.MarkPipelineRunFailed(run.Id, "system", secretWrite.Message);
-        store.MarkActionFailed(actionStart.Action!.Id, secretWrite.Message);
-        return Results.Problem(failed?.Message ?? secretWrite.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
-
-    var manifest = RepositoryProviderSyncJobManifestRenderer.Render(run, source, target, secretName, ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo");
-    var apply = await jobs.ApplyAsync(manifest, cancellationToken);
-    if (!apply.Succeeded)
-    {
-        var failed = store.MarkPipelineRunFailed(run.Id, "system", apply.Message);
-        store.MarkActionFailed(actionStart.Action!.Id, apply.Message);
-        return Results.Problem(failed?.Message ?? apply.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
-
-    var executing = store.MarkPipelineRunExecuting(run.Id, "system") ?? run;
-    store.MarkActionRun(actionStart.Action!.Id, executing.Id, "Running");
-    return Results.Accepted($"/api/pipeline-runs/{run.Id}", new SyncRepositoryToProviderResponse(target, executing, "Provider sync job queued."));
-});
 api.MapGet("/boards/{boardId:guid}/teams", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
 {
     if (!CanViewBoardRequest(store, boardId, user))
@@ -3309,9 +3144,6 @@ static async Task<string?> ResolveGitHubRepositoryReadTokenAsync(DevOpsStore sto
     return github.ConfiguredToken;
 }
 
-static string? ResolveLocalGitCredential(ForgejoRepositoryClient localGit) =>
-    localGit.ConfiguredToken ?? localGit.ConfiguredPassword;
-
 static async Task<IReadOnlyList<PreviewSourceFile>?> ReadDeployablePreviewSourceSnapshotAsync(
     RepositoryDto repository,
     string reference,
@@ -3351,9 +3183,6 @@ static async Task<IReadOnlyList<PreviewSourceFile>?> ReadDeployablePreviewSource
 
 static bool CanMutateBoardRequest(DevOpsStore store, Guid boardId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutateBoard(boardId, UserIdentityFromClaims(user).Subject);
-
-static bool CanSyncRepositoryToProviderRequest(DevOpsStore store, Guid boardId, string targetProvider, ClaimsPrincipal user) =>
-    user.Identity?.IsAuthenticated != true || store.CanSyncRepositoryToProvider(boardId, targetProvider, UserIdentityFromClaims(user).Subject);
 
 static bool CanMutateWorkItemRequest(DevOpsStore store, Guid workItemId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutateWorkItem(workItemId, UserIdentityFromClaims(user).Subject);

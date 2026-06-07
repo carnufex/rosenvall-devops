@@ -559,8 +559,7 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Provider_sync_endpoint_uses_action_quota_before_creating_target_resources()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
-        var endpoint = EndpointSnippet(program, "api.MapPost(\"/boards/{boardId:guid}/repositories/sync-to-provider\"", "api.MapGet(\"/boards/{boardId:guid}/teams\"");
+        var endpoint = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Features", "Source", "RepositorySourceEndpoints.cs"));
 
         Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota(configuration)", endpoint);
         Assert.Contains("\"provider-sync\"", endpoint);
@@ -4712,11 +4711,6 @@ public sealed class DevOpsStoreTests
         var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Source", "RepositorySourceEndpoints.cs");
 
         Assert.Contains("RepositorySourceEndpoints.Map(api);", program);
-        Assert.Contains("RepositorySourceFeature.EscapeSourcePathForUrl", program);
-        Assert.Contains("RepositorySourceFeature.NormalizeTargetProvider", program);
-        Assert.Contains("RepositorySourceFeature.ProviderSyncActionIdempotencyKey", program);
-        Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota", program);
-        Assert.Contains("RepositorySourceFeature.BuildProviderSyncPipelineRunRequest", program);
         Assert.True(File.Exists(featurePath), "Repository Source helpers should live in Features/Source/RepositorySourceFeature.cs.");
         Assert.True(File.Exists(endpointPath), "Repository Source read endpoints should live in Features/Source/RepositorySourceEndpoints.cs.");
         var feature = File.ReadAllText(featurePath);
@@ -4728,10 +4722,16 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RepositorySourceFeature.BuildBoardSourceRepositories", endpoints);
         Assert.Contains("RepositorySourceFeature.BuildCloneInfoDto", endpoints);
         Assert.Contains("RepositorySourceFeature.ReadResultAsync", endpoints);
+        Assert.Contains("api.MapPost(\"/boards/{boardId:guid}/repositories/sync-to-provider\"", endpoints);
+        Assert.Contains("RepositorySourceFeature.NormalizeTargetProvider", endpoints);
+        Assert.Contains("RepositorySourceFeature.ProviderSyncActionIdempotencyKey", endpoints);
+        Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota", endpoints);
+        Assert.Contains("RepositorySourceFeature.BuildProviderSyncPipelineRunRequest", endpoints);
         Assert.DoesNotContain("api.MapGet(\"/boards/{boardId:guid}/source/repositories\"", program);
         Assert.DoesNotContain("api.MapGet(\"/repositories/{repositoryId:guid}/source/tree\"", program);
         Assert.DoesNotContain("api.MapGet(\"/repositories/{repositoryId:guid}/source/file\"", program);
         Assert.DoesNotContain("api.MapGet(\"/repositories/{repositoryId:guid}/clone-info\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/boards/{boardId:guid}/repositories/sync-to-provider\"", program);
         Assert.DoesNotContain("RepositorySourceReadResultAsync", program);
         Assert.DoesNotContain("new RepositorySourceRepositoryDto", program);
         Assert.DoesNotContain("new RepositoryCloneInfoDto", program);
@@ -5112,7 +5112,7 @@ public sealed class DevOpsStoreTests
         var sourceEndpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Source", "RepositorySourceEndpoints.cs"));
 
         Assert.Contains("ResolveGitHubRepositoryReadTokenAsync(store, github, repository, AuthenticatedSubjectOrNull(user)", sourceEndpoints);
-        Assert.Contains("ResolveGitHubRepositoryReadTokenAsync(store, github, source, AuthenticatedSubjectOrNull(user)", program);
+        Assert.Contains("ResolveGitHubRepositoryReadTokenAsync(store, github, source, AuthenticatedSubjectOrNull(user)", sourceEndpoints);
         Assert.Contains("GetGitHubIntegrationForRepository(repository)", sourceEndpoints);
         Assert.Contains("!store.CanUseGitHubInstallation(integration.InstallationId, actorSubject)", sourceEndpoints);
         Assert.Contains("GetGitHubIntegrationForRepository(repository)", program);
