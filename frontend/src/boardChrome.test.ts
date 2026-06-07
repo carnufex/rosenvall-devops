@@ -130,6 +130,18 @@ test('source ref commits trim input and fall back to repository default', () => 
   assert.equal(committedSourceRef('', ''), 'main');
 });
 
+test('source ref input uses draft state until the ref is committed', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+  const sourceView = appSource.match(/function SourceView[\s\S]*?function SourceBreadcrumb/)?.[0] ?? '';
+
+  assert.match(sourceView, /const \[ref, setRef\] = React\.useState\(''\);/);
+  assert.match(sourceView, /const \[draftRef, setDraftRef\] = React\.useState\(''\);/);
+  assert.match(sourceView, /onChange=\{\(event\) => setDraftRef\(event\.target\.value\)\}/);
+  assert.match(sourceView, /function commitRefInput\(\)[\s\S]*setRef\(nextRef\);/);
+  assert.match(sourceView, /\}, \[selectedRepository\?\.repositoryId, ref, path\]\);/);
+  assert.doesNotMatch(sourceView, /\}, \[selectedRepository\?\.repositoryId, draftRef, path\]\);/);
+});
+
 test('work item autosave status copy is compact and action oriented', () => {
   assert.equal(workItemAutosaveStatusLabel('idle'), 'All changes saved');
   assert.equal(workItemAutosaveStatusLabel('dirty'), 'Unsaved changes');
