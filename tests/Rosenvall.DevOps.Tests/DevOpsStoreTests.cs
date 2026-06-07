@@ -5626,6 +5626,24 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Runtime_secret_store_lives_in_runtime_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var runtimePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "RuntimeSecretStore.cs");
+
+        Assert.DoesNotContain("public interface IRuntimeSecretStore", program);
+        Assert.DoesNotContain("public sealed class GitHubUserAuthorizationTokenStore", program);
+        Assert.DoesNotContain("public sealed class KubernetesRuntimeSecretStore", program);
+        Assert.True(File.Exists(runtimePath), "Runtime secret storage should live in Runtime/RuntimeSecretStore.cs instead of Program.cs.");
+
+        var runtime = File.ReadAllText(runtimePath);
+        Assert.Contains("public interface IRuntimeSecretStore", runtime);
+        Assert.Contains("public sealed class GitHubUserAuthorizationTokenStore", runtime);
+        Assert.Contains("public sealed class KubernetesRuntimeSecretStore", runtime);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
