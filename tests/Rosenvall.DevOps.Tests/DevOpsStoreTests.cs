@@ -5370,6 +5370,33 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Ci_runs_dependency_vulnerability_checks_before_tests_and_builds()
+    {
+        var ci = File.ReadAllText(Path.Combine(FindRepositoryRoot(), ".github", "workflows", "ci.yml"));
+        var dotnetRestoreIndex = ci.IndexOf("run: dotnet restore Rosenvall.DevOps.slnx", StringComparison.Ordinal);
+        var dotnetAuditIndex = ci.IndexOf("run: dotnet list Rosenvall.DevOps.slnx package --vulnerable --include-transitive", StringComparison.Ordinal);
+        var dotnetTestIndex = ci.IndexOf("run: dotnet test Rosenvall.DevOps.slnx --no-restore --configuration Release", StringComparison.Ordinal);
+        var npmInstallIndex = ci.IndexOf("run: npm ci", StringComparison.Ordinal);
+        var npmAuditIndex = ci.IndexOf("run: npm audit --omit=dev --audit-level=high", StringComparison.Ordinal);
+        var npmTestIndex = ci.IndexOf("run: npm test -- --runInBand", StringComparison.Ordinal);
+        var npmBuildIndex = ci.IndexOf("run: npm run build", StringComparison.Ordinal);
+
+        Assert.True(dotnetRestoreIndex >= 0, "CI should restore .NET packages before auditing them.");
+        Assert.True(dotnetAuditIndex >= 0, "CI should audit vulnerable NuGet packages.");
+        Assert.True(dotnetTestIndex >= 0, "CI should still run backend tests.");
+        Assert.True(dotnetRestoreIndex < dotnetAuditIndex, "NuGet vulnerability audit should run after restore.");
+        Assert.True(dotnetAuditIndex < dotnetTestIndex, "NuGet vulnerability audit should run before backend tests.");
+
+        Assert.True(npmInstallIndex >= 0, "CI should install frontend dependencies before auditing them.");
+        Assert.True(npmAuditIndex >= 0, "CI should audit high-severity frontend production dependencies.");
+        Assert.True(npmTestIndex >= 0, "CI should still run frontend tests.");
+        Assert.True(npmBuildIndex >= 0, "CI should still run frontend builds.");
+        Assert.True(npmInstallIndex < npmAuditIndex, "npm audit should run after dependency install.");
+        Assert.True(npmAuditIndex < npmTestIndex, "npm audit should run before frontend tests.");
+        Assert.True(npmAuditIndex < npmBuildIndex, "npm audit should run before frontend build.");
+    }
+
+    [Fact]
     public void Image_publish_workflow_waits_for_successful_ci()
     {
         var workflow = File.ReadAllText(Path.Combine(FindRepositoryRoot(), ".github", "workflows", "publish-images.yml"));
