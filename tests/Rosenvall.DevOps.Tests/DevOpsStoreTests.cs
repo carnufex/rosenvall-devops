@@ -5561,6 +5561,24 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Public_api_contracts_live_in_contracts_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var contractsPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Contracts", "ApiContracts.cs");
+
+        Assert.DoesNotContain("public sealed record WorkspaceDto", program);
+        Assert.DoesNotContain("public sealed record CreateBoardRequest", program);
+        Assert.DoesNotContain("public static class ActionLedgerBlockReasons", program);
+        Assert.True(File.Exists(contractsPath), "Public API DTOs and request contracts should live in Contracts/ApiContracts.cs instead of Program.cs.");
+
+        var contracts = File.ReadAllText(contractsPath);
+        Assert.Contains("public sealed record WorkspaceDto", contracts);
+        Assert.Contains("public sealed record CreateBoardRequest", contracts);
+        Assert.Contains("public static class ActionLedgerBlockReasons", contracts);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
