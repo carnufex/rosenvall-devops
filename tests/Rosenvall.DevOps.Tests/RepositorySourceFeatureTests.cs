@@ -35,6 +35,22 @@ public sealed class RepositorySourceFeatureTests
         Assert.Equal("rdo-runner", internalLocalGit.RecommendedMode);
         Assert.Equal("", internalLocalGit.CloneCommand);
 
+        var internalLocalGitDto = RepositorySourceFeature.BuildCloneInfoDto(new RepositoryDto(
+            Guid.NewGuid(),
+            "LocalGit",
+            "demo",
+            "http://forgejo.rosenvall-devops.svc/rdo/demo.git",
+            null,
+            "main",
+            DateTimeOffset.UtcNow,
+            "rdo"));
+        Assert.Null(internalLocalGitDto.HumanCloneUrl);
+        Assert.Equal("http://forgejo.rosenvall-devops.svc/rdo/demo.git", internalLocalGitDto.RunnerCloneUrl);
+        Assert.Equal("rdo-runner", internalLocalGitDto.RecommendedMode);
+        Assert.True(internalLocalGitDto.InternalOnly);
+        Assert.Equal("", internalLocalGitDto.CloneCommand);
+        Assert.Contains("only inside RDO runners", internalLocalGitDto.Explanation);
+
         var githubClone = RepositorySourceFeature.BuildCloneInfo(Guid.NewGuid(), "GitHub", "https://github.com/carnufex/demo.git", "https://github.com/carnufex/demo");
         Assert.Equal("https://github.com/carnufex/demo.git", githubClone.HumanCloneUrl);
         Assert.Equal("https://github.com/carnufex/demo.git", githubClone.RunnerCloneUrl);

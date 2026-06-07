@@ -861,6 +861,8 @@ Recommended fix:
 
 ### P2: Clone Info Should Separate Human Clone From Runner Clone
 
+Status 2026-06-07: Closed. `/api/repositories/{repositoryId}/clone-info` returns `humanCloneUrl`, `runnerCloneUrl`, `webUrl`, `internalOnly`, `recommendedMode` and explanatory copy. Internal-only LocalGit repositories return no human clone command and keep the runner URL as runner-only metadata; the Source clone drawer presents that as an internal-only state instead of a workstation clone command.
+
 Evidence:
 
 - `GET /api/repositories/{repositoryId}/clone-info` returns the stored repository remote and a `git clone ...` command.
@@ -1441,6 +1443,8 @@ Recommended fix:
 - Add a future branch/tag selector backed by provider refs instead of free text only.
 
 ### P2: Clone UX Needs Separate Human And Runner URLs
+
+Status 2026-06-07: Closed for the current internal-only LocalGit model. Clone info separates `humanCloneUrl` from `runnerCloneUrl`, marks internal-only LocalGit repositories with `recommendedMode = rdo-runner`, suppresses the primary clone command when no human URL exists, and keeps the runner URL behind internal-only explanatory copy in the Source clone drawer.
 
 Evidence:
 
