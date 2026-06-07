@@ -1929,6 +1929,40 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
             statusCode: StatusCodes.Status409Conflict);
     }
 
+    var boardId = store.GetWorkItemBoardId(workItemId);
+    if (boardId is null)
+    {
+        return Results.NotFound();
+    }
+
+    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+    var actionKey = PullRequestReviewFixActionIdempotencyKey(actorSubject, workItemId, request.ReasoningEffort);
+    var quota = ReadPullRequestReviewFixActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        boardId,
+        workItemId,
+        "pr-review-fix",
+        actionKey,
+        blockAfterRunCreation: false,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.PullRequestReviewFixActionKinds);
+    if (!actionStart.Started)
+    {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
+        return Results.Conflict(new
+        {
+            message = "Pull request review fix is already queued or running for this request.",
+            operationId = actionStart.Action?.Id,
+            runId = actionStart.Action?.RunId
+        });
+    }
+
     ImplementationRunDto? run;
     try
     {
@@ -1936,19 +1970,23 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
     }
     catch (InvalidOperationException ex)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, ex.Message);
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
     }
 
     if (run is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Work item or local pull request was not found.");
         return Results.NotFound();
     }
+    store.MarkActionRun(actionStart.Action!.Id, run.Id, "Queued");
 
     await hub.Clients.All.SendAsync("implementationRunChanged", run);
     var localGitCredential = localGit.ConfiguredToken ?? localGit.ConfiguredPassword;
     if (string.IsNullOrWhiteSpace(localGitCredential))
     {
         var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Could not resolve Local Git credentials for review fix.");
+        store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Could not resolve Local Git credentials for review fix.");
         await hub.Clients.All.SendAsync("implementationRunChanged", failed);
         return Results.Problem(failed?.FailureReason ?? "Could not resolve Local Git credentials.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
@@ -1964,6 +2002,7 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
     {
         var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
         var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
+        store.MarkActionFailed(actionStart.Action!.Id, failure);
         await hub.Clients.All.SendAsync("implementationRunChanged", failed);
         return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
@@ -1972,6 +2011,7 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
     if (manifest is null)
     {
         var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Review fix manifest could not be rendered.");
+        store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Review fix manifest could not be rendered.");
         return Results.Problem(failed?.FailureReason ?? "Review fix manifest could not be rendered.", statusCode: StatusCodes.Status409Conflict);
     }
 
@@ -1980,11 +2020,13 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
     {
         var failure = KubernetesFailureClassifier.Classify(apply.Message);
         var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
+        store.MarkActionFailed(actionStart.Action!.Id, failure);
         await hub.Clients.All.SendAsync("implementationRunChanged", failed);
         return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
+    store.MarkActionRun(actionStart.Action!.Id, run.Id, "Running");
     await hub.Clients.All.SendAsync("implementationRunChanged", updated);
     return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
 });
@@ -3069,6 +3111,9 @@ static string ProviderSyncActionIdempotencyKey(string actor, Guid boardId, Guid 
 static string RepositoryImplementationActionIdempotencyKey(string actor, Guid workItemId, Guid aiRunId, Guid? repositoryId) =>
     $"repository-implementation:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{aiRunId:N}:{repositoryId?.ToString("N") ?? "default"}";
 
+static string PullRequestReviewFixActionIdempotencyKey(string actor, Guid workItemId, string? reasoningEffort) =>
+    $"pr-review-fix:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(reasoningEffort)}";
+
 static string AiPlanActionIdempotencyKey(string actor, Guid workItemId, string provider, string model, string? reasoningEffort) =>
     $"ai-plan:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}";
 
@@ -3105,6 +3150,14 @@ static ExpensiveActionQuotaOptions ReadRepositoryImplementationActionQuota(IConf
     var enabled = configuration.GetValue("Actions:Quotas:RepositoryImplementation:Enabled", true);
     var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:RepositoryImplementation:MaxStartedPerActor", 4));
     var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:RepositoryImplementation:WindowSeconds", 900));
+    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+}
+
+static ExpensiveActionQuotaOptions ReadPullRequestReviewFixActionQuota(IConfiguration configuration)
+{
+    var enabled = configuration.GetValue("Actions:Quotas:PullRequestReviewFix:Enabled", true);
+    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:PullRequestReviewFix:MaxStartedPerActor", 4));
+    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:PullRequestReviewFix:WindowSeconds", 900));
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
 
@@ -3633,6 +3686,7 @@ namespace Rosenvall.DevOps.Api
         public static readonly IReadOnlyList<string> AiPlanningActionKinds = ["ai-plan", "ai-plan-revise"];
         public static readonly IReadOnlyList<string> ProviderSyncActionKinds = ["provider-sync"];
         public static readonly IReadOnlyList<string> RepositoryImplementationActionKinds = ["repository-implementation"];
+        public static readonly IReadOnlyList<string> PullRequestReviewFixActionKinds = ["pr-review-fix"];
     }
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);

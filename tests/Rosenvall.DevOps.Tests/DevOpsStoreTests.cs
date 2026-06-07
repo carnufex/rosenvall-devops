@@ -637,6 +637,68 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Pull_request_review_fix_action_ledger_allows_failed_retry_but_blocks_duplicate_before_run()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Review fix quota", "Avoid duplicate review fix runs.", "Todo", "Medium", null));
+        var key = $"pr-review-fix:demo:{item.Id:N}:high";
+
+        var first = store.StartAction("demo", board.Id, item.Id, "pr-review-fix", key, blockAfterRunCreation: false);
+        var duplicateBeforeRun = store.StartAction("demo", board.Id, item.Id, "pr-review-fix", key, blockAfterRunCreation: false);
+
+        Assert.True(first.Started);
+        Assert.False(duplicateBeforeRun.Started);
+        Assert.Equal(first.Action!.Id, duplicateBeforeRun.Action!.Id);
+
+        store.MarkActionFailed(first.Action.Id, "Runner failed before run creation.");
+        var retry = store.StartAction("demo", board.Id, item.Id, "pr-review-fix", key, blockAfterRunCreation: false);
+
+        Assert.True(retry.Started);
+        Assert.NotEqual(first.Action.Id, retry.Action!.Id);
+    }
+
+    [Fact]
+    public void Pull_request_review_fix_action_ledger_enforces_per_actor_quota()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Review fix quota", "Avoid duplicate review fix runs.", "Todo", "Medium", null));
+
+        var first = store.StartAction("demo", board.Id, item.Id, "pr-review-fix", $"pr-review-fix:demo:{item.Id:N}:high", blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "pr-review-fix" });
+        var duplicate = store.StartAction("demo", board.Id, item.Id, "pr-review-fix", $"pr-review-fix:demo:{item.Id:N}:high", blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "pr-review-fix" });
+        var overQuota = store.StartAction("demo", board.Id, item.Id, "pr-review-fix", $"pr-review-fix:demo:{item.Id:N}:medium", blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "pr-review-fix" });
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action!.Id, duplicate.Action!.Id);
+        Assert.False(overQuota.Started);
+        Assert.Null(overQuota.Action);
+        Assert.Equal("QuotaExceeded", overQuota.BlockReason);
+    }
+
+    [Fact]
+    public void Pull_request_review_fix_endpoint_uses_action_quota_before_starting_run()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/pull-request/ai-fix-comments\"", "api.MapGet(\"/work-items/{workItemId:guid}/ai-session\"");
+
+        Assert.Contains("ReadPullRequestReviewFixActionQuota(configuration)", endpoint);
+        Assert.Contains("\"pr-review-fix\"", endpoint);
+        Assert.Contains("PullRequestReviewFixActionIdempotencyKey(actorSubject, workItemId, request.ReasoningEffort)", endpoint);
+        Assert.Contains("ActionLedgerBlockReasons.PullRequestReviewFixActionKinds", endpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", endpoint);
+        Assert.Contains("blockAfterRunCreation: false", endpoint);
+        Assert.True(endpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < endpoint.IndexOf("store.StartPullRequestReviewFixRun", StringComparison.Ordinal));
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, run.Id, \"Queued\")", endpoint);
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, run.Id, \"Running\")", endpoint);
+    }
+
+    [Fact]
     public void Ai_plan_action_ledger_blocks_only_in_flight_duplicate_provider_calls()
     {
         using var fixture = DevOpsStoreFixture.Create();
