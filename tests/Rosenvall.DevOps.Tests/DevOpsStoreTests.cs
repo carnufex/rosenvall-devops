@@ -1154,6 +1154,68 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Runtime_health_requires_service_cluster_ip_and_ports()
+    {
+        using var ready = JsonDocument.Parse("""
+        {
+          "spec": {
+            "clusterIP": "10.43.1.10",
+            "ports": [{ "port": 80 }]
+          }
+        }
+        """);
+        using var pending = JsonDocument.Parse("""
+        {
+          "spec": {
+            "clusterIP": "",
+            "ports": []
+          }
+        }
+        """);
+
+        Assert.True(PreviewEnvironmentOrchestrator.IsServiceReady(ready.RootElement));
+        Assert.False(PreviewEnvironmentOrchestrator.IsServiceReady(pending.RootElement));
+    }
+
+    [Fact]
+    public void Runtime_health_requires_accepted_http_route()
+    {
+        using var accepted = JsonDocument.Parse("""
+        {
+          "status": {
+            "parents": [{
+              "conditions": [{
+                "type": "Accepted",
+                "status": "True"
+              }]
+            }]
+          }
+        }
+        """);
+        using var rejected = JsonDocument.Parse("""
+        {
+          "status": {
+            "parents": [{
+              "conditions": [{
+                "type": "Accepted",
+                "status": "False",
+                "reason": "NoMatchingParent",
+                "message": "gateway listener did not match"
+              }]
+            }]
+          }
+        }
+        """);
+
+        var acceptedResult = PreviewEnvironmentOrchestrator.AnalyzeHttpRouteReadiness(accepted.RootElement);
+        var rejectedResult = PreviewEnvironmentOrchestrator.AnalyzeHttpRouteReadiness(rejected.RootElement);
+
+        Assert.True(acceptedResult.Ready);
+        Assert.False(rejectedResult.Ready);
+        Assert.Contains("NoMatchingParent", rejectedResult.Message);
+    }
+
+    [Fact]
     public void Production_app_manifest_uses_latest_approved_pr_source_after_review_fix()
     {
         using var fixture = DevOpsStoreFixture.Create();

@@ -5450,7 +5450,19 @@ namespace Rosenvall.DevOps.Api
                 return PreviewHealthCheckResult.Provisioning("Waiting for pod.", pods.Message);
             }
 
-            return await AnalyzeHealthAsync(preview, deployment.Message, pods.Message, cancellationToken);
+            var service = await RunKubectlOutputAsync($"get service {preview.ResourceName} -n {preview.Namespace} -o json", cancellationToken);
+            if (!service.Succeeded)
+            {
+                return PreviewHealthCheckResult.Provisioning("Waiting for service.", service.Message);
+            }
+
+            var httpRoute = await RunKubectlOutputAsync($"get httproute {preview.ResourceName} -n {preview.Namespace} -o json", cancellationToken);
+            if (!httpRoute.Succeeded)
+            {
+                return PreviewHealthCheckResult.Provisioning("Waiting for HTTPRoute.", httpRoute.Message);
+            }
+
+            return await AnalyzeHealthAsync(preview, deployment.Message, pods.Message, service.Message, httpRoute.Message, cancellationToken);
         }
 
         private async Task<PreviewCleanupResult> RunKubectlAsync(string command, string manifest, CancellationToken cancellationToken)
@@ -5567,10 +5579,12 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        private async Task<PreviewHealthCheckResult> AnalyzeHealthAsync(PreviewDto preview, string deploymentJson, string podsJson, CancellationToken cancellationToken)
+        private async Task<PreviewHealthCheckResult> AnalyzeHealthAsync(PreviewDto preview, string deploymentJson, string podsJson, string serviceJson, string httpRouteJson, CancellationToken cancellationToken)
         {
             using var deploymentDocument = JsonDocument.Parse(deploymentJson);
             using var podsDocument = JsonDocument.Parse(podsJson);
+            using var serviceDocument = JsonDocument.Parse(serviceJson);
+            using var httpRouteDocument = JsonDocument.Parse(httpRouteJson);
             var availableReplicas = GetInt(deploymentDocument.RootElement, "status", "availableReplicas");
             var desiredReplicas = GetInt(deploymentDocument.RootElement, "spec", "replicas");
             var items = podsDocument.RootElement.TryGetProperty("items", out var podItems) && podItems.ValueKind == JsonValueKind.Array
@@ -5590,12 +5604,79 @@ namespace Rosenvall.DevOps.Api
 
                 if (availableReplicas >= Math.Max(1, desiredReplicas) && ready)
                 {
-                    return PreviewHealthCheckResult.Running(podName, "Deployment is available and at least one preview pod is ready.");
+                    if (!IsServiceReady(serviceDocument.RootElement))
+                    {
+                        return PreviewHealthCheckResult.Provisioning("Waiting for service.", "Service has not been assigned a cluster IP yet.", podName);
+                    }
+
+                    var routeReadiness = AnalyzeHttpRouteReadiness(httpRouteDocument.RootElement);
+                    if (!routeReadiness.Ready)
+                    {
+                        return PreviewHealthCheckResult.Provisioning("Waiting for HTTPRoute.", routeReadiness.Message, podName);
+                    }
+
+                    return PreviewHealthCheckResult.Running(podName, "Deployment is available, service exists and HTTPRoute is accepted.");
                 }
             }
 
             var podSummary = items.Length == 0 ? "No preview pod has been created yet." : $"Deployment has {availableReplicas}/{Math.Max(1, desiredReplicas)} available replicas.";
             return PreviewHealthCheckResult.Provisioning("Waiting for pod readiness.", podSummary, items.Select(pod => GetString(pod, "metadata", "name")).FirstOrDefault(name => !string.IsNullOrWhiteSpace(name)));
+        }
+
+        public static bool IsServiceReady(JsonElement service)
+        {
+            var clusterIp = GetString(service, "spec", "clusterIP");
+            if (string.IsNullOrWhiteSpace(clusterIp) || string.Equals(clusterIp, "None", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return service.TryGetProperty("spec", out var spec) &&
+                spec.TryGetProperty("ports", out var ports) &&
+                ports.ValueKind == JsonValueKind.Array &&
+                ports.GetArrayLength() > 0;
+        }
+
+        public static (bool Ready, string Message) AnalyzeHttpRouteReadiness(JsonElement httpRoute)
+        {
+            if (!httpRoute.TryGetProperty("status", out var status) ||
+                !status.TryGetProperty("parents", out var parents) ||
+                parents.ValueKind != JsonValueKind.Array ||
+                parents.GetArrayLength() == 0)
+            {
+                return (false, "HTTPRoute has no parent status yet.");
+            }
+
+            foreach (var parent in parents.EnumerateArray())
+            {
+                if (!parent.TryGetProperty("conditions", out var conditions) ||
+                    conditions.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var condition in conditions.EnumerateArray())
+                {
+                    var type = GetString(condition, "type");
+                    var statusText = GetString(condition, "status");
+                    if (string.Equals(type, "Accepted", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(statusText, "True", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return (true, "HTTPRoute is accepted.");
+                    }
+
+                    if (string.Equals(type, "Accepted", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(statusText, "False", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var reason = GetString(condition, "reason");
+                        var message = GetString(condition, "message");
+                        var detail = string.Join(" ", new[] { reason, message }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                        return (false, string.IsNullOrWhiteSpace(detail) ? "HTTPRoute is not accepted." : $"HTTPRoute is not accepted: {detail}");
+                    }
+                }
+            }
+
+            return (false, "HTTPRoute has not been accepted by a gateway yet.");
         }
 
         private async Task<string?> TryReadContainerLogAsync(string @namespace, string? podName, string containerName, CancellationToken cancellationToken)
