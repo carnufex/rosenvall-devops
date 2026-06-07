@@ -175,6 +175,18 @@ export const workItemModalTabs: WorkItemModalTab[] = [
   { key: 'logs', label: 'Logs' }
 ];
 
+export function nextWorkItemTabKey(current: WorkItemTabKey, key: string): WorkItemTabKey | null {
+  const index = workItemModalTabs.findIndex((tab) => tab.key === current);
+  if (index < 0) return null;
+  if (key === 'Home') return workItemModalTabs[0].key;
+  if (key === 'End') return workItemModalTabs[workItemModalTabs.length - 1].key;
+  if (key !== 'ArrowRight' && key !== 'ArrowLeft') return null;
+
+  const direction = key === 'ArrowRight' ? 1 : -1;
+  const nextIndex = (index + direction + workItemModalTabs.length) % workItemModalTabs.length;
+  return workItemModalTabs[nextIndex].key;
+}
+
 export type PreviewLifecycleStepState = 'done' | 'active' | 'pending' | 'blocked';
 
 export type PreviewLifecycleStep = {

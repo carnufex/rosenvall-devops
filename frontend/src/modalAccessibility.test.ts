@@ -26,3 +26,13 @@ test('ModalFrame wires escape close focus restore and tab containment', () => {
   assert.match(appSource, /event\.key === 'Escape'/);
   assert.match(appSource, /event\.key !== 'Tab'/);
 });
+
+test('WorkItemModal renders keyboard accessible tabs', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /role="tablist"/);
+  assert.match(appSource, /role="tab"/);
+  assert.match(appSource, /aria-selected=/);
+  assert.match(appSource, /aria-controls=/);
+  assert.match(appSource, /nextWorkItemTabKey/);
+});

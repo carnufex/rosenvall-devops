@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { highlightCodeLines, plainHighlightedLines, splitDiffLineForHighlight, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
@@ -3135,6 +3135,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
     !detail.development.pullRequestApprovedAt &&
     (!isLocalGitDevelopmentRecord(detail.development) || localDevelopmentApprovalState?.canApprove === true);
   const [activeTab, setActiveTab] = React.useState<WorkItemTabKey>('overview');
+  const tabRefs = React.useRef<Partial<Record<WorkItemTabKey, HTMLButtonElement | null>>>({});
   const [metadataDialogOpen, setMetadataDialogOpen] = React.useState(false);
   const humanComments = React.useMemo(() => detail.comments.filter((entry) => entry.kind === 'Comment'), [detail.comments]);
   const parentOptions = React.useMemo(() => availableParentOptions(board, detail.item.id, form.type), [board, detail.item.id, form.type]);
@@ -3167,6 +3168,22 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
       isBug
     });
   }, [actions, board?.columns, detail.item.assignee, detail.item.id, detail.item.status]);
+
+  function workItemTabId(tabKey: WorkItemTabKey) {
+    return `work-item-${detail.item.id}-${tabKey}-tab`;
+  }
+
+  function workItemPanelId(tabKey: WorkItemTabKey) {
+    return `work-item-${detail.item.id}-${tabKey}-panel`;
+  }
+
+  function handleTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, tabKey: WorkItemTabKey) {
+    const nextTab = nextWorkItemTabKey(tabKey, event.key);
+    if (!nextTab) return;
+    event.preventDefault();
+    setActiveTab(nextTab);
+    window.setTimeout(() => tabRefs.current[nextTab]?.focus(), 0);
+  }
 
   React.useEffect(() => {
     setActiveTab('overview');
@@ -3222,12 +3239,19 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
       size="wide"
     >
       <div className="work-item-shell">
-        <nav className="work-item-tabs" aria-label="Work item sections">
+        <nav className="work-item-tabs" aria-label="Work item sections" role="tablist">
           {workItemModalTabs.map((tab) => (
             <button
+              aria-controls={workItemPanelId(tab.key)}
+              aria-selected={activeTab === tab.key}
               className={activeTab === tab.key ? 'active' : ''}
+              id={workItemTabId(tab.key)}
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
+              ref={(element) => { tabRefs.current[tab.key] = element; }}
+              role="tab"
+              tabIndex={activeTab === tab.key ? 0 : -1}
               type="button"
             >
               {tab.label}
@@ -3253,7 +3277,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
         )}
 
         {activeTab === 'overview' && (
-          <section className="work-item-tab-panel overview-tab">
+          <section aria-labelledby={workItemTabId('overview')} className="work-item-tab-panel overview-tab" id={workItemPanelId('overview')} role="tabpanel">
           <div className="form-grid">
             <label>Title<input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
             <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
@@ -3331,13 +3355,13 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
         )}
 
         {activeTab === 'ai' && (
-          <section className="work-item-tab-panel">
+          <section aria-labelledby={workItemTabId('ai')} className="work-item-tab-panel" id={workItemPanelId('ai')} role="tabpanel">
             <AiPlanPanel detail={detail} board={board} targetRepositoryId={targetRepositoryId} onTargetRepositoryChange={setTargetRepositoryId} aiRuns={sortedPlans} planReviewComments={detail.aiPlanReviewComments ?? []} selectedPlan={selectedPlan} onSelectPlan={setSelectedPlanId} busy={busy} busyLabel={busyLabel} aiProvider={aiProvider} aiModel={aiModel} actions={actions} onPreviewDeliveryStarted={() => setActiveTab('preview')} />
           </section>
         )}
 
         {activeTab === 'preview' && (
-          <section className="work-item-tab-panel">
+          <section aria-labelledby={workItemTabId('preview')} className="work-item-tab-panel" id={workItemPanelId('preview')} role="tabpanel">
             {detail.preview
               ? <PreviewPanel preview={detail.preview} busy={busy} orientation="horizontal" onRetry={async () => {
               const retryPlan = selectedPlan ?? sortedPlans.find((run) => run.status === 'Approved' || run.status === 'PlanReady');
@@ -3352,7 +3376,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
         )}
 
         {activeTab === 'pull-request' && (
-          <section className="work-item-tab-panel">
+          <section aria-labelledby={workItemTabId('pull-request')} className="work-item-tab-panel" id={workItemPanelId('pull-request')} role="tabpanel">
             <PullRequestTab
               development={detail.development}
               pullRequestDiffState={pullRequestDiffState}
@@ -3417,7 +3441,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
         )}
 
         {activeTab === 'logs' && (
-          <section className="work-item-tab-panel logs-tab">
+          <section aria-labelledby={workItemTabId('logs')} className="work-item-tab-panel logs-tab" id={workItemPanelId('logs')} role="tabpanel">
             <WorkItemLogsTab
               aiRuns={sortedPlans}
               selectedPlan={selectedPlan}
