@@ -1079,14 +1079,21 @@ public sealed class DevOpsStoreTests
 
         var app = store.QueueBoardPublicAppDeployment(item.Id, "crille")!;
         var manifest = store.RenderBoardPublicAppManifest(board.Id)!;
-        var updatedBoard = store.MarkBoardPublicAppRunning(board.Id, "applied")!;
+        var waitingBoard = store.MarkBoardPublicAppWaitingForReadiness(board.Id, "deployment.apps/demo configured")!;
+        var provisioningBoard = store.UpdateBoardPublicAppHealth(board.Id, PreviewHealthCheckResult.Provisioning("Waiting for pod readiness.", "Deployment has 0/1 available replicas."))!;
+        var updatedBoard = store.UpdateBoardPublicAppHealth(board.Id, PreviewHealthCheckResult.Running("demo-pod", "Deployment is available and at least one app pod is ready."))!;
 
         Assert.Equal("demo-klocka.rosenvall.se", app.Hostname);
         Assert.Equal("https://demo-klocka.rosenvall.se", app.Url);
         Assert.Equal("devops-app-demo-klocka", app.Namespace);
         Assert.Equal(run.Id, app.SourceImplementationRunId);
+        Assert.Equal("WaitingForReadiness", waitingBoard.PublicApp!.Status);
+        Assert.Contains("deployment.apps/demo configured", waitingBoard.PublicApp.Message);
+        Assert.Equal("WaitingForReadiness", provisioningBoard.PublicApp!.Status);
+        Assert.Equal("Deployment has 0/1 available replicas.", provisioningBoard.PublicApp.Message);
         Assert.Equal("Running", updatedBoard.PublicApp!.Status);
         Assert.Equal("https://demo-klocka.rosenvall.se", updatedBoard.PublicApp.Url);
+        Assert.NotNull(updatedBoard.PublicApp.LastDeployedAt);
         Assert.Contains("namespace: devops-app-demo-klocka", manifest);
         Assert.Contains("app.kubernetes.io/part-of: rosenvall-devops-board-app", manifest);
         Assert.Contains("- demo-klocka.rosenvall.se", manifest);
@@ -1094,6 +1101,29 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("app.kubernetes.io/part-of: rosenvall-devops-preview", manifest);
         Assert.DoesNotContain("npm run build", manifest);
         Assert.DoesNotContain("codex exec", manifest);
+    }
+
+    [Fact]
+    public void Production_app_deployment_waits_for_readiness_after_apply()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var (repository, item, _) = CreateLocalGitPreviewPullRequest(store);
+        var board = store.GetBoards(store.GetWorkspaces().First().Id).Single(entry => entry.Repository?.Id == repository.Id);
+
+        store.QueueBoardPublicAppDeployment(item.Id, "crille");
+        Assert.Single(store.GetBoardPublicAppsAwaitingDeployment());
+        Assert.Empty(store.GetBoardPublicAppsAwaitingReadiness());
+
+        var waiting = store.MarkBoardPublicAppWaitingForReadiness(board.Id, "kubectl apply completed.")!;
+        Assert.Equal("WaitingForReadiness", waiting.PublicApp!.Status);
+        Assert.Empty(store.GetBoardPublicAppsAwaitingDeployment());
+        Assert.Single(store.GetBoardPublicAppsAwaitingReadiness());
+
+        var failed = store.UpdateBoardPublicAppHealth(board.Id, PreviewHealthCheckResult.Failed("ImagePullBackOff", "app container is ImagePullBackOff."))!;
+        Assert.Equal("Failed", failed.PublicApp!.Status);
+        Assert.Equal("ImagePullBackOff", failed.PublicApp.FailureReason);
+        Assert.Empty(store.GetBoardPublicAppsAwaitingReadiness());
     }
 
     [Fact]

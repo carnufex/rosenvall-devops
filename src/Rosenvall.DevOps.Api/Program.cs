@@ -6399,7 +6399,20 @@ namespace Rosenvall.DevOps.Api
                 var apply = await previews.ApplyAsync(manifest, cancellationToken);
                 if (apply.Succeeded)
                 {
-                    store.MarkBoardPublicAppRunning(app.BoardId, apply.Message);
+                    store.MarkBoardPublicAppWaitingForReadiness(app.BoardId, apply.Message);
+                }
+                else
+                {
+                    store.MarkBoardPublicAppFailed(app.BoardId, "DeployFailed", apply.Message);
+                }
+            }
+
+            foreach (var app in store.GetBoardPublicAppsAwaitingReadiness())
+            {
+                var health = await previews.CheckHealthAsync(ToPreviewHealthTarget(app), cancellationToken);
+                if (string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase))
+                {
+                    store.UpdateBoardPublicAppHealth(app.BoardId, health);
                     if (app.SourceWorkItemId is { } workItemId && !store.IsPullRequestApproved(workItemId))
                     {
                         var previewManifest = store.RenderPreviewManifest(workItemId);
@@ -6413,10 +6426,24 @@ namespace Rosenvall.DevOps.Api
                 }
                 else
                 {
-                    store.MarkBoardPublicAppFailed(app.BoardId, "DeployFailed", apply.Message);
+                    store.UpdateBoardPublicAppHealth(app.BoardId, health);
                 }
             }
         }
+
+        private static PreviewDto ToPreviewHealthTarget(BoardPublicAppDto app) =>
+            new(
+                app.BoardId,
+                app.SourceWorkItemId ?? Guid.Empty,
+                app.Url,
+                "",
+                app.Status,
+                DateTimeOffset.UtcNow.AddDays(1),
+                null,
+                app.Namespace,
+                app.ResourceName,
+                "Waiting for app readiness.",
+                app.Message);
 
         private async Task QueueMergedPreviewPromotionsAsync(CancellationToken cancellationToken)
         {
@@ -16444,6 +16471,68 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public BoardDto? MarkBoardPublicAppWaitingForReadiness(Guid boardId, string message)
+        {
+            lock (_lock)
+            {
+                var index = _boardPublicApps.FindIndex(entry => entry.BoardId == boardId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var app = _boardPublicApps[index];
+                var updated = app with
+                {
+                    Status = "WaitingForReadiness",
+                    UpdatedAt = now,
+                    FailureReason = null,
+                    Message = string.IsNullOrWhiteSpace(message)
+                        ? $"Kubernetes accepted {app.Hostname}. Waiting for the app deployment to become ready."
+                        : $"{message.Trim()} Waiting for the app deployment to become ready."
+                };
+                _boardPublicApps[index] = updated;
+                AddTimelineEvent(boardId, RepositoryIdForBoard(boardId), updated.SourceWorkItemId, "PublicAppWaitingForReadiness", updated.Hostname, $"Waiting for production app {updated.Hostname} to become ready.", "system", updated.Url, now);
+                Persist();
+                return GetBoard(boardId);
+            }
+        }
+
+        public BoardDto? UpdateBoardPublicAppHealth(Guid boardId, PreviewHealthCheckResult health)
+        {
+            if (string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase))
+            {
+                return MarkBoardPublicAppRunning(boardId, health.Message);
+            }
+
+            if (string.Equals(health.Status, "Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                return MarkBoardPublicAppFailed(boardId, health.FailureReason ?? "HealthCheckFailed", health.Message);
+            }
+
+            lock (_lock)
+            {
+                var index = _boardPublicApps.FindIndex(entry => entry.BoardId == boardId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var app = _boardPublicApps[index];
+                var updated = app with
+                {
+                    Status = "WaitingForReadiness",
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    FailureReason = null,
+                    Message = NormalizeText(health.Message, "Waiting for the app deployment to become ready.")
+                };
+                _boardPublicApps[index] = updated;
+                Persist();
+                return GetBoard(boardId);
+            }
+        }
+
         public BoardDto? MarkBoardPublicAppFailed(Guid boardId, string reason, string message)
         {
             lock (_lock)
@@ -16477,6 +16566,17 @@ namespace Rosenvall.DevOps.Api
                 return _boardPublicApps
                     .Where(app => string.Equals(app.Status, "Queued", StringComparison.OrdinalIgnoreCase) ||
                                   string.Equals(app.Status, "Deploying", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(app => app.UpdatedAt)
+                    .ToArray();
+            }
+        }
+
+        public IReadOnlyList<BoardPublicAppDto> GetBoardPublicAppsAwaitingReadiness()
+        {
+            lock (_lock)
+            {
+                return _boardPublicApps
+                    .Where(app => string.Equals(app.Status, "WaitingForReadiness", StringComparison.OrdinalIgnoreCase))
                     .OrderBy(app => app.UpdatedAt)
                     .ToArray();
             }

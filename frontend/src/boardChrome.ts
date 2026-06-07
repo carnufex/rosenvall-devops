@@ -673,7 +673,7 @@ export function boardPublicAppStatusLabel(board: BoardChromeBoard): string | nul
   const status = board.publicApp?.status?.trim();
   if (!status && !board.publicHostname) return null;
   if (status === 'Running') return null;
-  if (status === 'Deploying' || status === 'Queued') return 'App deploying';
+  if (status === 'Deploying' || status === 'Queued' || status === 'WaitingForReadiness') return 'App deploying';
   if (status === 'Failed') return 'App failed';
   return 'App not deployed';
 }

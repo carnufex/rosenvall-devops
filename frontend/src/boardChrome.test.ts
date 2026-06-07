@@ -46,6 +46,13 @@ test('public app link is shown only when board app is running', () => {
     id: 'clock',
     name: 'Demo Klocka',
     publicHostname: 'demo-klocka.rosenvall.se',
+    publicApp: { status: 'WaitingForReadiness', url: 'https://demo-klocka.rosenvall.se' }
+  }), 'App deploying');
+
+  assert.equal(boardPublicAppStatusLabel({
+    id: 'clock',
+    name: 'Demo Klocka',
+    publicHostname: 'demo-klocka.rosenvall.se',
     publicApp: { status: 'Failed', url: 'https://demo-klocka.rosenvall.se' }
   }), 'App failed');
 
