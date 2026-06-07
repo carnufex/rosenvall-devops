@@ -157,7 +157,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Started the runtime correlation scope slice. Repository implementation, cleanup, provider-sync, preview-health and public-app reconciler monitor loops now use a shared `RunLogScope` helper so API logs carry consistent board/work-item/run/job/provider fields. Endpoint-triggered submissions, terminal/timeline metadata and frontend copy-run-id affordances remain follow-up work for the same finding.
 - 2026-06-07: Continued the runtime correlation scope slice in the frontend. The work-item `Logs` tab now shows the selected AI/preview/implementation/cleanup run id with a copy action, plus run kind and Kubernetes job/pod metadata where available, so users can correlate UI logs with API and Kubernetes diagnostics.
 - 2026-06-07: Continued the runtime correlation scope slice by adding `aiRunId` to the shared runtime log scope. Repository implementation monitor logs now carry the AI run id together with board/work-item/run/job fields.
-- 2026-06-07: Continued the shared .NET build-policy slice. Root `Directory.Build.props` now centralizes nullable reference types, implicit usings, latest analyzer level and deterministic builds, and root `.editorconfig` now defines shared C# plus frontend formatting/style conventions. Selected warnings-as-errors remain follow-up work because the current test project still emits many nullable warnings.
+- 2026-06-07: Closed the shared .NET build-policy slice. Root `Directory.Build.props` now centralizes nullable reference types, implicit usings, latest analyzer level, deterministic builds and a narrow warnings-as-errors ratchet for unawaited tasks plus unreachable code, while root `.editorconfig` defines shared C# plus frontend formatting/style conventions.
 
 ## Priority Findings
 
@@ -3166,7 +3166,7 @@ Recommended fix:
 
 ### P2: Add Shared .NET Build Policy Before Splitting More Code Out
 
-Status 2026-06-07: Mostly closed. Root `Directory.Build.props` now sets shared nullable reference types, implicit usings, `AnalysisLevel=latest` and deterministic builds, and root `.editorconfig` defines shared C# plus frontend formatting/style conventions. Narrow warnings-as-errors ratcheting remains open.
+Status 2026-06-07: Closed. Root `Directory.Build.props` now sets shared nullable reference types, implicit usings, `AnalysisLevel=latest`, deterministic builds and a narrow `WarningsAsErrors` ratchet for `CS4014` plus `CS0162`, while root `.editorconfig` defines shared C# plus frontend formatting/style conventions.
 
 Evidence:
 

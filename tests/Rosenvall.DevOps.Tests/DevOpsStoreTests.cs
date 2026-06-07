@@ -5779,6 +5779,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("<ImplicitUsings>enable</ImplicitUsings>", props);
         Assert.Contains("<AnalysisLevel>latest</AnalysisLevel>", props);
         Assert.Contains("<Deterministic>true</Deterministic>", props);
+        Assert.Contains("<WarningsAsErrors>$(WarningsAsErrors);CS4014;CS0162</WarningsAsErrors>", props);
 
         var editorConfig = File.ReadAllText(editorConfigPath);
         Assert.Contains("root = true", editorConfig);
