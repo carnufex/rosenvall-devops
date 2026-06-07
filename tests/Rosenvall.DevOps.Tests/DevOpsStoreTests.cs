@@ -550,17 +550,47 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Action_ledger_enforces_per_actor_quota_after_idempotency_check()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Plan quota", "Avoid duplicate AI calls.", "Todo", "Medium", null));
+        var operationKinds = new[] { "ai-plan", "ai-plan-revise" };
+
+        var first = store.StartAction("demo", board.Id, item.Id, "ai-plan", "ai-plan:first", maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(10), quotaOperationKinds: operationKinds);
+        var duplicate = store.StartAction("demo", board.Id, item.Id, "ai-plan", "ai-plan:first", maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(10), quotaOperationKinds: operationKinds);
+        var overQuota = store.StartAction("demo", board.Id, item.Id, "ai-plan-revise", "ai-plan-revise:second", maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(10), quotaOperationKinds: operationKinds);
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action!.Id, duplicate.Action!.Id);
+        Assert.False(overQuota.Started);
+        Assert.Null(overQuota.Action);
+        Assert.Equal("QuotaExceeded", overQuota.BlockReason);
+        Assert.True(overQuota.RetryAfterSeconds is > 0);
+        Assert.Single(store.GetActionLedger(), action => action.ActorSubject == "demo");
+    }
+
+    [Fact]
     public void Ai_plan_endpoints_use_action_ledger_without_storing_revision_message_in_key()
     {
         var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
         var planEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"");
         var reviseEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"");
 
-        Assert.Contains("store.StartAction(actorSubject, boardId, workItemId, \"ai-plan\"", planEndpoint);
+        Assert.Contains("\"ai-plan\"", planEndpoint);
+        Assert.Contains("maxStartsPerActor", planEndpoint);
+        Assert.Contains("ActionQuotaExceededResult", planEndpoint);
+        Assert.Contains("ActionLedgerBlockReasons.AiPlanningActionKinds", planEndpoint);
         Assert.Contains("blockAfterRunCreation: false", planEndpoint);
-        Assert.Contains("store.MarkActionRun(actionStart.Action.Id, run.Id, \"Completed\")", planEndpoint);
-        Assert.Contains("store.MarkActionFailed(actionStart.Action.Id, ex.Message)", planEndpoint);
-        Assert.Contains("store.StartAction(actorSubject, boardId, workItemId, \"ai-plan-revise\"", reviseEndpoint);
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, run.Id, \"Completed\")", planEndpoint);
+        Assert.Contains("store.MarkActionFailed(actionStart.Action!.Id, ex.Message)", planEndpoint);
+        Assert.Contains("\"ai-plan-revise\"", reviseEndpoint);
+        Assert.Contains("maxStartsPerActor", reviseEndpoint);
+        Assert.Contains("ActionQuotaExceededResult", reviseEndpoint);
+        Assert.Contains("ActionLedgerBlockReasons.AiPlanningActionKinds", reviseEndpoint);
         Assert.Contains("ShortActionHash(message)", program);
         Assert.Contains("request.Message", reviseEndpoint);
         Assert.DoesNotContain(":{message}", program);

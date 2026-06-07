@@ -2143,14 +2143,29 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
         }
 
         var actionKey = AiPlanActionIdempotencyKey(actorSubject, workItemId, validated.Provider, validated.Model, validated.ReasoningEffort);
-        actionStart = store.StartAction(actorSubject, boardId, workItemId, "ai-plan", actionKey, blockAfterRunCreation: false);
+        var quota = ReadAiPlanningActionQuota(configuration);
+        actionStart = store.StartAction(
+            actorSubject,
+            boardId,
+            workItemId,
+            "ai-plan",
+            actionKey,
+            blockAfterRunCreation: false,
+            maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+            quotaWindow: quota.Window,
+            quotaOperationKinds: ActionLedgerBlockReasons.AiPlanningActionKinds);
         if (!actionStart.Started)
         {
+            if (IsQuotaExceeded(actionStart))
+            {
+                return ActionQuotaExceededResult(actionStart);
+            }
+
             return Results.Conflict(new
             {
                 message = "AI plan generation is already running for this request.",
-                operationId = actionStart.Action.Id,
-                runId = actionStart.Action.RunId
+                operationId = actionStart.Action?.Id,
+                runId = actionStart.Action?.RunId
             });
         }
 
@@ -2166,7 +2181,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     {
         if (actionStart is not null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, ex.Message);
+            store.MarkActionFailed(actionStart.Action!.Id, ex.Message);
         }
 
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -2177,7 +2192,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     {
         if (actionStart is not null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
         }
 
         return Results.NotFound();
@@ -2185,7 +2200,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
 
     if (actionStart is not null)
     {
-        store.MarkActionRun(actionStart.Action.Id, run.Id, "Completed");
+        store.MarkActionRun(actionStart.Action!.Id, run.Id, "Completed");
     }
 
     await hub.Clients.All.SendAsync("aiRunChanged", run);
@@ -2225,21 +2240,36 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
         }
 
         var actionKey = AiPlanRevisionActionIdempotencyKey(actorSubject, workItemId, request.AiRunId, request.Message, validated.Provider, validated.Model, validated.ReasoningEffort);
-        actionStart = store.StartAction(actorSubject, boardId, workItemId, "ai-plan-revise", actionKey, blockAfterRunCreation: false);
+        var quota = ReadAiPlanningActionQuota(configuration);
+        actionStart = store.StartAction(
+            actorSubject,
+            boardId,
+            workItemId,
+            "ai-plan-revise",
+            actionKey,
+            blockAfterRunCreation: false,
+            maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+            quotaWindow: quota.Window,
+            quotaOperationKinds: ActionLedgerBlockReasons.AiPlanningActionKinds);
         if (!actionStart.Started)
         {
+            if (IsQuotaExceeded(actionStart))
+            {
+                return ActionQuotaExceededResult(actionStart);
+            }
+
             return Results.Conflict(new
             {
                 message = "AI plan revision is already running for this request.",
-                operationId = actionStart.Action.Id,
-                runId = actionStart.Action.RunId
+                operationId = actionStart.Action?.Id,
+                runId = actionStart.Action?.RunId
             });
         }
 
         comment = store.AddComment(workItemId, actorIdentity.DisplayName, "Comment", request.Message);
         if (comment is null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
             return Results.NotFound();
         }
 
@@ -2247,7 +2277,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
         context = store.GetWorkItemDetail(workItemId);
         if (context is null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
             return Results.NotFound();
         }
 
@@ -2263,7 +2293,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
     {
         if (actionStart is not null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, ex.Message);
+            store.MarkActionFailed(actionStart.Action!.Id, ex.Message);
         }
 
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -2274,7 +2304,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
     {
         if (actionStart is not null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
         }
 
         return Results.NotFound();
@@ -2282,7 +2312,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
 
     if (actionStart is not null)
     {
-        store.MarkActionRun(actionStart.Action.Id, run.Id, "Completed");
+        store.MarkActionRun(actionStart.Action!.Id, run.Id, "Completed");
     }
 
     await hub.Clients.All.SendAsync("aiRunChanged", run);
@@ -2992,6 +3022,28 @@ static string NormalizeActionKeyPart(string? value)
 static string ShortActionHash(string value) =>
     Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim()))).ToLowerInvariant()[..24];
 
+static ExpensiveActionQuotaOptions ReadAiPlanningActionQuota(IConfiguration configuration)
+{
+    var enabled = configuration.GetValue("Actions:Quotas:AiPlanning:Enabled", true);
+    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:AiPlanning:MaxStartedPerActor", 12));
+    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:AiPlanning:WindowSeconds", 600));
+    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+}
+
+static bool IsQuotaExceeded(ActionStartResultDto startResult) =>
+    string.Equals(startResult.BlockReason, ActionLedgerBlockReasons.QuotaExceeded, StringComparison.OrdinalIgnoreCase);
+
+static IResult ActionQuotaExceededResult(ActionStartResultDto startResult) =>
+    Results.Problem(
+        title: "Action quota exceeded",
+        detail: startResult.BlockMessage ?? "The actor has reached the quota for this expensive action. Try again later.",
+        statusCode: StatusCodes.Status429TooManyRequests,
+        extensions: new Dictionary<string, object?>
+        {
+            ["reason"] = startResult.BlockReason,
+            ["retryAfterSeconds"] = startResult.RetryAfterSeconds
+        });
+
 static bool IsUserAccount(GitHubIntegrationDto integration) =>
     integration.AccountType.Equals("User", StringComparison.OrdinalIgnoreCase);
 
@@ -3446,7 +3498,9 @@ namespace Rosenvall.DevOps.Api
     public sealed record PipelineStatusDto(Guid Id, Guid? WorkItemId, string WorkItemKey, string WorkItemTitle, string Stage, string Status, string Message, DateTimeOffset UpdatedAt);
     public sealed record PipelineRunDto(Guid Id, Guid RepositoryId, Guid? BoardId, Guid? WorkItemId, string Stage, string Status, string Message, string? Url, DateTimeOffset StartedAt, DateTimeOffset? CompletedAt = null, int TokensUsed = 0, int CodeAdded = 0, int CodeDeleted = 0, Guid? TargetRepositoryId = null);
     public sealed record ActionLedgerDto(Guid Id, string ActorSubject, Guid? BoardId, Guid? WorkItemId, string OperationKind, string IdempotencyKey, string Status, Guid? RunId, DateTimeOffset CreatedAt, DateTimeOffset? StartedAt = null, DateTimeOffset? CompletedAt = null, string? Failure = null);
-    public sealed record ActionStartResultDto(bool Started, ActionLedgerDto Action);
+    public sealed record ActionStartResultDto(bool Started, ActionLedgerDto? Action, string? BlockReason = null, string? BlockMessage = null, int? RetryAfterSeconds = null);
+    public sealed record ActionQuotaStatusDto(bool Allowed, string ActorSubject, IReadOnlyList<string> OperationKinds, int Count, int MaxStartedPerActor, int WindowSeconds, int? RetryAfterSeconds = null);
+    public sealed record ExpensiveActionQuotaOptions(bool Enabled, int MaxStartedPerActor, TimeSpan Window);
     public sealed record ImplementationRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid AiRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string? PullRequestUrl, string? CommitSha, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, string RunKind = "codex", Guid? SourcePreviewId = null, string? PullRequestProvider = null, int? PullRequestNumber = null, string? PullRequestState = null, DateTimeOffset? PullRequestMergedAt = null);
     public sealed record EpicRunChildDto(Guid WorkItemId, string WorkItemKey, string WorkItemTitle, string AgentRole, string Status, Guid? AiRunId = null, Guid? ImplementationRunId = null, string? Summary = null, DateTimeOffset? UpdatedAt = null);
     public sealed record EpicRunDto(Guid Id, Guid RootWorkItemId, string RootWorkItemKey, string RootWorkItemTitle, string Status, string Actor, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<EpicRunChildDto> Children, string? Summary = null, string? FailureReason = null);
@@ -3494,6 +3548,12 @@ namespace Rosenvall.DevOps.Api
         IReadOnlyList<RepositorySkillDraftDto>? SkillDrafts = null,
         string? AnalyzerModel = null,
         DateTimeOffset? AnalyzedAt = null);
+
+    public static class ActionLedgerBlockReasons
+    {
+        public const string QuotaExceeded = "QuotaExceeded";
+        public static readonly IReadOnlyList<string> AiPlanningActionKinds = ["ai-plan", "ai-plan-revise"];
+    }
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);
     public sealed record CreateTeamRequest(string Name);
@@ -14229,7 +14289,24 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public ActionStartResultDto StartAction(string actorSubject, Guid? boardId, Guid? workItemId, string operationKind, string idempotencyKey, bool blockAfterRunCreation = true)
+        public ActionQuotaStatusDto GetActionQuotaStatus(string actorSubject, IReadOnlyList<string> operationKinds, TimeSpan window, int maxStartedPerActor)
+        {
+            lock (_lock)
+            {
+                return GetActionQuotaStatusWithoutLock(actorSubject, operationKinds, window, maxStartedPerActor, DateTimeOffset.UtcNow);
+            }
+        }
+
+        public ActionStartResultDto StartAction(
+            string actorSubject,
+            Guid? boardId,
+            Guid? workItemId,
+            string operationKind,
+            string idempotencyKey,
+            bool blockAfterRunCreation = true,
+            int? maxStartsPerActor = null,
+            TimeSpan? quotaWindow = null,
+            IReadOnlyList<string>? quotaOperationKinds = null)
         {
             lock (_lock)
             {
@@ -14255,6 +14332,20 @@ namespace Rosenvall.DevOps.Api
                     }
                 }
 
+                if (maxStartsPerActor is > 0 && quotaWindow is { } window && window > TimeSpan.Zero)
+                {
+                    var quotaStatus = GetActionQuotaStatusWithoutLock(actor, quotaOperationKinds ?? [kind], window, maxStartsPerActor.Value, DateTimeOffset.UtcNow);
+                    if (!quotaStatus.Allowed)
+                    {
+                        return new ActionStartResultDto(
+                            false,
+                            null,
+                            ActionLedgerBlockReasons.QuotaExceeded,
+                            $"The actor has started {quotaStatus.Count} expensive action(s) in the last {quotaStatus.WindowSeconds} seconds. The limit is {quotaStatus.MaxStartedPerActor}. Try again later.",
+                            quotaStatus.RetryAfterSeconds);
+                    }
+                }
+
                 var now = DateTimeOffset.UtcNow;
                 var action = new ActionLedgerDto(
                     Guid.NewGuid(),
@@ -14271,6 +14362,40 @@ namespace Rosenvall.DevOps.Api
                 Persist();
                 return new ActionStartResultDto(true, action);
             }
+        }
+
+        private ActionQuotaStatusDto GetActionQuotaStatusWithoutLock(string actorSubject, IReadOnlyList<string> operationKinds, TimeSpan window, int maxStartedPerActor, DateTimeOffset now)
+        {
+            var actor = NormalizeText(actorSubject, "system");
+            var normalizedKinds = operationKinds
+                .Select(kind => NormalizeText(kind, "action"))
+                .Where(kind => !string.IsNullOrWhiteSpace(kind))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (normalizedKinds.Length == 0)
+            {
+                normalizedKinds = ["action"];
+            }
+
+            var cutoff = now - window;
+            var recentActions = _actionLedger
+                .Where(action =>
+                    string.Equals(action.ActorSubject, actor, StringComparison.Ordinal) &&
+                    normalizedKinds.Contains(action.OperationKind, StringComparer.Ordinal) &&
+                    action.CreatedAt >= cutoff)
+                .OrderBy(action => action.CreatedAt)
+                .ToArray();
+            var count = recentActions.Length;
+            if (count < maxStartedPerActor)
+            {
+                return new ActionQuotaStatusDto(true, actor, normalizedKinds, count, maxStartedPerActor, (int)Math.Ceiling(window.TotalSeconds));
+            }
+
+            var oldest = recentActions.FirstOrDefault();
+            var retryAfterSeconds = oldest is null
+                ? (int)Math.Ceiling(window.TotalSeconds)
+                : Math.Max(1, (int)Math.Ceiling((oldest.CreatedAt + window - now).TotalSeconds));
+            return new ActionQuotaStatusDto(false, actor, normalizedKinds, count, maxStartedPerActor, (int)Math.Ceiling(window.TotalSeconds), retryAfterSeconds);
         }
 
         public ActionLedgerDto? MarkActionRun(Guid actionId, Guid runId, string status = "Started")
