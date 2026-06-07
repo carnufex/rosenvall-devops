@@ -2267,6 +2267,30 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Invited_team_member_can_see_assigned_board_after_first_login()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Invited board", null, null, null, null, null, null))!;
+        var owner = store.GetOrCreateUser(new UserIdentityRequest("authentik|owner", "Owner", "owner@example.com"));
+        var team = store.CreateTeam(new CreateTeamRequest("Invited team"), owner.Subject);
+
+        var invitedTeam = store.InviteTeamMember(team.Id, new InviteTeamMemberRequest("invited@example.com", "Member"));
+        store.UpsertBoardTeamAccess(board.Id, team.Id, "Member");
+
+        var visibleWorkspaces = store.GetWorkspacesForUser(new UserIdentityRequest("authentik|invited", "Invited User", "invited@example.com"));
+        var invited = store.GetOrCreateUser(new UserIdentityRequest("authentik|invited", "Invited User", "invited@example.com"));
+
+        Assert.NotNull(invitedTeam);
+        Assert.Contains(visibleWorkspaces, entry => entry.Id == workspace.Id);
+        Assert.Contains(store.GetTeams(invited.Subject), entry => entry.Id == team.Id);
+        Assert.Contains(store.GetBoards(workspace.Id, invited.Subject), entry => entry.Id == board.Id);
+        Assert.True(store.CanViewBoard(board.Id, invited.Subject));
+        Assert.True(store.CanMutateBoard(board.Id, invited.Subject));
+    }
+
+    [Fact]
     public void Team_membership_does_not_mutate_unassigned_boards()
     {
         using var fixture = DevOpsStoreFixture.Create();

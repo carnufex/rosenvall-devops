@@ -129,6 +129,34 @@ export function workItemAutosaveStatusLabel(status: WorkItemAutosaveStatus) {
   }
 }
 
+export type WorkItemIdentityChrome = {
+  key: string;
+  title?: string | null;
+  type?: string | null;
+  isBug?: boolean | null;
+  parentTitle?: string | null;
+};
+
+export function workItemModalTitle(item: Pick<WorkItemIdentityChrome, 'key' | 'title'>) {
+  return item.title?.trim() || item.key;
+}
+
+export function workItemMetadataSummary(item: WorkItemIdentityChrome) {
+  const key = item.key.trim();
+  const type = item.type?.trim() || 'Task';
+  const parentLabel = item.parentTitle?.trim() || 'No parent';
+  const parts = [key, type];
+  if (item.isBug) {
+    parts.push('Bug');
+  }
+  parts.push(parentLabel);
+  return {
+    key,
+    label: parts.join(' - '),
+    parentLabel
+  };
+}
+
 export type WorkItemTabRun = {
   id: string;
   title: string;

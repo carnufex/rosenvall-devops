@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemModalTabs, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { highlightCodeLines, plainHighlightedLines, splitDiffLineForHighlight, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
@@ -947,13 +947,14 @@ function App() {
       return options?.silentBusy ? current : { ...current, busy: true };
     });
     try {
+      const me = await api.get<UserDto>('/api/me');
       const workspaces = await api.get<Workspace[]>('/api/workspaces');
       const workspace = workspaces[0];
       if (!workspace) throw new Error('No workspace available for this account.');
       const boards = await api.get<Board[]>(`/api/workspaces/${workspace.id}/boards`);
       const board = boards.find((entry) => entry.id === (preferredBoardId ?? selectedBoardIdRef.current)) ?? boards[0];
       if (!board) throw new Error('No board returned by API');
-      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, gitOpsApplications] = await Promise.all([
+      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees, teams, githubIntegrations, boardSecrets, gitOpsApplications] = await Promise.all([
         api.get<RepositoryDto[]>('/api/repositories'),
         api.get<SettingsDto>('/api/settings'),
         api.get<PreviewEnvironmentDto[]>('/api/preview-environments'),
@@ -962,7 +963,6 @@ function App() {
         api.get<TimelineEventDto[]>(`/api/boards/${board.id}/timeline`),
         api.get<MetricsDto>(`/api/metrics?boardId=${board.id}`),
         api.get<AssigneeDto[]>(`/api/assignees?boardId=${board.id}`),
-        api.get<UserDto>('/api/me'),
         api.get<TeamDto[]>('/api/teams'),
         api.get<GitHubIntegrationDto[]>('/api/integrations/github'),
         api.get<BoardSecretDto[]>(`/api/boards/${board.id}/secrets`),
@@ -3134,9 +3134,17 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
     !detail.development.pullRequestApprovedAt &&
     (!isLocalGitDevelopmentRecord(detail.development) || localDevelopmentApprovalState?.canApprove === true);
   const [activeTab, setActiveTab] = React.useState<WorkItemTabKey>('overview');
+  const [metadataDialogOpen, setMetadataDialogOpen] = React.useState(false);
   const humanComments = React.useMemo(() => detail.comments.filter((entry) => entry.kind === 'Comment'), [detail.comments]);
   const parentOptions = React.useMemo(() => availableParentOptions(board, detail.item.id, form.type), [board, detail.item.id, form.type]);
   const selectedParentAllowed = !form.parentWorkItemId || parentOptions.some((item) => item.id === form.parentWorkItemId);
+  const selectedParent = React.useMemo(() => allBoardItems(board).find((item) => item.id === form.parentWorkItemId) ?? null, [board, form.parentWorkItemId]);
+  const metadataSummary = React.useMemo(() => workItemMetadataSummary({
+    key: detail.item.key,
+    type: form.type,
+    isBug: form.isBug,
+    parentTitle: selectedParent ? `${selectedParent.key} ${selectedParent.title}` : null
+  }), [detail.item.key, form.isBug, form.type, selectedParent]);
   React.useEffect(() => {
     if (selectedParentAllowed) return;
     setForm((current) => ({ ...current, parentWorkItemId: '' }));
@@ -3161,6 +3169,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
 
   React.useEffect(() => {
     setActiveTab('overview');
+    setMetadataDialogOpen(false);
   }, [detail.item.id]);
 
   React.useEffect(() => {
@@ -3198,7 +3207,19 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   }, [actions, detail.item.id, form, lastSavedForm, selectedParentAllowed]);
 
   return (
-    <ModalFrame title={`${detail.item.key} ${detail.item.title}`} onClose={onClose} size="wide">
+    <ModalFrame
+      title={workItemModalTitle({ key: detail.item.key, title: form.title })}
+      titleLabel={`${detail.item.key} ${workItemModalTitle({ key: detail.item.key, title: form.title })}`}
+      headerAction={(
+        <button className={metadataDialogOpen ? 'work-item-identity-chip active' : 'work-item-identity-chip'} type="button" onClick={() => setMetadataDialogOpen((open) => !open)} aria-expanded={metadataDialogOpen}>
+          <span>{metadataSummary.key}</span>
+          <strong>{form.type}{form.isBug ? ' bug' : ''}</strong>
+          <em>{metadataSummary.parentLabel}</em>
+        </button>
+      )}
+      onClose={onClose}
+      size="wide"
+    >
       <div className="work-item-shell">
         <nav className="work-item-tabs" aria-label="Work item sections">
           {workItemModalTabs.map((tab) => (
@@ -3212,24 +3233,32 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
             </button>
           ))}
         </nav>
+        {metadataDialogOpen && (
+          <section className="work-item-metadata-dialog" role="dialog" aria-label="Card metadata">
+            <div>
+              <span>Card</span>
+              <strong>{metadataSummary.label}</strong>
+            </div>
+            <label>Type<select value={form.type} onChange={(event) => {
+              const nextType = event.target.value;
+              setForm({ ...form, type: nextType, parentWorkItemId: nextType === 'Epic' ? '' : form.parentWorkItemId, isBug: nextType === 'Epic' ? false : form.isBug });
+            }}>{workItemTypeOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+            <label>Parent<select value={selectedParentAllowed ? form.parentWorkItemId : ''} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, parentWorkItemId: event.target.value })}>
+              <option value="">No parent</option>
+              {parentOptions.map((item) => <option value={item.id} key={item.id}>{item.key} - {item.title}</option>)}
+            </select></label>
+            <label className="checkbox-row"><input type="checkbox" checked={form.isBug} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, isBug: event.target.checked })} />Mark as bug</label>
+          </section>
+        )}
 
         {activeTab === 'overview' && (
           <section className="work-item-tab-panel overview-tab">
           <div className="form-grid">
             <label>Title<input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
             <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
-            <label>Type<select value={form.type} onChange={(event) => {
-              const nextType = event.target.value;
-              setForm({ ...form, type: nextType, parentWorkItemId: nextType === 'Epic' ? '' : form.parentWorkItemId, isBug: nextType === 'Epic' ? false : form.isBug });
-            }}>{workItemTypeOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
             <label>Status<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{board?.columns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>
             <label>Priority<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
             <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
-            <label>Parent<select value={selectedParentAllowed ? form.parentWorkItemId : ''} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, parentWorkItemId: event.target.value })}>
-              <option value="">No parent</option>
-              {parentOptions.map((item) => <option value={item.id} key={item.id}>{item.key} - {item.title}</option>)}
-            </select></label>
-            <label className="checkbox-row"><input type="checkbox" checked={form.isBug} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, isBug: event.target.checked })} />Mark as bug</label>
           </div>
           <div className={`autosave-status ${autosaveStatus}`}>
             {autosaveStatus === 'saving' && <span className="spinner" />}
@@ -5871,13 +5900,17 @@ function GitOpsApplicationsPanel({ response }: { response: GitOpsApplicationsRes
   );
 }
 
-function ModalFrame({ title, onClose, children, size = 'default' }: { title: string; onClose: () => void; children: React.ReactNode; size?: 'default' | 'wide' }) {
+function ModalFrame({ title, titleLabel, headerAction, onClose, children, size = 'default' }: { title: React.ReactNode; titleLabel?: string; headerAction?: React.ReactNode; onClose: () => void; children: React.ReactNode; size?: 'default' | 'wide' }) {
+  const accessibleTitle = titleLabel ?? (typeof title === 'string' ? title : 'Dialog');
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={size === 'wide' ? 'modal modal-wide' : 'modal'} role="dialog" aria-modal="true" aria-label={title}>
+      <section className={size === 'wide' ? 'modal modal-wide' : 'modal'} role="dialog" aria-modal="true" aria-label={accessibleTitle}>
         <header className="modal-head">
           <h2>{title}</h2>
-          <button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+          <div className="modal-head-actions">
+            {headerAction}
+            <button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+          </div>
         </header>
         {children}
       </section>

@@ -43,6 +43,8 @@ The backend orchestrates the product workflow. It owns the board state, AI run r
 
 AI planning is provider-based. The `ollama` provider calls an Ollama HTTP endpoint, usually `http://localhost:11434/api` locally or `http://ollama.ollama.svc.cluster.local:11434/api` in homelab. The `codex` provider runs Codex CLI inside the API pod or local API process, using server-side auth from `CODEX_HOME`; Codex tokens are never sent to the browser. Homelab currently defaults to `codex`, with `ollama` available as a fallback provider.
 
+For the detailed Codex execution model, runner modes, and security boundaries, see [Codex integration](docs/codex-integration.md).
+
 Preview apps are generated as per-ticket React/Tailwind source files, stored in a Kubernetes ConfigMap, and mounted into the prewarmed `rosenvall-devops-preview-base` image. The preview lifecycle is tracked separately from `kubectl apply`: the UI only exposes the public demo URL after the backend health checker sees an available Deployment and a ready pod.
 
 Tech stack:

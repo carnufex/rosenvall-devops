@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemModalTabs } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -124,6 +124,25 @@ test('work item autosave status copy is compact and action oriented', () => {
   assert.equal(workItemAutosaveStatusLabel('saving'), 'Saving...');
   assert.equal(workItemAutosaveStatusLabel('saved'), 'Saved');
   assert.equal(workItemAutosaveStatusLabel('error'), 'Autosave failed');
+});
+
+test('work item identity metadata keeps title clean and hierarchy editable', () => {
+  assert.equal(workItemModalTitle({ key: 'TASK-4838', title: 'Initial implementation' }), 'Initial implementation');
+  assert.deepEqual(workItemMetadataSummary({
+    key: 'TASK-4838',
+    type: 'Feature',
+    isBug: true,
+    parentTitle: 'Epic: Delivery UI'
+  }), {
+    key: 'TASK-4838',
+    label: 'TASK-4838 - Feature - Bug - Epic: Delivery UI',
+    parentLabel: 'Epic: Delivery UI'
+  });
+  assert.deepEqual(workItemMetadataSummary({ key: 'TASK-4839', type: 'Task', isBug: false }), {
+    key: 'TASK-4839',
+    label: 'TASK-4839 - Task - No parent',
+    parentLabel: 'No parent'
+  });
 });
 
 test('api unavailable banner uses structured status when available', () => {

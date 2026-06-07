@@ -359,7 +359,12 @@ api.MapPost("/workspaces", async (CreateWorkspaceRequest request, ClaimsPrincipa
 });
 
 api.MapGet("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, ClaimsPrincipal user, DevOpsStore store) =>
-    store.GetBoards(workspaceId, AuthenticatedSubjectOrNull(user)) is { Count: > 0 } boards ? Results.Ok(boards) : Results.NotFound());
+{
+    var actorSubject = user.Identity?.IsAuthenticated == true
+        ? store.GetOrCreateUserWithDemoSandbox(UserIdentityFromClaims(user)).Subject
+        : null;
+    return store.GetBoards(workspaceId, actorSubject) is { Count: > 0 } boards ? Results.Ok(boards) : Results.NotFound();
+});
 
 api.MapPost("/workspaces/{workspaceId:guid}/boards", (Guid workspaceId, CreateBoardRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
@@ -616,7 +621,13 @@ api.MapGet("/me", (ClaimsPrincipal user, DevOpsStore store) =>
     return Results.Ok(store.GetOrCreateUserWithDemoSandbox(identity));
 });
 
-api.MapGet("/teams", (ClaimsPrincipal user, DevOpsStore store) => store.GetTeams(AuthenticatedSubjectOrNull(user)));
+api.MapGet("/teams", (ClaimsPrincipal user, DevOpsStore store) =>
+{
+    var actorSubject = user.Identity?.IsAuthenticated == true
+        ? store.GetOrCreateUserWithDemoSandbox(UserIdentityFromClaims(user)).Subject
+        : null;
+    return store.GetTeams(actorSubject);
+});
 api.MapPost("/teams", (CreateTeamRequest request, ClaimsPrincipal user, DevOpsStore store) =>
 {
     var actor = UserIdentityFromClaims(user);

@@ -190,7 +190,8 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospa
 .modal { width: min(1120px, 100%); max-height: calc(100vh - 48px); overflow: auto; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5); }
 .modal-wide { width: min(1280px, 100%); }
 .modal-head { min-height: 64px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; gap: 16px; position: sticky; top: 0; background: rgba(21, 22, 23, 0.97); z-index: 1; backdrop-filter: blur(12px); }
-.modal-head h2 { font-size: 18px; line-height: 24px; }
+.modal-head h2 { min-width: 0; font-size: 18px; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-head-actions { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
 .modal-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; padding: 20px; }
 .modal-main { min-width: 0; display: grid; gap: 18px; align-content: start; }
 .modal-side { display: grid; gap: 16px; align-content: start; }
@@ -203,6 +204,18 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospa
 .work-item-tabs button.active { color: var(--text); border-bottom-color: var(--secondary); }
 .work-item-tab-panel { min-width: 0; display: grid; gap: 18px; align-content: start; }
 .overview-tab { grid-template-columns: minmax(0, 1fr); }
+.work-item-identity-chip { max-width: min(520px, 48vw); min-height: 0; border: 1px solid var(--line); background: #101112; color: var(--muted-strong); border-radius: 999px; padding: 6px 10px; display: inline-flex; align-items: center; gap: 8px; overflow: hidden; }
+.work-item-identity-chip:hover, .work-item-identity-chip.active { border-color: rgba(45, 212, 191, 0.5); background: rgba(45, 212, 191, 0.08); }
+.work-item-identity-chip span, .work-item-identity-chip strong, .work-item-identity-chip em { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; line-height: 16px; }
+.work-item-identity-chip span { color: var(--focus); font-weight: 900; }
+.work-item-identity-chip strong { color: var(--text); text-transform: capitalize; }
+.work-item-identity-chip em { color: var(--muted); font-style: normal; }
+.work-item-metadata-dialog { border: 1px solid var(--line-strong); background: #101112; border-radius: 8px; padding: 12px; display: grid; grid-template-columns: minmax(160px, 1fr) minmax(160px, 220px) minmax(180px, 300px) auto; gap: 12px; align-items: end; box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28); }
+.work-item-metadata-dialog > div { display: grid; gap: 4px; min-width: 0; align-self: center; }
+.work-item-metadata-dialog > div span { color: var(--muted); font-size: 11px; font-weight: 900; text-transform: uppercase; }
+.work-item-metadata-dialog > div strong { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-item-metadata-dialog label { margin: 0; }
+.work-item-metadata-dialog .checkbox-row { align-self: center; white-space: nowrap; }
 .overview-status-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
 .overview-status-card { border: 1px solid var(--line); background: #101112; border-radius: 8px; padding: 12px; display: grid; gap: 7px; min-width: 0; align-content: start; }
 .overview-status-card strong { color: var(--text); font-size: 13px; }
@@ -650,7 +663,10 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
   .search { width: min(100%, 360px); }
   .page { padding: 20px 14px; }
   h1 { font-size: 26px; line-height: 34px; }
-  .metrics, .dashboard-grid, .modal-grid, .form-grid, .form-grid.two, .overview-status-grid, .overview-delivery-row, .logs-workspace, .diff-layout, .ai-review-workspace, .source-layout, .source-toolbar { grid-template-columns: 1fr; }
+  .metrics, .dashboard-grid, .modal-grid, .form-grid, .form-grid.two, .overview-status-grid, .overview-delivery-row, .logs-workspace, .diff-layout, .ai-review-workspace, .source-layout, .source-toolbar, .work-item-metadata-dialog { grid-template-columns: 1fr; }
+  .modal-head { align-items: stretch; flex-direction: column; padding: 12px 14px; }
+  .modal-head-actions { width: 100%; justify-content: space-between; }
+  .work-item-identity-chip { max-width: calc(100vw - 86px); }
   .overview-delivery-item { border-right: 0; border-bottom: 1px solid var(--line); }
   .overview-delivery-item:last-child { border-bottom: 0; }
   .work-item-shell { padding: 0 14px 14px; }
