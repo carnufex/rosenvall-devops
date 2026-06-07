@@ -1010,22 +1010,7 @@ api.MapGet("/boards/{boardId:guid}/source/repositories", (Guid boardId, ClaimsPr
         return BoardReadForbidden();
     }
 
-    var repositories = store.GetBoardRepositories(boardId)
-        .Select(link => new RepositorySourceRepositoryDto(
-            link.RepositoryId,
-            link.Repository.Provider,
-            link.Repository.Name,
-            link.Repository.Owner,
-            link.Repository.DefaultBranch,
-            link.IsPrimary,
-            link.Repository.WebUrl,
-            string.Equals(link.SyncState, "Ready", StringComparison.OrdinalIgnoreCase) &&
-                RepositorySourceFeature.IsSourceReadableProvider(link.Repository.Provider),
-            string.Equals(link.SyncState, "Ready", StringComparison.OrdinalIgnoreCase)
-                ? RepositorySourceFeature.SourceUnavailableReason(link.Repository.Provider)
-                : $"Repository sync is {link.SyncState}. Source browsing is available after sync succeeds.",
-            link.SyncState))
-        .ToArray();
+    var repositories = RepositorySourceFeature.BuildBoardSourceRepositories(store.GetBoardRepositories(boardId));
     return Results.Ok(repositories);
 });
 api.MapGet("/repositories/{repositoryId:guid}/source/tree", async (Guid repositoryId, string? @ref, string? path, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, GitHubRepositoryClient github, CancellationToken cancellationToken) =>

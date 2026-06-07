@@ -4706,17 +4706,22 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Source_and_provider_sync_endpoints_use_repository_source_feature_module()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var featurePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Source", "RepositorySourceFeature.cs");
 
         Assert.Contains("RepositorySourceFeature.NormalizeSourcePath", program);
         Assert.Contains("RepositorySourceFeature.NormalizeSourceRef", program);
         Assert.Contains("RepositorySourceFeature.EscapeSourcePathForUrl", program);
+        Assert.Contains("RepositorySourceFeature.BuildBoardSourceRepositories", program);
         Assert.Contains("RepositorySourceFeature.BuildCloneInfo", program);
         Assert.Contains("RepositorySourceFeature.NormalizeTargetProvider", program);
         Assert.Contains("RepositorySourceFeature.ProviderSyncActionIdempotencyKey", program);
         Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota", program);
         Assert.Contains("RepositorySourceFeature.BuildProviderSyncPipelineRunRequest", program);
         Assert.Contains("RepositorySourceReadResultAsync", program);
+        Assert.True(File.Exists(featurePath), "Repository Source helpers should live in Features/Source/RepositorySourceFeature.cs.");
+        Assert.DoesNotContain("new RepositorySourceRepositoryDto", program);
         Assert.DoesNotContain("static string NormalizeApiSourcePath", program);
         Assert.DoesNotContain("static string BuildCloneCommand", program);
         Assert.DoesNotContain("static string ProviderSyncActionIdempotencyKey", program);

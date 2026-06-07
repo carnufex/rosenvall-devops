@@ -180,6 +180,24 @@ public static class RepositorySourceFeature
     public static string? SourceUnavailableReason(string? provider) =>
         IsSourceReadableProvider(provider) ? null : UnsupportedSourceProviderMessage;
 
+    public static IReadOnlyList<RepositorySourceRepositoryDto> BuildBoardSourceRepositories(IEnumerable<BoardRepositoryDto> repositories) =>
+        repositories
+            .Select(link => new RepositorySourceRepositoryDto(
+                link.RepositoryId,
+                link.Repository.Provider,
+                link.Repository.Name,
+                link.Repository.Owner,
+                link.Repository.DefaultBranch,
+                link.IsPrimary,
+                link.Repository.WebUrl,
+                string.Equals(link.SyncState, "Ready", StringComparison.OrdinalIgnoreCase) &&
+                    IsSourceReadableProvider(link.Repository.Provider),
+                string.Equals(link.SyncState, "Ready", StringComparison.OrdinalIgnoreCase)
+                    ? SourceUnavailableReason(link.Repository.Provider)
+                    : $"Repository sync is {link.SyncState}. Source browsing is available after sync succeeds.",
+                link.SyncState))
+            .ToArray();
+
     public static IResult Problem(RepositorySourceProblem problem) =>
         Results.Problem(problem.Message, statusCode: problem.StatusCode);
 
