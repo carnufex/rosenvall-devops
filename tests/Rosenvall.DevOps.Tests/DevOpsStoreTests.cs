@@ -1375,6 +1375,33 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Realtime_mode_allows_authenticated_scoped_groups_without_unsafe_broadcast_acknowledgement()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Realtime:Enabled"] = "true",
+                ["Realtime:AllowUnsafeBroadcasts"] = "false"
+            })
+            .Build();
+
+        var settings = RealtimeMode.Resolve(configuration, authenticationEnabled: true);
+
+        Assert.True(settings.Enabled);
+        Assert.False(settings.UnsafeBroadcastsAllowed);
+    }
+
+    [Fact]
+    public void Realtime_publishers_use_scoped_notifier_instead_of_global_broadcasts()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("interface IRealtimeNotifier", program);
+        Assert.Contains("Clients.Group(RealtimeNotifier.BoardGroup(boardId))", program);
+        Assert.DoesNotContain("Clients.All.SendAsync", program);
+    }
+
+    [Fact]
     public void Delivery_mutation_endpoints_derive_audit_actor_from_claims()
     {
         var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
@@ -5564,9 +5591,9 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
-    public void Realtime_mode_fails_closed_for_authenticated_global_broadcasts()
+    public void Realtime_mode_no_longer_requires_unsafe_broadcast_acknowledgement()
     {
-        var unsafeRealtime = new ConfigurationBuilder()
+        var scopedRealtime = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Realtime:Enabled"] = "true"
@@ -5580,11 +5607,13 @@ public sealed class DevOpsStoreTests
             })
             .Build();
 
-        var failure = Assert.Throws<InvalidOperationException>(() => RealtimeMode.Resolve(unsafeRealtime, authenticationEnabled: true));
-        Assert.Contains("Realtime:AllowUnsafeBroadcasts", failure.Message);
+        var authenticated = RealtimeMode.Resolve(scopedRealtime, authenticationEnabled: true);
+        Assert.True(authenticated.Enabled);
+        Assert.False(authenticated.UnsafeBroadcastsAllowed);
 
-        var disabled = RealtimeMode.Resolve(unsafeRealtime, authenticationEnabled: false);
+        var disabled = RealtimeMode.Resolve(scopedRealtime, authenticationEnabled: false);
         Assert.True(disabled.Enabled);
+        Assert.False(disabled.UnsafeBroadcastsAllowed);
 
         var acknowledged = RealtimeMode.Resolve(explicitlyAcknowledged, authenticationEnabled: true);
         Assert.True(acknowledged.Enabled);

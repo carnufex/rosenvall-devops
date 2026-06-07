@@ -22,6 +22,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddProblemDetails();
 builder.Services.AddHealthChecks();
 builder.Services.AddSignalR();
+builder.Services.AddSingleton<IRealtimeNotifier, RealtimeNotifier>();
 builder.Services.AddHttpClient<OllamaPlanProvider>();
 builder.Services.AddHttpClient<GitHubRepositoryClient>();
 builder.Services.AddHttpClient<ForgejoRepositoryClient>();
@@ -149,7 +150,7 @@ app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github
     return Results.Content(github.RenderManifestStartPage(state), "text/html; charset=utf-8");
 });
 
-app.MapPost("/integrations/github/webhook", async (HttpRequest httpRequest, IConfiguration configuration, DevOpsStore store, PreviewEnvironmentOrchestrator previews, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+app.MapPost("/integrations/github/webhook", async (HttpRequest httpRequest, IConfiguration configuration, DevOpsStore store, PreviewEnvironmentOrchestrator previews, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     await using var body = new MemoryStream();
     await httpRequest.Body.CopyToAsync(body, cancellationToken);
@@ -332,15 +333,16 @@ api.MapGet("/workspaces", (ClaimsPrincipal user, DevOpsStore store) =>
     user.Identity?.IsAuthenticated == true
         ? store.GetWorkspacesForUser(UserIdentityFromClaims(user))
         : store.GetWorkspaces());
-api.MapPost("/workspaces", async (CreateWorkspaceRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/workspaces", async (CreateWorkspaceRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanCreateWorkspaceRequest(store, user))
     {
         return WorkspaceMutationForbidden();
     }
 
-    var workspace = store.CreateWorkspace(request.Name, request.EnvironmentName, request.Region, UserIdentityFromClaims(user).Subject);
-    await hub.Clients.All.SendAsync("workspaceCreated", workspace);
+    var actorSubject = UserIdentityFromClaims(user).Subject;
+    var workspace = store.CreateWorkspace(request.Name, request.EnvironmentName, request.Region, actorSubject);
+    await realtime.PublishUserAsync(actorSubject, "workspaceCreated", workspace);
     return Results.Created($"/api/workspaces/{workspace.Id}", workspace);
 });
 
@@ -402,7 +404,7 @@ api.MapPut("/boards/{boardId:guid}/hosting", (Guid boardId, BoardHostingSettings
     return store.UpdateBoardHostingSettings(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound();
 });
 
-api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, ForgejoRepositoryClient localGit, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, ForgejoRepositoryClient localGit, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateBoardRequest(store, boardId, user))
     {
@@ -472,7 +474,7 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, D
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("boardDeleted", boardId);
+    await realtime.PublishBoardAsync(boardId, "boardDeleted", boardId);
     return Results.NoContent();
 });
 
@@ -1433,7 +1435,7 @@ api.MapDelete("/boards/{boardId:guid}/secrets/{secretId:guid}", async (Guid boar
 });
 
 api.MapGet("/work-items", (ClaimsPrincipal user, DevOpsStore store) => store.GetWorkItems(AuthenticatedSubjectOrNull(user)));
-api.MapPost("/work-items", async (CreateWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items", async (CreateWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateBoardRequest(store, request.BoardId, user))
     {
@@ -1446,11 +1448,11 @@ api.MapPost("/work-items", async (CreateWorkItemRequest request, ClaimsPrincipal
         return Results.Problem("Work item board or status is invalid.", statusCode: StatusCodes.Status400BadRequest);
     }
 
-    await hub.Clients.All.SendAsync("workItemChanged", item);
+    await realtime.PublishAsync("workItemChanged", item);
     return Results.Created($"/api/work-items/{item.Id}", item);
 });
 
-api.MapPatch("/work-items/{workItemId:guid}", async (Guid workItemId, UpdateWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPatch("/work-items/{workItemId:guid}", async (Guid workItemId, UpdateWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1463,17 +1465,18 @@ api.MapPatch("/work-items/{workItemId:guid}", async (Guid workItemId, UpdateWork
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("workItemChanged", item);
+    await realtime.PublishAsync("workItemChanged", item);
     return Results.Ok(item);
 });
 
-api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
         return BoardMutationForbidden();
     }
 
+    var boardId = store.GetWorkItemBoardId(workItemId);
     var manifest = store.RenderWorkItemCleanupManifest(workItemId);
     if (manifest is not null)
     {
@@ -1490,11 +1493,15 @@ api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, ClaimsPri
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("workItemDeleted", workItemId);
+    if (boardId is { } scopedBoardId)
+    {
+        await realtime.PublishBoardAsync(scopedBoardId, "workItemDeleted", workItemId);
+    }
+
     return Results.NoContent();
 });
 
-api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid workItemId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid workItemId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1502,6 +1509,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     }
 
     var actor = AuditActorFromClaims(user);
+    var workItemBoardId = store.GetWorkItemBoardId(workItemId);
     var sourceRun = store.GetImplementationRuns(workItemId)
         .Where(run => !string.IsNullOrWhiteSpace(run.PullRequestUrl))
         .OrderByDescending(run => run.UpdatedAt)
@@ -1511,7 +1519,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     var quota = ReadCleanupActionQuota(configuration);
     var actionStart = store.StartAction(
         actorSubject,
-        store.GetWorkItemBoardId(workItemId),
+        workItemBoardId,
         workItemId,
         "work-item-cleanup",
         actionKey,
@@ -1554,7 +1562,11 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("workItemDeleted", workItemId);
+        if (workItemBoardId is { } scopedBoardId)
+        {
+            await realtime.PublishBoardAsync(scopedBoardId, "workItemDeleted", workItemId);
+        }
+
         return Results.NoContent();
     }
 
@@ -1597,7 +1609,11 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("workItemDeleted", workItemId);
+        if (workItemBoardId is { } scopedBoardId)
+        {
+            await realtime.PublishBoardAsync(scopedBoardId, "workItemDeleted", workItemId);
+        }
+
         return Results.NoContent();
     }
 
@@ -1644,7 +1660,11 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("workItemDeleted", workItemId);
+        if (workItemBoardId is { } scopedBoardId)
+        {
+            await realtime.PublishBoardAsync(scopedBoardId, "workItemDeleted", workItemId);
+        }
+
         return Results.NoContent();
     }
 
@@ -1668,7 +1688,11 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("workItemDeleted", workItemId);
+        if (workItemBoardId is { } scopedBoardId)
+        {
+            await realtime.PublishBoardAsync(scopedBoardId, "workItemDeleted", workItemId);
+        }
+
         return Results.NoContent();
     }
 
@@ -1681,7 +1705,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     }
     store.MarkActionRun(actionStart.Action!.Id, cleanupRun.Id, "Queued");
 
-    await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", cleanupRun);
+    await realtime.PublishAsync("repositoryCleanupRunChanged", cleanupRun);
     var secretName = RepositoryCleanupJobManifestRenderer.GitHubTokenSecretName(cleanupRun);
     var tokenSecretWrite = await runtimeSecrets.StoreAsync(
         secretName,
@@ -1693,7 +1717,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     {
         var failed = store.UpdateRepositoryCleanupRun(cleanupRun.Id, "Failed", tokenSecretWrite.Message, tokenSecretWrite.Message);
         store.MarkActionFailed(actionStart.Action!.Id, tokenSecretWrite.Message);
-        await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", failed);
+        await realtime.PublishAsync("repositoryCleanupRunChanged", failed);
         return Results.Problem(tokenSecretWrite.Message, statusCode: StatusCodes.Status502BadGateway);
     }
 
@@ -1710,23 +1734,23 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     {
         var failed = store.UpdateRepositoryCleanupRun(cleanupRun.Id, "Failed", apply.Message, apply.Message);
         store.MarkActionFailed(actionStart.Action!.Id, apply.Message);
-        await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", failed);
+        await realtime.PublishAsync("repositoryCleanupRunChanged", failed);
         return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateRepositoryCleanupRun(cleanupRun.Id, "Cloning", apply.Message);
     store.MarkActionRun(actionStart.Action!.Id, cleanupRun.Id, "Running");
-    await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", updated);
+    await realtime.PublishAsync("repositoryCleanupRunChanged", updated);
     var detail = store.GetWorkItemDetail(workItemId);
     if (detail is not null)
     {
-        await hub.Clients.All.SendAsync("workItemChanged", detail.Item);
+        await realtime.PublishAsync("workItemChanged", detail.Item);
     }
 
     return Results.Accepted($"/api/repository-cleanup-runs/{cleanupRun.Id}", updated);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid workItemId, AdoptCleanupPullRequestRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid workItemId, AdoptCleanupPullRequestRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1782,17 +1806,17 @@ api.MapPost("/work-items/{workItemId:guid}/cleanup-runs/adopt", async (Guid work
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", cleanupRun);
+    await realtime.PublishAsync("repositoryCleanupRunChanged", cleanupRun);
     var detail = store.GetWorkItemDetail(workItemId);
     if (detail is not null)
     {
-        await hub.Clients.All.SendAsync("workItemChanged", detail.Item);
+        await realtime.PublishAsync("workItemChanged", detail.Item);
     }
 
     return Results.Created($"/api/repository-cleanup-runs/{cleanupRun.Id}", cleanupRun);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1805,11 +1829,11 @@ api.MapPost("/work-items/{workItemId:guid}/move", async (Guid workItemId, MoveWo
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("workItemChanged", item);
+    await realtime.PublishAsync("workItemChanged", item);
     return Results.Ok(item);
 });
 
-api.MapPatch("/work-items/{workItemId:guid}/hierarchy", async (Guid workItemId, UpdateWorkItemHierarchyRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPatch("/work-items/{workItemId:guid}/hierarchy", async (Guid workItemId, UpdateWorkItemHierarchyRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1822,11 +1846,11 @@ api.MapPatch("/work-items/{workItemId:guid}/hierarchy", async (Guid workItemId, 
         return Results.Problem("The requested parent would create an invalid work item hierarchy.", statusCode: StatusCodes.Status400BadRequest);
     }
 
-    await hub.Clients.All.SendAsync("workItemChanged", item);
+    await realtime.PublishAsync("workItemChanged", item);
     return Results.Ok(item);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/children", async (Guid workItemId, CreateChildWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items/{workItemId:guid}/children", async (Guid workItemId, CreateChildWorkItemRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1839,7 +1863,7 @@ api.MapPost("/work-items/{workItemId:guid}/children", async (Guid workItemId, Cr
         return Results.Problem("The child card could not be created because the requested hierarchy is invalid.", statusCode: StatusCodes.Status400BadRequest);
     }
 
-    await hub.Clients.All.SendAsync("workItemChanged", item);
+    await realtime.PublishAsync("workItemChanged", item);
     return Results.Created($"/api/work-items/{item.Id}", item);
 });
 
@@ -1864,7 +1888,7 @@ api.MapGet("/work-items/{workItemId:guid}/tree", (Guid workItemId, ClaimsPrincip
     return tree is null ? Results.NotFound() : Results.Ok(tree);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/epic-runs", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items/{workItemId:guid}/epic-runs", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1877,11 +1901,11 @@ api.MapPost("/work-items/{workItemId:guid}/epic-runs", async (Guid workItemId, P
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("epicRunChanged", run);
+    await realtime.PublishAsync("epicRunChanged", run);
     return Results.Accepted($"/api/work-items/{workItemId}/epic-runs/{run.Id}", run);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/epic-goals", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items/{workItemId:guid}/epic-goals", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -1894,11 +1918,11 @@ api.MapPost("/work-items/{workItemId:guid}/epic-goals", async (Guid workItemId, 
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("epicGoalChanged", goal);
+    await realtime.PublishAsync("epicGoalChanged", goal);
     return Results.Accepted($"/api/work-items/{workItemId}/epic-goals/{goal.Id}", goal);
 });
 
-api.MapPost("/epic-goals/{goalId:guid}/cancel", async (Guid goalId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/epic-goals/{goalId:guid}/cancel", async (Guid goalId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     var existing = store.GetEpicGoal(goalId);
     if (existing is null)
@@ -1912,7 +1936,7 @@ api.MapPost("/epic-goals/{goalId:guid}/cancel", async (Guid goalId, PreviewActio
     }
 
     var goal = store.CancelEpicGoal(goalId, AuditActorFromClaims(user))!;
-    await hub.Clients.All.SendAsync("epicGoalChanged", goal);
+    await realtime.PublishAsync("epicGoalChanged", goal);
     return Results.Ok(goal);
 });
 
@@ -2031,7 +2055,7 @@ api.MapDelete("/work-items/{workItemId:guid}/pull-request/comments/{commentId:gu
     return store.DeletePullRequestReviewComment(workItemId, commentId) ? Results.NoContent() : Results.NotFound();
 });
 
-api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async (Guid workItemId, StartPullRequestReviewFixRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async (Guid workItemId, StartPullRequestReviewFixRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2105,13 +2129,13 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
     }
     store.MarkActionRun(actionStart.Action!.Id, run.Id, "Queued");
 
-    await hub.Clients.All.SendAsync("implementationRunChanged", run);
+    await realtime.PublishAsync("implementationRunChanged", run);
     var localGitCredential = localGit.ConfiguredToken ?? localGit.ConfiguredPassword;
     if (string.IsNullOrWhiteSpace(localGitCredential))
     {
         var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Could not resolve Local Git credentials for review fix.");
         store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Could not resolve Local Git credentials for review fix.");
-        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        await realtime.PublishAsync("implementationRunChanged", failed);
         return Results.Problem(failed?.FailureReason ?? "Could not resolve Local Git credentials.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
@@ -2127,7 +2151,7 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
         var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
         var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
         store.MarkActionFailed(actionStart.Action!.Id, failure);
-        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        await realtime.PublishAsync("implementationRunChanged", failed);
         return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
 
@@ -2145,13 +2169,13 @@ api.MapPost("/work-items/{workItemId:guid}/pull-request/ai-fix-comments", async 
         var failure = KubernetesFailureClassifier.Classify(apply.Message);
         var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
         store.MarkActionFailed(actionStart.Action!.Id, failure);
-        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        await realtime.PublishAsync("implementationRunChanged", failed);
         return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
     store.MarkActionRun(actionStart.Action!.Id, run.Id, "Running");
-    await hub.Clients.All.SendAsync("implementationRunChanged", updated);
+    await realtime.PublishAsync("implementationRunChanged", updated);
     return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
 });
 
@@ -2175,7 +2199,7 @@ api.MapPut("/work-items/{workItemId:guid}/ai-session/provider-session", (Guid wo
     return store.SetAiSessionProviderSession(workItemId, request.ProviderSessionId) is { } session ? Results.Ok(session) : Results.NotFound();
 });
 
-api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, AddCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, AddCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2189,11 +2213,11 @@ api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, Ad
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("commentAdded", comment);
+    await realtime.PublishAsync("commentAdded", comment);
     return Results.Created($"/api/work-items/{workItemId}", comment);
 });
 
-api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateCommentRequest(store, commentId, user))
     {
@@ -2209,7 +2233,7 @@ api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentR
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("commentChanged", comment);
+        await realtime.PublishAsync("commentChanged", comment);
         return Results.Ok(comment);
     }
     catch (ArgumentException ex)
@@ -2222,7 +2246,7 @@ api.MapPatch("/comments/{commentId:guid}", async (Guid commentId, UpdateCommentR
     }
 });
 
-api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateCommentRequest(store, commentId, user))
     {
@@ -2231,6 +2255,7 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, ClaimsPrincip
 
     try
     {
+        var boardId = store.GetCommentBoardId(commentId);
         var actor = UserIdentityFromClaims(user);
         var deleted = store.DeleteComment(commentId, actor.Subject, actor.DisplayName);
         if (!deleted)
@@ -2238,7 +2263,11 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, ClaimsPrincip
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("commentDeleted", commentId);
+        if (boardId is { } scopedBoardId)
+        {
+            await realtime.PublishBoardAsync(scopedBoardId, "commentDeleted", commentId);
+        }
+
         return Results.NoContent();
     }
     catch (InvalidOperationException ex)
@@ -2247,7 +2276,7 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, ClaimsPrincip
     }
 });
 
-api.MapPost("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments", async (Guid workItemId, Guid aiRunId, CreateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments", async (Guid workItemId, Guid aiRunId, CreateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
     {
@@ -2260,11 +2289,11 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments", as
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("aiPlanReviewCommentChanged", comment);
+    await realtime.PublishAsync("aiPlanReviewCommentChanged", comment);
     return Results.Created($"/api/work-items/{workItemId}/ai-plans/{aiRunId}/comments/{comment.Id}", comment);
 });
 
-api.MapPatch("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, UpdateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPatch("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, UpdateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
     {
@@ -2277,11 +2306,11 @@ api.MapPatch("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{co
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("aiPlanReviewCommentChanged", comment);
+    await realtime.PublishAsync("aiPlanReviewCommentChanged", comment);
     return Results.Ok(comment);
 });
 
-api.MapDelete("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapDelete("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
     {
@@ -2293,11 +2322,15 @@ api.MapDelete("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{c
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("aiPlanReviewCommentDeleted", commentId);
+    if (store.GetWorkItemBoardId(workItemId) is { } boardId)
+    {
+        await realtime.PublishBoardAsync(boardId, "aiPlanReviewCommentDeleted", commentId);
+    }
+
     return Results.NoContent();
 });
 
-api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2383,11 +2416,11 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
         store.MarkActionRun(actionStart.Action!.Id, run.Id, "Completed");
     }
 
-    await hub.Clients.All.SendAsync("aiRunChanged", run);
+    await realtime.PublishAsync("aiRunChanged", run);
     return Results.Accepted($"/api/ai-runs/{run.Id}", run);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItemId, ReviseAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItemId, ReviseAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2453,7 +2486,7 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("commentAdded", comment);
+        await realtime.PublishAsync("commentAdded", comment);
         context = store.GetWorkItemDetail(workItemId);
         if (context is null)
         {
@@ -2495,11 +2528,11 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
         store.MarkActionRun(actionStart.Action!.Id, run.Id, "Completed");
     }
 
-    await hub.Clients.All.SendAsync("aiRunChanged", run);
+    await realtime.PublishAsync("aiRunChanged", run);
     return Results.Accepted($"/api/ai-runs/{run.Id}", run);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IHubContext<DevOpsHub> hub, IConfiguration configuration) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IRealtimeNotifier realtime, IConfiguration configuration) =>
 {
     if (!CanMutateAiRunRequest(store, aiRunId, user))
     {
@@ -2579,7 +2612,7 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("aiRunChanged", result);
+    await realtime.PublishAsync("aiRunChanged", result);
     var preview = store.BeginPreviewImplementation(result.WorkItemId, "codex");
     if (preview is null)
     {
@@ -2588,14 +2621,14 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     }
     store.MarkActionRun(actionStart.Action!.Id, result.Id, "Running");
 
-    await hub.Clients.All.SendAsync("previewChanged", preview);
+    await realtime.PublishAsync("previewChanged", preview);
     _ = Task.Run(() => previewImplementationRunner.RunAsync(result, actor, CancellationToken.None), CancellationToken.None);
 
     var detail = store.GetWorkItemDetail(result.WorkItemId);
     return Results.Accepted($"/api/ai-runs/{aiRunId}", detail ?? (object)result);
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateAiRunRequest(store, aiRunId, user))
     {
@@ -2608,11 +2641,11 @@ api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRun
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("aiRunChanged", result);
+    await realtime.PublishAsync("aiRunChanged", result);
     return Results.Ok(result);
 });
 
-api.MapPost("/integrations/github/callback", async (GitHubCallbackRequest request, ClaimsPrincipal user, DevOpsStore store, IHubContext<DevOpsHub> hub) =>
+api.MapPost("/integrations/github/callback", async (GitHubCallbackRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, request.WorkItemId, user))
     {
@@ -2625,11 +2658,11 @@ api.MapPost("/integrations/github/callback", async (GitHubCallbackRequest reques
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("previewChanged", result.Preview);
+    await realtime.PublishAsync("previewChanged", result.Preview);
     return Results.Ok(result);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, ApprovePullRequestRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, ForgejoRepositoryClient localGit, GitHubRepositoryClient github, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, ApprovePullRequestRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, ForgejoRepositoryClient localGit, GitHubRepositoryClient github, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2741,8 +2774,8 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
             return Results.NotFound();
         }
 
-        await hub.Clients.All.SendAsync("boardChanged", waitingBoard);
-        await hub.Clients.All.SendAsync("workItemChanged", waitingDetail.Item);
+        await realtime.PublishAsync("boardChanged", waitingBoard);
+        await realtime.PublishAsync("workItemChanged", waitingDetail.Item);
         return Results.Ok(waitingDetail);
     }
 
@@ -2763,11 +2796,11 @@ api.MapPost("/work-items/{workItemId:guid}/approve-pr", async (Guid workItemId, 
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("workItemChanged", result.Item);
+    await realtime.PublishAsync("workItemChanged", result.Item);
     return Results.Ok(result);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/preview/start", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/preview/start", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2789,11 +2822,11 @@ api.MapPost("/work-items/{workItemId:guid}/preview/start", async (Guid workItemI
     }
 
     var detail = store.MarkPreviewProvisioning(workItemId, apply.Message);
-    await hub.Clients.All.SendAsync("previewChanged", detail?.Preview);
+    await realtime.PublishAsync("previewChanged", detail?.Preview);
     return detail is null ? Results.NotFound() : Results.Ok(detail);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2815,11 +2848,11 @@ api.MapPost("/work-items/{workItemId:guid}/preview/stop", async (Guid workItemId
     }
 
     var detail = store.StopPreview(workItemId, actor, cleanup.Message);
-    await hub.Clients.All.SendAsync("previewChanged", detail?.Preview);
+    await realtime.PublishAsync("previewChanged", detail?.Preview);
     return detail is null ? Results.NotFound() : Results.Ok(detail);
 });
 
-api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid workItemId, PreviewActionRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -2849,7 +2882,7 @@ api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid 
         return Results.NotFound();
     }
 
-    await hub.Clients.All.SendAsync("implementationRunChanged", run);
+    await realtime.PublishAsync("implementationRunChanged", run);
     var githubSecretName = configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github";
     var repository = store.GetImplementationRunRepository(run.Id);
     if (repository is not null && repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
@@ -2858,7 +2891,7 @@ api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid 
         if (string.IsNullOrWhiteSpace(localGitCredential))
         {
             var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Could not resolve Local Git credentials for preview approval pull request creation.");
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? "Could not resolve Local Git credentials.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
@@ -2873,7 +2906,7 @@ api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid 
         {
             var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
             var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
         }
     }
@@ -2883,7 +2916,7 @@ api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid 
         if (string.IsNullOrWhiteSpace(token))
         {
             var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: $"Could not mint GitHub App installation token for {integration.AccountLogin}.");
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? "Could not mint GitHub App installation token.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
@@ -2898,7 +2931,7 @@ api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid 
         {
             var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
             var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
         }
     }
@@ -2915,12 +2948,12 @@ api.MapPost("/work-items/{workItemId:guid}/preview/approve-for-pr", async (Guid 
     {
         var failure = KubernetesFailureClassifier.Classify(apply.Message);
         var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
-        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        await realtime.PublishAsync("implementationRunChanged", failed);
         return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
-    await hub.Clients.All.SendAsync("implementationRunChanged", updated);
+    await realtime.PublishAsync("implementationRunChanged", updated);
     return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
 });
 
@@ -3021,7 +3054,7 @@ api.MapGet("/implementation-runs/{implementationRunId:guid}/manifest", (Guid imp
     return store.RenderImplementationRunManifest(implementationRunId, configuration) is { } manifest ? Results.Text(manifest, "application/yaml") : Results.NotFound();
 });
 
-api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid workItemId, StartImplementationRunRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IHubContext<DevOpsHub> hub, CancellationToken cancellationToken) =>
+api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid workItemId, StartImplementationRunRequest request, ClaimsPrincipal user, DevOpsStore store, PipelineJobOrchestrator jobs, GitHubRepositoryClient github, ForgejoRepositoryClient localGit, IRuntimeSecretStore runtimeSecrets, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
 {
     if (!CanMutateWorkItemRequest(store, workItemId, user))
     {
@@ -3103,12 +3136,12 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
             var failure = $"Retry cleanup failed: {KubernetesFailureClassifier.Classify(cleanup.Message)}";
             var failed = store.UpdateImplementationRun(run.Id, "Failed", cleanup.Message, failure);
             store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? failure);
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? failure, statusCode: StatusCodes.Status502BadGateway);
         }
     }
 
-    await hub.Clients.All.SendAsync("implementationRunChanged", run);
+    await realtime.PublishAsync("implementationRunChanged", run);
     var githubSecretName = configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github";
     var repository = store.GetImplementationRunRepository(run.Id);
     if (repository is not null && repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
@@ -3118,7 +3151,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         {
             var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: "Could not resolve Local Git credentials for repository implementation.");
             store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Could not resolve Local Git credentials for repository implementation.");
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? "Could not resolve Local Git credentials.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
@@ -3134,7 +3167,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
             var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
             var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
             store.MarkActionFailed(actionStart.Action!.Id, failure);
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
         }
     }
@@ -3145,7 +3178,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         {
             var failed = store.UpdateImplementationRun(run.Id, "Failed", failureReason: $"Could not mint GitHub App installation token for {integration.AccountLogin}.");
             store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Could not mint GitHub App installation token.");
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failed?.FailureReason ?? "Could not mint GitHub App installation token.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
@@ -3161,7 +3194,7 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
             var failure = KubernetesFailureClassifier.Classify(tokenSecretWrite.Message);
             var failed = store.UpdateImplementationRun(run.Id, "Failed", tokenSecretWrite.Message, failure);
             store.MarkActionFailed(actionStart.Action!.Id, failure);
-            await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+            await realtime.PublishAsync("implementationRunChanged", failed);
             return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
         }
     }
@@ -3180,13 +3213,13 @@ api.MapPost("/work-items/{workItemId:guid}/implementation-runs", async (Guid wor
         var failure = KubernetesFailureClassifier.Classify(apply.Message);
         var failed = store.UpdateImplementationRun(run.Id, "Failed", apply.Message, failure);
         store.MarkActionFailed(actionStart.Action!.Id, failure);
-        await hub.Clients.All.SendAsync("implementationRunChanged", failed);
+        await realtime.PublishAsync("implementationRunChanged", failed);
         return Results.Problem(failure, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateImplementationRun(run.Id, "Cloning", apply.Message);
     store.MarkActionRun(actionStart.Action!.Id, run.Id, "Running");
-    await hub.Clients.All.SendAsync("implementationRunChanged", updated);
+    await realtime.PublishAsync("implementationRunChanged", updated);
     return Results.Accepted($"/api/implementation-runs/{run.Id}", updated);
 });
 
@@ -3584,7 +3617,105 @@ static UserIdentityRequest UserIdentityFromClaims(ClaimsPrincipal user)
 
 namespace Rosenvall.DevOps.Api
 {
-    public sealed class DevOpsHub : Hub;
+    public sealed class DevOpsHub(DevOpsStore store) : Hub
+    {
+        public async Task SubscribeBoard(Guid boardId)
+        {
+            if (Context.User?.Identity?.IsAuthenticated == true)
+            {
+                var actorSubject = ActorSubjectFromClaims(Context.User);
+                if (!store.CanViewBoard(boardId, actorSubject))
+                {
+                    throw new HubException("You do not have access to this board.");
+                }
+            }
+
+            await Groups.AddToGroupAsync(Context.ConnectionId, RealtimeNotifier.BoardGroup(boardId));
+        }
+
+        public Task UnsubscribeBoard(Guid boardId) =>
+            Groups.RemoveFromGroupAsync(Context.ConnectionId, RealtimeNotifier.BoardGroup(boardId));
+
+        public async Task SubscribeUser()
+        {
+            var actorSubject = ActorSubjectFromClaims(Context.User ?? new ClaimsPrincipal());
+            await Groups.AddToGroupAsync(Context.ConnectionId, RealtimeNotifier.UserGroup(actorSubject));
+        }
+
+        private static string ActorSubjectFromClaims(ClaimsPrincipal user) =>
+            user.FindFirstValue(ClaimTypes.NameIdentifier) ??
+            user.FindFirstValue("sub") ??
+            "local-dev";
+    }
+
+    public interface IRealtimeNotifier
+    {
+        Task PublishAsync(string method, object? payload, CancellationToken cancellationToken = default);
+        Task PublishBoardAsync(Guid boardId, string method, object? payload, CancellationToken cancellationToken = default);
+        Task PublishUserAsync(string? actorSubject, string method, object? payload, CancellationToken cancellationToken = default);
+    }
+
+    public sealed class RealtimeNotifier(IHubContext<DevOpsHub> hub, DevOpsStore store) : IRealtimeNotifier
+    {
+        public static string BoardGroup(Guid boardId) => $"board:{boardId:N}";
+
+        public static string UserGroup(string actorSubject) => $"user:{HashSubject(actorSubject)}";
+
+        public async Task PublishAsync(string method, object? payload, CancellationToken cancellationToken = default)
+        {
+            if (payload is null)
+            {
+                return;
+            }
+
+            var boardId = ResolveBoardId(payload);
+            if (boardId is null)
+            {
+                return;
+            }
+
+            await PublishBoardAsync(boardId.Value, method, payload, cancellationToken);
+        }
+
+        public Task PublishBoardAsync(Guid boardId, string method, object? payload, CancellationToken cancellationToken = default) =>
+            hub.Clients.Group(RealtimeNotifier.BoardGroup(boardId)).SendAsync(method, payload, cancellationToken);
+
+        public Task PublishUserAsync(string? actorSubject, string method, object? payload, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(actorSubject))
+            {
+                return Task.CompletedTask;
+            }
+
+            return hub.Clients.Group(UserGroup(actorSubject)).SendAsync(method, payload, cancellationToken);
+        }
+
+        private Guid? ResolveBoardId(object payload) =>
+            payload switch
+            {
+                BoardDto board => board.Id,
+                BoardPublicAppDto app => app.BoardId,
+                WorkItemSummaryDto item => store.GetWorkItemBoardId(item.Id),
+                WorkItemDetailDto detail => detail.Item.Id == Guid.Empty ? null : store.GetWorkItemBoardId(detail.Item.Id),
+                PreviewDto preview => store.GetWorkItemBoardId(preview.WorkItemId),
+                AiRun run => store.GetWorkItemBoardId(run.WorkItemId),
+                CommentDto comment => store.GetWorkItemBoardId(comment.WorkItemId),
+                AiPlanReviewCommentDto comment => store.GetWorkItemBoardId(comment.WorkItemId),
+                PullRequestReviewCommentDto comment => store.GetWorkItemBoardId(comment.WorkItemId),
+                ImplementationRunDto run => store.GetWorkItemBoardId(run.WorkItemId),
+                RepositoryCleanupRunDto run => store.GetWorkItemBoardId(run.WorkItemId),
+                EpicRunDto run => store.GetWorkItemBoardId(run.RootWorkItemId),
+                EpicGoalRunDto run => store.GetWorkItemBoardId(run.RootWorkItemId),
+                PipelineRunDto run => run.BoardId ?? (run.WorkItemId is { } workItemId ? store.GetWorkItemBoardId(workItemId) : null),
+                _ => null
+            };
+
+        private static string HashSubject(string actorSubject)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(actorSubject.Trim()));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+    }
 
     public static class RealtimeMode
     {
@@ -3594,10 +3725,6 @@ namespace Rosenvall.DevOps.Api
         {
             var enabled = configuration.GetValue("Realtime:Enabled", false);
             var unsafeBroadcastsAllowed = configuration.GetValue("Realtime:AllowUnsafeBroadcasts", false);
-            if (enabled && authenticationEnabled && !unsafeBroadcastsAllowed)
-            {
-                throw new InvalidOperationException("Realtime SignalR currently uses global broadcasts; set Realtime:AllowUnsafeBroadcasts=true only after accepting that risk or implement scoped board groups first.");
-            }
 
             return new Settings(enabled, unsafeBroadcastsAllowed);
         }
@@ -5716,7 +5843,7 @@ namespace Rosenvall.DevOps.Api
         IPreviewSourceProvider previewSourceProvider,
         PreviewEnvironmentOrchestrator previews,
         IConfiguration configuration,
-        IHubContext<DevOpsHub> hub,
+        IRealtimeNotifier realtime,
         ILogger<PreviewImplementationRunner> logger)
     {
         public async Task RunAsync(AiRun run, string approvedBy, CancellationToken cancellationToken)
@@ -5741,38 +5868,38 @@ namespace Rosenvall.DevOps.Api
                         var updated = store.AppendPreviewTerminalLine(run.WorkItemId, line.Stream, line.Message, line.CreatedAt, "source");
                         if (updated is not null)
                         {
-                            await hub.Clients.All.SendAsync("previewChanged", updated.Preview, cancellationToken);
+                            await realtime.PublishAsync("previewChanged", updated.Preview, cancellationToken);
                         }
                     },
                     cancellationToken);
 
                 store.AppendPreviewTerminalLine(run.WorkItemId, "system", $"Codex generated {sourceFiles.Count} source files.", stepKey: "source");
                 var implementation = store.CompletePreviewImplementation(run.WorkItemId, sourceFiles, "codex");
-                await hub.Clients.All.SendAsync("previewChanged", implementation?.Preview, cancellationToken);
+                await realtime.PublishAsync("previewChanged", implementation?.Preview, cancellationToken);
 
                 var manifest = store.RenderPreviewManifest(run.WorkItemId);
                 if (manifest is null)
                 {
                     store.RecordPreviewFailure(run.WorkItemId, "ManifestMissing", approvedBy, "Preview manifest could not be rendered.");
-                    await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+                    await realtime.PublishAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
                     return;
                 }
 
                 store.MarkPreviewApplying(run.WorkItemId, "Applying Kubernetes resources.");
                 store.AppendPreviewTerminalLine(run.WorkItemId, "system", "kubectl apply started.", stepKey: "apply");
-                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+                await realtime.PublishAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
 
                 var apply = await previews.ApplyAsync(manifest, cancellationToken);
                 store.AppendPreviewTerminalLine(run.WorkItemId, apply.Succeeded ? "system" : "stderr", apply.Message, stepKey: "apply");
                 if (!apply.Succeeded)
                 {
                     store.RecordPreviewFailure(run.WorkItemId, "ApplyFailed", approvedBy, apply.Message);
-                    await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+                    await realtime.PublishAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
                     return;
                 }
 
                 store.MarkPreviewProvisioning(run.WorkItemId, apply.Message);
-                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
+                await realtime.PublishAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -5781,13 +5908,13 @@ namespace Rosenvall.DevOps.Api
             catch (AiPlanProviderUnavailableException ex)
             {
                 store.RecordImplementationFailure(run.WorkItemId, approvedBy, ex.Message);
-                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, CancellationToken.None);
+                await realtime.PublishAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, CancellationToken.None);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Preview implementation failed for AI run {AiRunId}", run.Id);
                 store.RecordImplementationFailure(run.WorkItemId, approvedBy, $"Unexpected preview implementation failure: {ex.Message}");
-                await hub.Clients.All.SendAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, CancellationToken.None);
+                await realtime.PublishAsync("previewChanged", store.GetWorkItemDetail(run.WorkItemId)?.Preview, CancellationToken.None);
             }
         }
     }
@@ -5795,7 +5922,7 @@ namespace Rosenvall.DevOps.Api
     public sealed class PreviewImplementationRecoveryService(
         DevOpsStore store,
         PreviewImplementationRunner runner,
-        IHubContext<DevOpsHub> hub,
+        IRealtimeNotifier realtime,
         ILogger<PreviewImplementationRecoveryService> logger) : BackgroundService
     {
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -5806,7 +5933,7 @@ namespace Rosenvall.DevOps.Api
                 foreach (var run in store.GetPreviewImplementationRunsAwaitingRecovery())
                 {
                     var detail = store.AppendPreviewTerminalLine(run.WorkItemId, "system", "Reattaching to existing Codex preview source job after API restart.", stepKey: "source");
-                    await hub.Clients.All.SendAsync("previewChanged", detail?.Preview, stoppingToken);
+                    await realtime.PublishAsync("previewChanged", detail?.Preview, stoppingToken);
                     await runner.RunAsync(run, run.ApprovedBy ?? "system", stoppingToken);
                 }
             }
@@ -7242,7 +7369,7 @@ namespace Rosenvall.DevOps.Api
         }
     }
 
-    public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrchestrator jobs, IHubContext<DevOpsHub> hub, ILogger<ImplementationRunMonitor> logger) : BackgroundService
+    public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrchestrator jobs, IRealtimeNotifier realtime, ILogger<ImplementationRunMonitor> logger) : BackgroundService
     {
         private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(8);
         private static readonly TimeSpan RunStuckTimeout = TimeSpan.FromMinutes(10);
@@ -7293,7 +7420,7 @@ namespace Rosenvall.DevOps.Api
                     var stuck = store.MarkImplementationRunStuck(run.Id, jobName, podName, condition, events);
                     if (stuck is not null)
                     {
-                        await hub.Clients.All.SendAsync("implementationRunChanged", stuck, cancellationToken);
+                        await realtime.PublishAsync("implementationRunChanged", stuck, cancellationToken);
                     }
 
                     continue;
@@ -7328,7 +7455,7 @@ namespace Rosenvall.DevOps.Api
                 var updated = store.UpdateImplementationRun(run.Id, nextStatus, logs, failureReason);
                 if (updated is not null)
                 {
-                    await hub.Clients.All.SendAsync("implementationRunChanged", updated, cancellationToken);
+                    await realtime.PublishAsync("implementationRunChanged", updated, cancellationToken);
                 }
             }
         }
@@ -7361,7 +7488,7 @@ namespace Rosenvall.DevOps.Api
                     var stuck = store.MarkRepositoryCleanupRunStuck(run.Id, jobName, podName, condition, events);
                     if (stuck is not null)
                     {
-                        await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", stuck, cancellationToken);
+                        await realtime.PublishAsync("repositoryCleanupRunChanged", stuck, cancellationToken);
                     }
 
                     continue;
@@ -7395,7 +7522,7 @@ namespace Rosenvall.DevOps.Api
                 var updated = store.UpdateRepositoryCleanupRun(run.Id, nextStatus, logs, failureReason);
                 if (updated is not null)
                 {
-                    await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", updated, cancellationToken);
+                    await realtime.PublishAsync("repositoryCleanupRunChanged", updated, cancellationToken);
                 }
             }
         }
@@ -13055,6 +13182,15 @@ namespace Rosenvall.DevOps.Api
             {
                 var comment = _comments.SingleOrDefault(entry => entry.Id == commentId);
                 return comment is not null && CanMutateWorkItem(comment.WorkItemId, actorSubject);
+            }
+        }
+
+        public Guid? GetCommentBoardId(Guid commentId)
+        {
+            lock (_lock)
+            {
+                var comment = _comments.SingleOrDefault(entry => entry.Id == commentId);
+                return comment is null ? null : _items.SingleOrDefault(item => item.Id == comment.WorkItemId)?.BoardId;
             }
         }
 
