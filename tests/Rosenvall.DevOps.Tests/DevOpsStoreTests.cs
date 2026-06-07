@@ -5644,6 +5644,22 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitOps_status_reader_lives_in_feature_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var featurePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "GitOps", "GitOpsStatusReader.cs");
+
+        Assert.DoesNotContain("public sealed class GitOpsStatusReader", program);
+        Assert.True(File.Exists(featurePath), "GitOps application status reading should live in Features/GitOps/GitOpsStatusReader.cs instead of Program.cs.");
+
+        var feature = File.ReadAllText(featurePath);
+        Assert.Contains("public sealed class GitOpsStatusReader", feature);
+        Assert.Contains("ParseApplicationsJson", feature);
+        Assert.Contains("FromKubectlFailure", feature);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
