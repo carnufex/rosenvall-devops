@@ -5251,7 +5251,7 @@ public sealed class DevOpsStoreTests
     {
         var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
         var orchestratorStart = program.IndexOf("public sealed class PipelineJobOrchestrator", StringComparison.Ordinal);
-        var orchestratorEnd = program.IndexOf("public sealed class DevOpsStateDbContext", orchestratorStart, StringComparison.Ordinal);
+        var orchestratorEnd = program.IndexOf("public static class LocalNginxPreviewHtml", orchestratorStart, StringComparison.Ordinal);
         Assert.True(orchestratorStart >= 0 && orchestratorEnd > orchestratorStart, "PipelineJobOrchestrator source block should be present.");
         var orchestrator = program[orchestratorStart..orchestratorEnd];
 

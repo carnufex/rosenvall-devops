@@ -22,6 +22,21 @@ public sealed class DevOpsDatabaseStartupTests
     }
 
     [Fact]
+    public void Devops_state_db_context_lives_in_persistence_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var persistencePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Persistence", "DevOpsStatePersistence.cs");
+
+        Assert.DoesNotContain("public sealed class DevOpsStateDbContext", program, StringComparison.Ordinal);
+        Assert.DoesNotContain("public sealed class DevOpsStateDocument", program, StringComparison.Ordinal);
+        Assert.True(File.Exists(persistencePath), "DevOps state EF types should live in Persistence/DevOpsStatePersistence.cs.");
+        var persistence = File.ReadAllText(persistencePath);
+        Assert.Contains("public sealed class DevOpsStateDbContext", persistence, StringComparison.Ordinal);
+        Assert.Contains("public sealed class DevOpsStateDocument", persistence, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Database_initializer_creates_sqlite_schema_with_migration_history()
     {
         var databasePath = TempDatabasePath();
