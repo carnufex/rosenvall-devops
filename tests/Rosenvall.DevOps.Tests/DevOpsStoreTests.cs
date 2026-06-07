@@ -121,7 +121,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains(run.Children, child => child.WorkItemId == featureA.Id && child.AgentRole == "Feature agent");
         Assert.Contains(run.Children, child => child.WorkItemId == featureB.Id && child.Status == "Queued");
         Assert.Equal(run.Id, goal.EpicRunId);
-        Assert.Equal("Running", goal.Status);
+        Assert.Equal("PlanningChildren", goal.Status);
 
         var cancelled = store.CancelEpicGoal(goal.Id, "crille")!;
         Assert.Equal("Cancelled", cancelled.Status);

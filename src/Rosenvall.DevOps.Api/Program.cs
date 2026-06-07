@@ -12274,7 +12274,7 @@ namespace Rosenvall.DevOps.Api
 
                 var root = RootFor(item) ?? item;
                 var active = _epicGoalRuns
-                    .Where(goal => goal.RootWorkItemId == root.Id && goal.Status is "Running" or "Queued")
+                    .Where(goal => goal.RootWorkItemId == root.Id && EpicGoalStateMachine.IsActive(goal.Status))
                     .OrderByDescending(goal => goal.UpdatedAt)
                     .FirstOrDefault();
                 if (active is not null)
@@ -12287,16 +12287,18 @@ namespace Rosenvall.DevOps.Api
                     .OrderByDescending(entry => entry.UpdatedAt)
                     .FirstOrDefault() ?? StartEpicRun(root.Id, actor);
                 var now = DateTimeOffset.UtcNow;
+                var decision = EpicGoalStateMachine.Evaluate(
+                    run?.Children.Select(child => new EpicGoalChildState(child.WorkItemId, child.Status)).ToArray() ?? []);
                 var goal = new EpicGoalRunDto(
                     Guid.NewGuid(),
                     root.Id,
                     run?.Id,
-                    run?.Status == "Blocked" ? "Blocked" : "Running",
+                    decision.Status.ToString(),
                     NormalizeText(actor, "system"),
                     now,
                     now,
                     run?.Summary,
-                    run?.FailureReason);
+                    decision.Status == EpicGoalStatus.Blocked ? (run?.FailureReason ?? "Epic goal has no runnable child feature work.") : run?.FailureReason);
                 _epicGoalRuns.Add(goal);
                 AddTimelineForItem(root, "EpicGoalStarted", root.Key, $"Started epic goal for {root.Title}.", actor);
                 Persist();

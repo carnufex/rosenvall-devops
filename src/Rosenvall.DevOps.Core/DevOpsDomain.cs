@@ -64,6 +64,106 @@ public enum AiRunStatus
     Discarded
 }
 
+public enum EpicGoalStatus
+{
+    Queued,
+    PlanningChildren,
+    RunningChildren,
+    WaitingForReview,
+    Blocked,
+    Complete,
+    Cancelled
+}
+
+public enum EpicGoalNextAction
+{
+    None,
+    PlanChild,
+    RunChild,
+    WaitForReview
+}
+
+public sealed record EpicGoalChildState(Guid WorkItemId, string Status);
+
+public sealed record EpicGoalDecision(EpicGoalStatus Status, EpicGoalNextAction NextAction, Guid? NextChildWorkItemId = null);
+
+public static class EpicGoalStateMachine
+{
+    public static EpicGoalDecision Evaluate(IReadOnlyList<EpicGoalChildState> children, EpicGoalStatus? currentStatus = null)
+    {
+        if (currentStatus == EpicGoalStatus.Cancelled)
+        {
+            return new EpicGoalDecision(EpicGoalStatus.Cancelled, EpicGoalNextAction.None);
+        }
+
+        if (children.Count == 0)
+        {
+            return new EpicGoalDecision(EpicGoalStatus.Blocked, EpicGoalNextAction.None);
+        }
+
+        if (children.Any(child => IsStatus(child, "Blocked") || IsStatus(child, "Failed")))
+        {
+            return new EpicGoalDecision(EpicGoalStatus.Blocked, EpicGoalNextAction.None);
+        }
+
+        if (children.All(IsComplete))
+        {
+            return new EpicGoalDecision(EpicGoalStatus.Complete, EpicGoalNextAction.None);
+        }
+
+        if (children.Any(child => IsStatus(child, "Review") || IsStatus(child, "WaitingForReview")))
+        {
+            return new EpicGoalDecision(EpicGoalStatus.WaitingForReview, EpicGoalNextAction.WaitForReview);
+        }
+
+        var readyChild = children.FirstOrDefault(child => IsStatus(child, "Ready"));
+        if (readyChild is not null)
+        {
+            return new EpicGoalDecision(EpicGoalStatus.RunningChildren, EpicGoalNextAction.RunChild, readyChild.WorkItemId);
+        }
+
+        if (children.Any(child => IsStatus(child, "Running") || IsStatus(child, "ImplementationRunning")))
+        {
+            return new EpicGoalDecision(EpicGoalStatus.RunningChildren, EpicGoalNextAction.None);
+        }
+
+        var queuedChild = children.FirstOrDefault(child => IsStatus(child, "Queued") || IsStatus(child, "Planning"));
+        if (queuedChild is not null)
+        {
+            return new EpicGoalDecision(EpicGoalStatus.PlanningChildren, EpicGoalNextAction.PlanChild, queuedChild.WorkItemId);
+        }
+
+        return new EpicGoalDecision(EpicGoalStatus.Blocked, EpicGoalNextAction.None);
+    }
+
+    public static bool IsActive(string status) =>
+        ParseStatus(status) is EpicGoalStatus.Queued or EpicGoalStatus.PlanningChildren or EpicGoalStatus.RunningChildren or EpicGoalStatus.WaitingForReview;
+
+    public static EpicGoalStatus? ParseStatus(string? status)
+    {
+        if (Enum.TryParse<EpicGoalStatus>(status, ignoreCase: true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return status?.Trim().ToLowerInvariant() switch
+        {
+            "running" => EpicGoalStatus.RunningChildren,
+            "queued" => EpicGoalStatus.Queued,
+            "blocked" => EpicGoalStatus.Blocked,
+            "complete" or "completed" or "done" => EpicGoalStatus.Complete,
+            "cancelled" or "canceled" => EpicGoalStatus.Cancelled,
+            _ => null
+        };
+    }
+
+    private static bool IsComplete(EpicGoalChildState child) =>
+        IsStatus(child, "Complete") || IsStatus(child, "Completed") || IsStatus(child, "Done");
+
+    private static bool IsStatus(EpicGoalChildState child, string status) =>
+        child.Status.Equals(status, StringComparison.OrdinalIgnoreCase);
+}
+
 public sealed class AiRun
 {
     private AiRun(Guid id, Guid workItemId, string provider, string model, AiRunStatus status, string? plan, string? approvedBy, int sequenceNumber, DateTimeOffset createdAt, string? reasoningEffort)

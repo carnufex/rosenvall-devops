@@ -66,6 +66,43 @@ public sealed class DevOpsDomainTests
     }
 
     [Fact]
+    public void Epic_goal_state_machine_selects_explicit_goal_status_from_child_states()
+    {
+        var featureA = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        var featureB = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+
+        var planning = EpicGoalStateMachine.Evaluate([
+            new EpicGoalChildState(featureA, "Queued"),
+            new EpicGoalChildState(featureB, "Queued")
+        ]);
+        var running = EpicGoalStateMachine.Evaluate([
+            new EpicGoalChildState(featureA, "Ready"),
+            new EpicGoalChildState(featureB, "Queued")
+        ]);
+        var waitingForReview = EpicGoalStateMachine.Evaluate([
+            new EpicGoalChildState(featureA, "Completed"),
+            new EpicGoalChildState(featureB, "Review")
+        ]);
+        var complete = EpicGoalStateMachine.Evaluate([
+            new EpicGoalChildState(featureA, "Completed"),
+            new EpicGoalChildState(featureB, "Done")
+        ]);
+        var blocked = EpicGoalStateMachine.Evaluate([]);
+
+        Assert.Equal(EpicGoalStatus.PlanningChildren, planning.Status);
+        Assert.Equal(EpicGoalNextAction.PlanChild, planning.NextAction);
+        Assert.Equal(featureA, planning.NextChildWorkItemId);
+        Assert.Equal(EpicGoalStatus.RunningChildren, running.Status);
+        Assert.Equal(EpicGoalNextAction.RunChild, running.NextAction);
+        Assert.Equal(featureA, running.NextChildWorkItemId);
+        Assert.Equal(EpicGoalStatus.WaitingForReview, waitingForReview.Status);
+        Assert.Equal(EpicGoalNextAction.WaitForReview, waitingForReview.NextAction);
+        Assert.Equal(EpicGoalStatus.Complete, complete.Status);
+        Assert.Equal(EpicGoalNextAction.None, complete.NextAction);
+        Assert.Equal(EpicGoalStatus.Blocked, blocked.Status);
+    }
+
+    [Fact]
     public void Preview_resource_set_uses_dedicated_namespace_and_external_gateway()
     {
         var resources = PreviewResourceSet.Create(

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -155,6 +155,17 @@ test('work item identity metadata keeps title clean and hierarchy editable', () 
     label: 'TASK-4839 - Task - No parent',
     parentLabel: 'No parent'
   });
+});
+
+test('epic goal active status includes explicit state machine phases and legacy running states', () => {
+  assert.equal(isActiveEpicGoalStatus('Running'), true);
+  assert.equal(isActiveEpicGoalStatus('Queued'), true);
+  assert.equal(isActiveEpicGoalStatus('PlanningChildren'), true);
+  assert.equal(isActiveEpicGoalStatus('RunningChildren'), true);
+  assert.equal(isActiveEpicGoalStatus('WaitingForReview'), true);
+  assert.equal(isActiveEpicGoalStatus('Blocked'), false);
+  assert.equal(isActiveEpicGoalStatus('Complete'), false);
+  assert.equal(isActiveEpicGoalStatus('Cancelled'), false);
 });
 
 test('api unavailable banner uses structured status when available', () => {

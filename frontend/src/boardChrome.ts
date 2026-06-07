@@ -62,6 +62,11 @@ export type WorkItemModalTab = {
   label: string;
 };
 
+export function isActiveEpicGoalStatus(status?: string | null): boolean {
+  return ['Running', 'Queued', 'PlanningChildren', 'RunningChildren', 'WaitingForReview']
+    .some((activeStatus) => activeStatus.toLowerCase() === status?.trim().toLowerCase());
+}
+
 export type BoardNavigationItem = {
   key: 'board' | 'source' | 'timeline' | 'gitops' | 'ai' | 'environment' | 'configuration';
   label: string;
