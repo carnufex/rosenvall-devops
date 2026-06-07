@@ -345,7 +345,12 @@ public sealed class DevOpsStoreTests
         store.MarkPreviewRunning(item.Id, "test", "Preview is running.");
 
         var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
-        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder().Build(), "github-token")!;
+        var manifest = store.RenderImplementationRunManifest(run.Id, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:KubernetesRunnerImage"] = "ghcr.io/carnufex/rosenvall-devops-api@sha256:promotiondigest"
+            })
+            .Build(), "github-token")!;
 
         Assert.Equal("preview-promotion", run.RunKind);
         Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
@@ -357,6 +362,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("git push --set-upstream origin", manifest);
         Assert.Contains("ROSENVALL_PUBLIC_HOSTNAME", manifest);
         Assert.Contains("Production hostname:", manifest);
+        Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:promotiondigest", manifest);
+        Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
         AssertPreviewPromotionRunnerSecurityContextIsWellFormed(manifest);
         Assert.DoesNotContain("codex exec", manifest);
         Assert.DoesNotContain("RDO_STEP=Implementing", manifest);
@@ -401,10 +408,13 @@ public sealed class DevOpsStoreTests
             {
                 ["LocalGit:ApiBaseUrl"] = "http://localhost:3001/api/v1",
                 ["LocalGit:RunnerApiBaseUrl"] = "http://forgejo.local/api/v1",
-                ["LocalGit:Username"] = "rdo"
+                ["LocalGit:Username"] = "rdo",
+                ["Ai:Codex:KubernetesRunnerImage"] = "ghcr.io/carnufex/rosenvall-devops-api@sha256:localpromotiondigest"
             })
             .Build(), "repository-token")!;
 
+        Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:localpromotiondigest", manifest);
+        Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
         Assert.Contains("ROSENVALL_REPOSITORY_PROVIDER", manifest);
         Assert.Contains("value: \"LocalGit\"", manifest);
         Assert.Contains("ROSENVALL_FORGEJO_API_BASE_URL", manifest);
@@ -831,7 +841,8 @@ public sealed class DevOpsStoreTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["LocalGit:RunnerApiBaseUrl"] = "http://forgejo.local/api/v1",
-                ["LocalGit:Username"] = "rdo"
+                ["LocalGit:Username"] = "rdo",
+                ["Ai:Codex:KubernetesRunnerImage"] = "ghcr.io/carnufex/rosenvall-devops-api@sha256:reviewfixdigest"
             })
             .Build(), "repository-token")!;
 
@@ -840,6 +851,8 @@ public sealed class DevOpsStoreTests
         Assert.Equal(developmentBranch, run.Branch);
         var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_PROMPT_B64");
         Assert.Contains("RDO_STEP=FixingReviewComments", manifest);
+        Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:reviewfixdigest", manifest);
+        Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
         Assert.Contains("Add dark mode handling.", prompt);
         Assert.Contains("git clone --depth 1 --branch \"$ROSENVALL_BRANCH\"", manifest);
         Assert.Contains("git push origin \"$ROSENVALL_BRANCH\"", manifest);
@@ -1983,7 +1996,8 @@ public sealed class DevOpsStoreTests
             {
                 ["Ai:Codex:Model"] = "gpt-5.4",
                 ["GitHub:Token"] = "ghp_secret_that_must_not_render",
-                ["GitHub:TokenSecretName"] = "rosenvall-devops-github"
+                ["GitHub:TokenSecretName"] = "rosenvall-devops-github",
+                ["Ai:Codex:KubernetesRunnerImage"] = "ghcr.io/carnufex/rosenvall-devops-api@sha256:implementationdigest"
             })
             .Build();
 
@@ -2001,6 +2015,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("app.kubernetes.io/name: rosenvall-devops-api", manifest);
         Assert.Contains("topologyKey: kubernetes.io/hostname", manifest);
         Assert.Contains("name: prepare-codex-home", manifest);
+        Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:implementationdigest", manifest);
+        Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
         Assert.Contains("name: codex-home-source", manifest);
         Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
         Assert.Contains("readOnly: true", manifest);
@@ -3166,7 +3182,12 @@ public sealed class DevOpsStoreTests
         store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_COMMIT=abc123\nRDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/33");
 
         var cleanupRun = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff --git a/kubernetes/applications/test/kustomization.yaml b/kubernetes/applications/test/kustomization.yaml")!;
-        var manifest = store.RenderRepositoryCleanupRunManifest(cleanupRun.Id, new ConfigurationBuilder().Build(), "github-token-cleanup")!;
+        var manifest = store.RenderRepositoryCleanupRunManifest(cleanupRun.Id, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ai:Codex:KubernetesRunnerImage"] = "ghcr.io/carnufex/rosenvall-devops-api@sha256:cleanupdigest"
+            })
+            .Build(), "github-token-cleanup")!;
         var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_CLEANUP_PROMPT_B64");
         var sourceDiff = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_SOURCE_PR_DIFF_B64");
 
@@ -3177,6 +3198,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("Do not run git add, git commit, git push, gh pr, or GitHub pull request API calls.", prompt);
         Assert.Contains("kubernetes/applications/test/kustomization.yaml", sourceDiff);
         Assert.Contains("codex exec --ephemeral", manifest);
+        Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:cleanupdigest", manifest);
+        Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
         Assert.Contains("--sandbox danger-full-access", manifest);
         Assert.Contains("codex-output.log", manifest);
         Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);

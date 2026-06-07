@@ -3644,9 +3644,16 @@ namespace Rosenvall.DevOps.Api
     public static class CodexKubernetesRunner
     {
         public const string DefaultSandboxMode = "danger-full-access";
+        public const string DefaultRunnerImage = "ghcr.io/carnufex/rosenvall-devops-api:main";
 
         public static string SandboxMode(IConfiguration configuration) =>
             NormalizeSandboxMode(configuration["Ai:Codex:KubernetesSandboxMode"]);
+
+        public static string RunnerImage(IConfiguration configuration) =>
+            NormalizeRunnerImage(configuration["Ai:Codex:KubernetesRunnerImage"]);
+
+        public static string NormalizeRunnerImage(string? value) =>
+            string.IsNullOrWhiteSpace(value) ? DefaultRunnerImage : value.Trim();
 
         public static string NormalizeSandboxMode(string? value)
         {
@@ -3778,7 +3785,7 @@ namespace Rosenvall.DevOps.Api
                 },
                 Namespace);
 
-        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName = "rosenvall-devops-github", AiSessionDto? aiSession = null, IReadOnlyList<BoardSecretDto>? boardSecrets = null, string? sandboxMode = null, string? forgejoApiBaseUrl = null, string? localGitUsername = null)
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName = "rosenvall-devops-github", AiSessionDto? aiSession = null, IReadOnlyList<BoardSecretDto>? boardSecrets = null, string? sandboxMode = null, string? forgejoApiBaseUrl = null, string? localGitUsername = null, string? runnerImage = null)
         {
             var jobName = JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
@@ -3789,6 +3796,7 @@ namespace Rosenvall.DevOps.Api
             var secretShellUnset = RenderSecretShellUnset(boardSecrets ?? []);
             var secretShellRestore = RenderSecretShellRestore(boardSecrets ?? []);
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
+            var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
             var repositoryProvider = NormalizeProvider(repository.Provider);
             var forgejoApi = string.IsNullOrWhiteSpace(forgejoApiBaseUrl) ? "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/api/v1" : forgejoApiBaseUrl.Trim().TrimEnd('/');
             var forgejoUser = string.IsNullOrWhiteSpace(localGitUsername) ? "rdo" : localGitUsername.Trim();
@@ -3841,7 +3849,7 @@ namespace Rosenvall.DevOps.Api
                                claimName: rosenvall-devops-codex-home
                          initContainers:
                            - name: prepare-codex-home
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsUser: 0
@@ -3871,7 +3879,7 @@ namespace Rosenvall.DevOps.Api
                                  if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
                          containers:
                            - name: runner
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsNonRoot: true
@@ -4366,13 +4374,14 @@ namespace Rosenvall.DevOps.Api
 
     public static class RepositoryPreviewPromotionJobManifestRenderer
     {
-        public static string Render(ImplementationRunDto run, RepositoryDto repository, WorkItemDetailDto context, IReadOnlyList<PreviewSourceFile> sourceFiles, string githubSecretName, string? forgejoApiBaseUrl = null, string? localGitUsername = null)
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, WorkItemDetailDto context, IReadOnlyList<PreviewSourceFile> sourceFiles, string githubSecretName, string? forgejoApiBaseUrl = null, string? localGitUsername = null, string? runnerImage = null)
         {
             var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
             var repositoryProvider = repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) ? "LocalGit" : "GitHub";
             var forgejoApi = string.IsNullOrWhiteSpace(forgejoApiBaseUrl) ? "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/api/v1" : forgejoApiBaseUrl.Trim().TrimEnd('/');
             var forgejoUser = string.IsNullOrWhiteSpace(localGitUsername) ? "rdo" : localGitUsername.Trim();
+            var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
             var githubTokenEnv = repositoryProvider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase)
                 ? ""
                 : string.Join('\n',
@@ -4406,7 +4415,7 @@ namespace Rosenvall.DevOps.Api
                              type: RuntimeDefault
                          containers:
                            - name: runner
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsNonRoot: true
@@ -4593,13 +4602,14 @@ namespace Rosenvall.DevOps.Api
 
     public static class RepositoryPullRequestReviewFixJobManifestRenderer
     {
-        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, IReadOnlyList<PullRequestReviewCommentDto> comments, string model, string? reasoningEffort, string githubSecretName, AiSessionDto? aiSession = null, string? sandboxMode = null, string? forgejoApiBaseUrl = null, string? localGitUsername = null)
+        public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, IReadOnlyList<PullRequestReviewCommentDto> comments, string model, string? reasoningEffort, string githubSecretName, AiSessionDto? aiSession = null, string? sandboxMode = null, string? forgejoApiBaseUrl = null, string? localGitUsername = null, string? runnerImage = null)
         {
             var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
             var forgejoApi = string.IsNullOrWhiteSpace(forgejoApiBaseUrl) ? "http://rosenvall-devops-forgejo.rosenvall-devops.svc.cluster.local:3000/api/v1" : forgejoApiBaseUrl.Trim().TrimEnd('/');
             var forgejoUser = string.IsNullOrWhiteSpace(localGitUsername) ? "rdo" : localGitUsername.Trim();
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
+            var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, aiRun, context, comments)));
             var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
                 ? $"codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
@@ -4642,7 +4652,7 @@ namespace Rosenvall.DevOps.Api
                                claimName: rosenvall-devops-codex-home
                          initContainers:
                            - name: prepare-codex-home
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsUser: 0
@@ -4670,7 +4680,7 @@ namespace Rosenvall.DevOps.Api
                                  chmod 700 /app/codex-home/tmp
                          containers:
                            - name: runner
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsNonRoot: true
@@ -4899,7 +4909,7 @@ namespace Rosenvall.DevOps.Api
             ["rosenvall.devops/repository-cleanup-run"] = run.Id.ToString()
         };
 
-        public static string Render(RepositoryCleanupRunDto run, RepositoryDto repository, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName, string? sandboxMode = null)
+        public static string Render(RepositoryCleanupRunDto run, RepositoryDto repository, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName, string? sandboxMode = null, string? runnerImage = null)
         {
             var jobName = JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
@@ -4907,6 +4917,7 @@ namespace Rosenvall.DevOps.Api
             var sourceDiff = Convert.ToBase64String(Encoding.UTF8.GetBytes(run.SourcePullRequestDiff ?? ""));
             var allowedPaths = Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join('\n', context.BoardContext?.GitOpsSettings?.AllowedPaths ?? [])));
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
+            var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -4945,7 +4956,7 @@ namespace Rosenvall.DevOps.Api
                                claimName: rosenvall-devops-codex-home
                          initContainers:
                            - name: prepare-codex-home
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsUser: 0
@@ -4975,7 +4986,7 @@ namespace Rosenvall.DevOps.Api
                                  if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
                          containers:
                            - name: runner
-                             image: ghcr.io/carnufex/rosenvall-devops-api:main
+                             image: {{Escape(image)}}
                              imagePullPolicy: Always
                              securityContext:
                                runAsNonRoot: true
@@ -11153,7 +11164,7 @@ namespace Rosenvall.DevOps.Api
     public static class PreviewSourceJobManifestRenderer
     {
         public const string Namespace = RepositoryImplementationJobManifestRenderer.Namespace;
-        public const string DefaultRunnerImage = "ghcr.io/carnufex/rosenvall-devops-api:main";
+        public static string DefaultRunnerImage => CodexKubernetesRunner.DefaultRunnerImage;
         private const string PartOf = "rosenvall-devops-preview-source";
 
         public static string JobName(AiRun run, WorkItemDetailDto context) =>
@@ -11170,7 +11181,7 @@ namespace Rosenvall.DevOps.Api
             var seed = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(seedFiles)));
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(PreviewSourcePromptBuilder.BuildImplementationPrompt(run, context)));
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
-            var image = string.IsNullOrWhiteSpace(runnerImage) ? DefaultRunnerImage : runnerImage.Trim();
+            var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -15055,6 +15066,7 @@ namespace Rosenvall.DevOps.Api
                 var aiSession = _aiSessions.SingleOrDefault(session => session.WorkItemId == run.WorkItemId);
                 var model = aiRun.Model;
                 var reasoningEffort = aiRun.ReasoningEffort ?? aiSession?.ReasoningEffort ?? configuration["Ai:Codex:ReasoningEffort"] ?? "high";
+                var runnerImage = CodexKubernetesRunner.RunnerImage(configuration);
                 var secret = string.IsNullOrWhiteSpace(githubSecretName)
                     ? configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github"
                     : githubSecretName.Trim();
@@ -15088,7 +15100,7 @@ namespace Rosenvall.DevOps.Api
                     var preview = _previews.SingleOrDefault(entry => entry.Id == run.SourcePreviewId && entry.WorkItemId == run.WorkItemId) ??
                         _previews.SingleOrDefault(entry => entry.WorkItemId == run.WorkItemId);
                     return preview?.SourceFiles is { Count: > 0 } sourceFiles
-                        ? RepositoryPreviewPromotionJobManifestRenderer.Render(run, repository, context, sourceFiles, secret, ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo")
+                        ? RepositoryPreviewPromotionJobManifestRenderer.Render(run, repository, context, sourceFiles, secret, ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo", runnerImage)
                         : null;
                 }
 
@@ -15100,11 +15112,11 @@ namespace Rosenvall.DevOps.Api
                             !string.Equals(comment.Status, "resolved", StringComparison.OrdinalIgnoreCase))
                         .ToArray();
                     return comments.Length > 0
-                        ? RepositoryPullRequestReviewFixJobManifestRenderer.Render(run, repository, aiRun, context, comments, model, reasoningEffort, secret, aiSession, CodexKubernetesRunner.SandboxMode(configuration), ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo")
+                        ? RepositoryPullRequestReviewFixJobManifestRenderer.Render(run, repository, aiRun, context, comments, model, reasoningEffort, secret, aiSession, CodexKubernetesRunner.SandboxMode(configuration), ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo", runnerImage)
                         : null;
                 }
 
-                return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, reasoningEffort, secret, aiSession, boardSecrets, CodexKubernetesRunner.SandboxMode(configuration), ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo");
+                return RepositoryImplementationJobManifestRenderer.Render(run, repository, aiRun, context, model, reasoningEffort, secret, aiSession, boardSecrets, CodexKubernetesRunner.SandboxMode(configuration), ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo", runnerImage);
             }
         }
 
@@ -15127,10 +15139,11 @@ namespace Rosenvall.DevOps.Api
 
                 var model = configuration["Ai:Codex:Model"] ?? "gpt-5.5";
                 var reasoningEffort = configuration["Ai:Codex:ReasoningEffort"] ?? "high";
+                var runnerImage = CodexKubernetesRunner.RunnerImage(configuration);
                 var secret = string.IsNullOrWhiteSpace(githubSecretName)
                     ? configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github"
                     : githubSecretName.Trim();
-                return RepositoryCleanupJobManifestRenderer.Render(run, repository, context, model, reasoningEffort, secret, CodexKubernetesRunner.SandboxMode(configuration));
+                return RepositoryCleanupJobManifestRenderer.Render(run, repository, context, model, reasoningEffort, secret, CodexKubernetesRunner.SandboxMode(configuration), runnerImage);
             }
         }
 
