@@ -2298,6 +2298,23 @@ public sealed class DevOpsStoreTests
         Assert.True(GitHubWebhookSignatureVerifier.Verify(payload, signature, secret));
     }
 
+    [Fact]
+    public void Browser_and_webhook_security_helpers_live_in_security_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var webhookPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Security", "GitHubWebhookSignatureVerifier.cs");
+        var headersPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Security", "BrowserSecurityHeaders.cs");
+
+        Assert.DoesNotContain("class GitHubWebhookSignatureVerifier", program);
+        Assert.DoesNotContain("class BrowserSecurityHeaders", program);
+        Assert.True(File.Exists(webhookPath), "GitHub webhook signature verification should live in the Security module instead of Program.cs.");
+        Assert.True(File.Exists(headersPath), "Browser security header policy should live in the Security module instead of Program.cs.");
+
+        Assert.Contains("public static class GitHubWebhookSignatureVerifier", File.ReadAllText(webhookPath));
+        Assert.Contains("public static class BrowserSecurityHeaders", File.ReadAllText(headersPath));
+    }
+
     [Theory]
     [InlineData(null, "webhook-secret")]
     [InlineData("", "webhook-secret")]
