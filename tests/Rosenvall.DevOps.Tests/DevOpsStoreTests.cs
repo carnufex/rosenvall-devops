@@ -5529,6 +5529,21 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Authentication_mode_resolution_lives_in_auth_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var authModePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Auth", "AuthenticationMode.cs");
+
+        Assert.DoesNotContain("class AuthenticationMode", program);
+        Assert.True(File.Exists(authModePath), "AuthenticationMode should live in the Auth module instead of Program.cs.");
+
+        var authMode = File.ReadAllText(authModePath);
+        Assert.Contains("public static class AuthenticationMode", authMode);
+        Assert.Contains("public static Settings Resolve(IConfiguration configuration, bool isDevelopment)", authMode);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
