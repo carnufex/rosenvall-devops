@@ -1893,7 +1893,7 @@ const userManager = authSettings.enabled ? new UserManager({
   response_type: 'code',
   scope: 'openid profile email offline_access',
   automaticSilentRenew: true,
-  userStore: new WebStorageStateStore({ store: window.localStorage })
+  userStore: new WebStorageStateStore({ store: window.sessionStorage })
 }) : null;
 
 async function initializeAuth(): Promise<User> {

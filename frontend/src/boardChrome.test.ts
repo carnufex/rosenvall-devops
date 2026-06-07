@@ -309,6 +309,14 @@ test('delivery mutations no longer send client-supplied audit identity fields', 
   assert.doesNotMatch(appSource, /approvedBy: actor|discardedBy: actor/);
 });
 
+test('oidc auth tokens use session storage instead of persistent local storage', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+  const userManagerConfig = appSource.match(/const userManager = authSettings\.enabled \? new UserManager\(\{[\s\S]*?\}\) : null;/)?.[0] ?? '';
+
+  assert.match(userManagerConfig, /userStore: new WebStorageStateStore\(\{ store: window\.sessionStorage \}\)/);
+  assert.doesNotMatch(userManagerConfig, /userStore: new WebStorageStateStore\(\{ store: window\.localStorage \}\)/);
+});
+
 test('continuous pull request diff parser exposes file sections and commentable lines', () => {
   const parsed = parseUnifiedDiffForContinuousReview(`diff --git a/src/App.tsx b/src/App.tsx
 index 111..222 100644
