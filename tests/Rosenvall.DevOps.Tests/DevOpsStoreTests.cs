@@ -5765,6 +5765,21 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_has_shared_dotnet_build_policy()
+    {
+        var root = FindRepositoryRoot();
+        var propsPath = Path.Combine(root, "Directory.Build.props");
+
+        Assert.True(File.Exists(propsPath), "Shared .NET build settings should live in the repository root Directory.Build.props.");
+
+        var props = File.ReadAllText(propsPath);
+        Assert.Contains("<Nullable>enable</Nullable>", props);
+        Assert.Contains("<ImplicitUsings>enable</ImplicitUsings>", props);
+        Assert.Contains("<AnalysisLevel>latest</AnalysisLevel>", props);
+        Assert.Contains("<Deterministic>true</Deterministic>", props);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
