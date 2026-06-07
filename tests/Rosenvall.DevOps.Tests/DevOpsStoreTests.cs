@@ -525,6 +525,48 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Ai_plan_action_ledger_blocks_only_in_flight_duplicate_provider_calls()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Plan quota", "Avoid duplicate AI calls.", "Todo", "Medium", null));
+        var key = $"ai-plan:demo:{item.Id:N}:codex:gpt-5.5:high";
+
+        var first = store.StartAction("demo", board.Id, item.Id, "ai-plan", key, blockAfterRunCreation: false);
+        var duplicateWhileGenerating = store.StartAction("demo", board.Id, item.Id, "ai-plan", key, blockAfterRunCreation: false);
+
+        Assert.True(first.Started);
+        Assert.False(duplicateWhileGenerating.Started);
+        Assert.Equal(first.Action.Id, duplicateWhileGenerating.Action.Id);
+
+        var run = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Generated plan.", "high")!;
+        store.MarkActionRun(first.Action.Id, run.Id, "Completed");
+        var deliberateNewRequest = store.StartAction("demo", board.Id, item.Id, "ai-plan", key, blockAfterRunCreation: false);
+
+        Assert.True(deliberateNewRequest.Started);
+        Assert.NotEqual(first.Action.Id, deliberateNewRequest.Action.Id);
+    }
+
+    [Fact]
+    public void Ai_plan_endpoints_use_action_ledger_without_storing_revision_message_in_key()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var planEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"");
+        var reviseEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"");
+
+        Assert.Contains("store.StartAction(actorSubject, boardId, workItemId, \"ai-plan\"", planEndpoint);
+        Assert.Contains("blockAfterRunCreation: false", planEndpoint);
+        Assert.Contains("store.MarkActionRun(actionStart.Action.Id, run.Id, \"Completed\")", planEndpoint);
+        Assert.Contains("store.MarkActionFailed(actionStart.Action.Id, ex.Message)", planEndpoint);
+        Assert.Contains("store.StartAction(actorSubject, boardId, workItemId, \"ai-plan-revise\"", reviseEndpoint);
+        Assert.Contains("ShortActionHash(message)", program);
+        Assert.Contains("request.Message", reviseEndpoint);
+        Assert.DoesNotContain(":{message}", program);
+    }
+
+    [Fact]
     public void Local_git_implementation_run_clones_pushes_and_creates_forgejo_pull_request()
     {
         using var fixture = DevOpsStoreFixture.Create();

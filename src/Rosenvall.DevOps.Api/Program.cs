@@ -2124,19 +2124,34 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
         return BoardMutationForbidden();
     }
 
+    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+    var boardId = store.GetWorkItemBoardId(workItemId);
     var context = store.GetWorkItemDetail(workItemId);
-    if (context is null)
+    if (context is null || boardId is null)
     {
         return Results.NotFound();
     }
 
     string plan;
+    ActionStartResultDto? actionStart = null;
     try
     {
         var validated = AiModelPolicy.ValidatePlanningRequest(request, store.GetSettings(configuration, AuthenticatedSubjectOrNull(user)));
         if (validated is null)
         {
             return Results.Problem("Requested AI provider or model is not configured for planning.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var actionKey = AiPlanActionIdempotencyKey(actorSubject, workItemId, validated.Provider, validated.Model, validated.ReasoningEffort);
+        actionStart = store.StartAction(actorSubject, boardId, workItemId, "ai-plan", actionKey, blockAfterRunCreation: false);
+        if (!actionStart.Started)
+        {
+            return Results.Conflict(new
+            {
+                message = "AI plan generation is already running for this request.",
+                operationId = actionStart.Action.Id,
+                runId = actionStart.Action.RunId
+            });
         }
 
         plan = await planner.GeneratePlanAsync(validated.Provider, validated.Model, validated.ReasoningEffort, context, cancellationToken);
@@ -2149,13 +2164,28 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, Sta
     }
     catch (AiPlanProviderUnavailableException ex)
     {
+        if (actionStart is not null)
+        {
+            store.MarkActionFailed(actionStart.Action.Id, ex.Message);
+        }
+
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
     var run = store.StartAiPlan(workItemId, request.Provider, request.Model, plan, request.ReasoningEffort);
     if (run is null)
     {
+        if (actionStart is not null)
+        {
+            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+        }
+
         return Results.NotFound();
+    }
+
+    if (actionStart is not null)
+    {
+        store.MarkActionRun(actionStart.Action.Id, run.Id, "Completed");
     }
 
     await hub.Clients.All.SendAsync("aiRunChanged", run);
@@ -2174,28 +2204,51 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
         return Results.BadRequest("Revision message is required.");
     }
 
-    var actor = UserIdentityFromClaims(user).DisplayName;
-    var comment = store.AddComment(workItemId, actor, "Comment", request.Message);
-    if (comment is null)
-    {
-        return Results.NotFound();
-    }
-
-    await hub.Clients.All.SendAsync("commentAdded", comment);
-
+    var actorIdentity = UserIdentityFromClaims(user);
+    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+    var boardId = store.GetWorkItemBoardId(workItemId);
     var context = store.GetWorkItemDetail(workItemId);
-    if (context is null)
+    if (context is null || boardId is null)
     {
         return Results.NotFound();
     }
 
     string plan;
+    ActionStartResultDto? actionStart = null;
+    CommentDto? comment = null;
     try
     {
         var validated = AiModelPolicy.ValidatePlanningRequest(new StartAiPlanRequest(request.Provider, request.Model, request.ReasoningEffort), store.GetSettings(configuration, AuthenticatedSubjectOrNull(user)));
         if (validated is null)
         {
             return Results.Problem("Requested AI provider or model is not configured for planning.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var actionKey = AiPlanRevisionActionIdempotencyKey(actorSubject, workItemId, request.AiRunId, request.Message, validated.Provider, validated.Model, validated.ReasoningEffort);
+        actionStart = store.StartAction(actorSubject, boardId, workItemId, "ai-plan-revise", actionKey, blockAfterRunCreation: false);
+        if (!actionStart.Started)
+        {
+            return Results.Conflict(new
+            {
+                message = "AI plan revision is already running for this request.",
+                operationId = actionStart.Action.Id,
+                runId = actionStart.Action.RunId
+            });
+        }
+
+        comment = store.AddComment(workItemId, actorIdentity.DisplayName, "Comment", request.Message);
+        if (comment is null)
+        {
+            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+            return Results.NotFound();
+        }
+
+        await hub.Clients.All.SendAsync("commentAdded", comment);
+        context = store.GetWorkItemDetail(workItemId);
+        if (context is null)
+        {
+            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+            return Results.NotFound();
         }
 
         plan = await planner.GeneratePlanAsync(validated.Provider, validated.Model, validated.ReasoningEffort, context, cancellationToken);
@@ -2208,13 +2261,28 @@ api.MapPost("/work-items/{workItemId:guid}/ai-plan/revise", async (Guid workItem
     }
     catch (AiPlanProviderUnavailableException ex)
     {
+        if (actionStart is not null)
+        {
+            store.MarkActionFailed(actionStart.Action.Id, ex.Message);
+        }
+
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
     var run = store.StartAiPlan(workItemId, request.Provider, request.Model, plan, request.ReasoningEffort);
     if (run is null)
     {
+        if (actionStart is not null)
+        {
+            store.MarkActionFailed(actionStart.Action.Id, "Work item was not found.");
+        }
+
         return Results.NotFound();
+    }
+
+    if (actionStart is not null)
+    {
+        store.MarkActionRun(actionStart.Action.Id, run.Id, "Completed");
     }
 
     await hub.Clients.All.SendAsync("aiRunChanged", run);
@@ -2908,6 +2976,21 @@ static string ProviderSyncActionIdempotencyKey(string actor, Guid boardId, Guid 
 
     return $"provider-sync:{EffectiveActorSubject(actor).Trim()}:{boardId:N}:{sourceRepositoryId:N}:{(string.IsNullOrWhiteSpace(targetProvider) ? "provider" : targetProvider.Trim().ToLowerInvariant())}:{normalizedName}:{isPrivate.ToString().ToLowerInvariant()}";
 }
+
+static string AiPlanActionIdempotencyKey(string actor, Guid workItemId, string provider, string model, string? reasoningEffort) =>
+    $"ai-plan:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}";
+
+static string AiPlanRevisionActionIdempotencyKey(string actor, Guid workItemId, Guid? aiRunId, string message, string provider, string model, string? reasoningEffort) =>
+    $"ai-plan-revise:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{aiRunId?.ToString("N") ?? "latest"}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}:{ShortActionHash(message)}";
+
+static string NormalizeActionKeyPart(string? value)
+{
+    var normalized = Regex.Replace((string.IsNullOrWhiteSpace(value) ? "default" : value.Trim()).ToLowerInvariant(), "[^a-z0-9._-]+", "-").Trim('-', '.', '_');
+    return string.IsNullOrWhiteSpace(normalized) ? "default" : normalized;
+}
+
+static string ShortActionHash(string value) =>
+    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim()))).ToLowerInvariant()[..24];
 
 static bool IsUserAccount(GitHubIntegrationDto integration) =>
     integration.AccountType.Equals("User", StringComparison.OrdinalIgnoreCase);
@@ -13911,6 +13994,14 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public Guid? GetWorkItemBoardId(Guid workItemId)
+        {
+            lock (_lock)
+            {
+                return _items.SingleOrDefault(item => item.Id == workItemId)?.BoardId;
+            }
+        }
+
         public IReadOnlyList<AiRun> GetAiRuns(Guid workItemId)
         {
             lock (_lock)
@@ -14138,7 +14229,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public ActionStartResultDto StartAction(string actorSubject, Guid? boardId, Guid? workItemId, string operationKind, string idempotencyKey)
+        public ActionStartResultDto StartAction(string actorSubject, Guid? boardId, Guid? workItemId, string operationKind, string idempotencyKey, bool blockAfterRunCreation = true)
         {
             lock (_lock)
             {
@@ -14152,10 +14243,16 @@ namespace Rosenvall.DevOps.Api
                         string.Equals(action.IdempotencyKey, key, StringComparison.Ordinal))
                     .OrderByDescending(action => action.CreatedAt)
                     .FirstOrDefault();
-                if (existing is not null &&
-                    (existing.RunId is not null || !string.Equals(existing.Status, "Failed", StringComparison.OrdinalIgnoreCase)))
+                if (existing is not null)
                 {
-                    return new ActionStartResultDto(false, existing);
+                    var failed = string.Equals(existing.Status, "Failed", StringComparison.OrdinalIgnoreCase);
+                    var blocked = blockAfterRunCreation
+                        ? existing.RunId is not null || !failed
+                        : existing.RunId is null && !failed;
+                    if (blocked)
+                    {
+                        return new ActionStartResultDto(false, existing);
+                    }
                 }
 
                 var now = DateTimeOffset.UtcNow;
