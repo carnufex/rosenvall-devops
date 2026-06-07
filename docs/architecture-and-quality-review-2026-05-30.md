@@ -87,6 +87,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Closed the CORS observability slice. Startup now resolves allowed origins through `CorsConfiguration`, fails closed outside Development when `Frontend:AllowedOrigins` is missing or invalid, logs active origins at startup, and `/api/status` includes CORS diagnostics for operational verification.
 - 2026-06-07: Closed the LocalGit runner PR API failure-handling slice. Implementation and preview-promotion runners now capture Forgejo pull-request creation HTTP status, explicitly reject non-2xx responses, parse sanitized Forgejo JSON errors with `jq`, and avoid sed-based Forgejo PR response parsing in manifest tests.
 - 2026-06-07: Closed the preview source manifest-safety slice. `PreviewSourcePolicy` now rejects manifest-unsafe deployable paths, duplicate normalized source paths and duplicate ConfigMap keys while preserving allowed `src/` and `public/` preview assets.
+- 2026-06-07: Closed the credential-bearing git remote slice. Implementation, preview-promotion, PR review-fix and repository cleanup runner scripts now use an in-workspace `GIT_ASKPASS` helper for git clone/push instead of constructing `https://user:token@...` remotes, with manifest tests rejecting the old `auth_remote` patterns.
 - 2026-06-07: Continued the runtime monitor split by moving `ProviderSyncRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ProviderSyncRunMonitor.cs`, keeping provider-sync Job adoption and completion/failure polling out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `ImplementationRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ImplementationRunMonitor.cs`, keeping repository implementation and cleanup Job status polling, stuck-run diagnostics and realtime run updates out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `BoardPublicAppDeploymentReconciler` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs`, keeping public app deployment/readiness reconciliation, LocalGit merge gating and merged-PR source adoption out of `Program.cs`.
@@ -186,6 +187,8 @@ Recommended fix:
 
 ### P0: Provider-Sync Cleanup Misses Jobs And Token Secrets
 
+Status 2026-06-07: Closed. `RenderPipelineRunCleanupDocuments` switches on `run.Stage == "ProviderSync"` and deletes `RepositoryProviderSyncJobManifestRenderer.JobName(run)` plus `RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run)` in the implementation namespace. Regression tests cover work-item cleanup, board cleanup, generic pipeline fallback, and exclusion of unrelated shared platform credentials.
+
 Evidence:
 
 - Provider sync creates `RepositoryProviderSyncJobManifestRenderer.JobName(run)` and `RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run)` in `src/Rosenvall.DevOps.Api/Program.cs`.
@@ -209,6 +212,8 @@ Recommended fix:
 
 ### P1: Provider Sync Links Target Repository Before Sync Succeeds
 
+Status 2026-06-07: Closed. Provider-copy targets are linked with `SyncState = "PendingSync"` before the runner is queued, switch to `Ready` only from `MarkPipelineRunSucceeded`, and switch to `Failed` from `MarkPipelineRunFailed`; Source browsing disables non-ready links. Regression coverage exercises pending, failed and ready transitions.
+
 Evidence:
 
 - `POST /api/boards/{boardId}/repositories/sync-to-provider` creates the target provider repo, persists it in RDO, links it to the board, then creates the Kubernetes sync Secret and Job.
@@ -226,6 +231,8 @@ Recommended fix:
 - Add a repair action for failed runs: retry push to existing target or delete target if RDO owns it.
 
 ### P1: Credential-Bearing Git Remotes Are Built In Shell
+
+Status 2026-06-07: Closed for repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync runners. Git clone/push operations now use a temporary `GIT_ASKPASS` helper and keep `origin` set to the clean repository URL; regression tests reject `auth_remote` and `https://user:token@...` renderings.
 
 Evidence:
 

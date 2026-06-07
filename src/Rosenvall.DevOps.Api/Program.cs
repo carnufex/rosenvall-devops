@@ -3427,13 +3427,27 @@ namespace Rosenvall.DevOps.Api
                                  workspace="/tmp/rosenvall-workspace"
                                  mkdir -p "$workspace"
                                  json_escape() { printf '%s' "$1" | tr '\r\n' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+                                 cat > "$workspace/git-askpass.sh" <<'EOF'
+                                 #!/bin/sh
+                                 case "$1" in
+                                   *Username*) printf '%s' "${GIT_USERNAME:-x-access-token}" ;;
+                                   *Password*) printf '%s' "${GIT_PASSWORD:-}" ;;
+                                   *) printf '\n' ;;
+                                 esac
+                                 EOF
+                                 chmod 700 "$workspace/git-askpass.sh"
+                                 git_with_repository_credentials() {
+                                   provider="$1"
+                                   token="$2"
+                                   shift 2
+                                   username="x-access-token"
+                                   if [ "$provider" = "LocalGit" ]; then
+                                     username="$ROSENVALL_LOCAL_GIT_USERNAME"
+                                   fi
+                                   GIT_ASKPASS="$workspace/git-askpass.sh" GIT_TERMINAL_PROMPT=0 GIT_USERNAME="$username" GIT_PASSWORD="$token" "$@"
+                                 }
                                  echo "RDO_STEP=Cloning"
-                                 if [ "$ROSENVALL_REPOSITORY_PROVIDER" = "LocalGit" ]; then
-                                   auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#://#://${ROSENVALL_LOCAL_GIT_USERNAME}:${ROSENVALL_GIT_TOKEN}@#")"
-                                 else
-                                   auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${ROSENVALL_GIT_TOKEN}@github.com/#")"
-                                 fi
-                                 git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 git_with_repository_credentials "$ROSENVALL_REPOSITORY_PROVIDER" "$ROSENVALL_GIT_TOKEN" git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$ROSENVALL_REPOSITORY_URL" "$workspace/repo"
                                  cd "$workspace/repo"
                                   git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                   git config user.name "Rosenvall DevOps"
@@ -3511,8 +3525,7 @@ namespace Rosenvall.DevOps.Api
                                  commit="$(git rev-parse HEAD)"
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
-                                 git remote set-url origin "$auth_remote"
-                                 git push --set-upstream origin "$ROSENVALL_BRANCH"
+                                 git_with_repository_credentials "$ROSENVALL_REPOSITORY_PROVIDER" "$ROSENVALL_GIT_TOKEN" git push --set-upstream origin "$ROSENVALL_BRANCH"
                                  if [ "$ROSENVALL_REPOSITORY_PROVIDER" = "LocalGit" ]; then
                                    pr_title="$(json_escape "$commit_title")"
                                    pr_head="$(json_escape "$ROSENVALL_BRANCH")"
@@ -3942,13 +3955,27 @@ namespace Rosenvall.DevOps.Api
                                  workspace="/tmp/rosenvall-preview-pr-workspace"
                                  mkdir -p "$workspace"
                                  json_escape() { printf '%s' "$1" | tr '\r\n' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+                                 cat > "$workspace/git-askpass.sh" <<'EOF'
+                                 #!/bin/sh
+                                 case "$1" in
+                                   *Username*) printf '%s' "${GIT_USERNAME:-x-access-token}" ;;
+                                   *Password*) printf '%s' "${GIT_PASSWORD:-}" ;;
+                                   *) printf '\n' ;;
+                                 esac
+                                 EOF
+                                 chmod 700 "$workspace/git-askpass.sh"
+                                 git_with_repository_credentials() {
+                                   provider="$1"
+                                   token="$2"
+                                   shift 2
+                                   username="x-access-token"
+                                   if [ "$provider" = "LocalGit" ]; then
+                                     username="$ROSENVALL_LOCAL_GIT_USERNAME"
+                                   fi
+                                   GIT_ASKPASS="$workspace/git-askpass.sh" GIT_TERMINAL_PROMPT=0 GIT_USERNAME="$username" GIT_PASSWORD="$token" "$@"
+                                 }
                                  echo "RDO_STEP=Cloning"
-                                 if [ "$ROSENVALL_REPOSITORY_PROVIDER" = "LocalGit" ]; then
-                                   auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#://#://${ROSENVALL_LOCAL_GIT_USERNAME}:${ROSENVALL_GIT_TOKEN}@#")"
-                                 else
-                                   auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${ROSENVALL_GIT_TOKEN}@github.com/#")"
-                                 fi
-                                 git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 git_with_repository_credentials "$ROSENVALL_REPOSITORY_PROVIDER" "$ROSENVALL_GIT_TOKEN" git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$ROSENVALL_REPOSITORY_URL" "$workspace/repo"
                                  cd "$workspace/repo"
                                  git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                  git config user.name "Rosenvall DevOps"
@@ -3965,8 +3992,7 @@ namespace Rosenvall.DevOps.Api
                                  commit="$(git rev-parse HEAD)"
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
-                                 git remote set-url origin "$auth_remote"
-                                 git push --set-upstream origin "$ROSENVALL_BRANCH"
+                                 git_with_repository_credentials "$ROSENVALL_REPOSITORY_PROVIDER" "$ROSENVALL_GIT_TOKEN" git push --set-upstream origin "$ROSENVALL_BRANCH"
                                  if [ "$ROSENVALL_REPOSITORY_PROVIDER" = "LocalGit" ]; then
                                    pr_title="$(json_escape "$commit_title")"
                                    pr_head="$(json_escape "$ROSENVALL_BRANCH")"
@@ -4217,9 +4243,27 @@ namespace Rosenvall.DevOps.Api
                                  set -eu
                                  workspace="/tmp/rosenvall-review-fix-workspace"
                                  mkdir -p "$workspace"
+                                 cat > "$workspace/git-askpass.sh" <<'EOF'
+                                 #!/bin/sh
+                                 case "$1" in
+                                   *Username*) printf '%s' "${GIT_USERNAME:-x-access-token}" ;;
+                                   *Password*) printf '%s' "${GIT_PASSWORD:-}" ;;
+                                   *) printf '\n' ;;
+                                 esac
+                                 EOF
+                                 chmod 700 "$workspace/git-askpass.sh"
+                                 git_with_repository_credentials() {
+                                   provider="$1"
+                                   token="$2"
+                                   shift 2
+                                   username="x-access-token"
+                                   if [ "$provider" = "LocalGit" ]; then
+                                     username="$ROSENVALL_LOCAL_GIT_USERNAME"
+                                   fi
+                                   GIT_ASKPASS="$workspace/git-askpass.sh" GIT_TERMINAL_PROMPT=0 GIT_USERNAME="$username" GIT_PASSWORD="$token" "$@"
+                                 }
                                  echo "RDO_STEP=Cloning"
-                                 auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#://#://${ROSENVALL_LOCAL_GIT_USERNAME}:${ROSENVALL_GIT_TOKEN}@#")"
-                                 git clone --depth 1 --branch "$ROSENVALL_BRANCH" "$auth_remote" "$workspace/repo"
+                                 git_with_repository_credentials "LocalGit" "$ROSENVALL_GIT_TOKEN" git clone --depth 1 --branch "$ROSENVALL_BRANCH" "$ROSENVALL_REPOSITORY_URL" "$workspace/repo"
                                  cd "$workspace/repo"
                                  git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                  git config user.name "Rosenvall DevOps"
@@ -4252,8 +4296,7 @@ namespace Rosenvall.DevOps.Api
                                  commit="$(git rev-parse HEAD)"
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
-                                 git remote set-url origin "$auth_remote"
-                                 git push origin "$ROSENVALL_BRANCH"
+                                 git_with_repository_credentials "LocalGit" "$ROSENVALL_GIT_TOKEN" git push origin "$ROSENVALL_BRANCH"
                                  echo "RDO_STEP=PullRequestReady"
                                  echo "RDO_PULL_REQUEST_URL=$ROSENVALL_PULL_REQUEST_URL"
                                  echo "RDO_PULL_REQUEST_NUMBER=$ROSENVALL_PULL_REQUEST_NUMBER"
@@ -4522,9 +4565,27 @@ namespace Rosenvall.DevOps.Api
                                  workspace="/tmp/rosenvall-cleanup-workspace"
                                  mkdir -p "$workspace"
                                  json_escape() { printf '%s' "$1" | tr '\r\n' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+                                 cat > "$workspace/git-askpass.sh" <<'EOF'
+                                 #!/bin/sh
+                                 case "$1" in
+                                   *Username*) printf '%s' "${GIT_USERNAME:-x-access-token}" ;;
+                                   *Password*) printf '%s' "${GIT_PASSWORD:-}" ;;
+                                   *) printf '\n' ;;
+                                 esac
+                                 EOF
+                                 chmod 700 "$workspace/git-askpass.sh"
+                                 git_with_repository_credentials() {
+                                   provider="$1"
+                                   token="$2"
+                                   shift 2
+                                   username="x-access-token"
+                                   if [ "$provider" = "LocalGit" ]; then
+                                     username="$ROSENVALL_LOCAL_GIT_USERNAME"
+                                   fi
+                                   GIT_ASKPASS="$workspace/git-askpass.sh" GIT_TERMINAL_PROMPT=0 GIT_USERNAME="$username" GIT_PASSWORD="$token" "$@"
+                                 }
                                  echo "RDO_STEP=Cloning"
-                                 auth_remote="$(printf '%s' "$ROSENVALL_REPOSITORY_URL" | sed "s#https://github.com/#https://x-access-token:${GITHUB_TOKEN}@github.com/#")"
-                                 git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$auth_remote" "$workspace/repo"
+                                 git_with_repository_credentials "GitHub" "$GITHUB_TOKEN" git clone --depth 1 --branch "$ROSENVALL_DEFAULT_BRANCH" "$ROSENVALL_REPOSITORY_URL" "$workspace/repo"
                                  cd "$workspace/repo"
                                  git remote set-url origin "$ROSENVALL_REPOSITORY_URL"
                                  git config user.name "Rosenvall DevOps"
@@ -4573,8 +4634,7 @@ namespace Rosenvall.DevOps.Api
                                  commit="$(git rev-parse HEAD)"
                                  echo "RDO_COMMIT=$commit"
                                  echo "RDO_STEP=Pushing"
-                                 git remote set-url origin "$auth_remote"
-                                 git push --set-upstream origin "$ROSENVALL_BRANCH"
+                                 git_with_repository_credentials "GitHub" "$GITHUB_TOKEN" git push --set-upstream origin "$ROSENVALL_BRANCH"
                                  repo_owner="${ROSENVALL_REPOSITORY%%/*}"
                                  existing_pr_url="$(curl -fsS -G "https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" --data-urlencode "state=open" --data-urlencode "head=$repo_owner:$ROSENVALL_BRANCH" | sed -n 's/.*"html_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
                                  if [ -n "$existing_pr_url" ]; then
