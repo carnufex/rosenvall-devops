@@ -39,6 +39,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Capture release metadata
+        run: echo "BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
       - name: Build and push API
         uses: docker/build-push-action@v6
         with:
@@ -61,6 +64,8 @@ jobs:
             VITE_AUTH_CLIENT_ID=rosenvall-devops
             VITE_AUTH_REDIRECT_URI=https://devops.rosenvall.se/auth/callback
             VITE_AUTH_POST_LOGOUT_REDIRECT_URI=https://devops.rosenvall.se/
+            VITE_RELEASE_COMMIT_SHA=${{ env.COMMIT_SHA }}
+            VITE_RELEASE_BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }}
           tags: |
             ${{ env.IMAGE_PREFIX }}-frontend:main
             ${{ env.IMAGE_PREFIX }}-frontend:${{ env.COMMIT_SHA }}

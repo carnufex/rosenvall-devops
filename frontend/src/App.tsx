@@ -7,6 +7,7 @@ import { implementationActionState, isImplementationRunPendingStatus, repository
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import { createBoardRealtimeClient, realtimeRefreshPlan, removeRealtimeWorkItem, upsertRealtimeWorkItem, type RealtimeEvent } from './realtimeClient';
+import { frontendReleaseDiagnostics } from './releaseDiagnostics';
 import {
   Activity,
   Bot,
@@ -5737,7 +5738,8 @@ function SettingsView({ scope, settings, apiStatus, board, me, repositories, boa
           </div>
           <div className="release-diagnostics-grid">
             <label>API build<input value={`${shortReleaseValue(apiStatus.release.commitSha)} - ${apiStatus.release.buildTimestamp}`} readOnly /></label>
-            <label>Frontend build<input value={apiStatus.release.frontendImage} readOnly /></label>
+            <label>Frontend bundle<input value={`${shortReleaseValue(frontendReleaseDiagnostics.commitSha)} - ${frontendReleaseDiagnostics.buildTimestamp}`} readOnly /></label>
+            <label>Frontend image<input value={apiStatus.release.frontendImage} readOnly /></label>
             <label>API image<input value={apiStatus.release.apiImage} readOnly /></label>
             <label>Runner image<input value={apiStatus.release.runnerImage} readOnly /></label>
             <label>Version<input value={apiStatus.release.version} readOnly /></label>
@@ -5759,8 +5761,19 @@ function shortReleaseValue(value: string | null | undefined) {
 
 function releaseMismatchMessage(release: ReleaseDiagnosticsDto) {
   const apiSha = release.commitSha?.trim();
+  const frontendSha = frontendReleaseDiagnostics.commitSha?.trim();
   const frontendImage = release.frontendImage?.trim() ?? '';
-  if (!apiSha || apiSha === 'unknown' || !frontendImage || frontendImage === 'unknown') {
+  if (!apiSha || apiSha === 'unknown') {
+    return null;
+  }
+
+  if (frontendSha && frontendSha !== 'unknown') {
+    return frontendSha === apiSha
+      ? null
+      : 'Frontend bundle commit SHA does not match the API commit SHA. Verify the deployed frontend image if UI/API behavior looks out of sync.';
+  }
+
+  if (!frontendImage || frontendImage === 'unknown') {
     return null;
   }
 

@@ -1,5 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { execSync } from 'node:child_process';
+
+process.env.VITE_RELEASE_COMMIT_SHA ??= gitValue('git rev-parse HEAD');
+process.env.VITE_RELEASE_BUILD_TIMESTAMP ??= new Date().toISOString();
 
 export default defineConfig({
   plugins: [react()],
@@ -20,3 +24,11 @@ export default defineConfig({
     }
   }
 });
+
+function gitValue(command: string) {
+  try {
+    return execSync(command, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}

@@ -195,7 +195,8 @@ test('settings loads and renders release diagnostics from api status', () => {
   assert.match(appSource, /<SettingsView[\s\S]*apiStatus=\{shell\.apiStatus\}/);
   assert.match(appSource, /Release diagnostics/);
   assert.match(appSource, /API build/);
-  assert.match(appSource, /Frontend build/);
+  assert.match(appSource, /Frontend bundle/);
+  assert.match(appSource, /Frontend image/);
   assert.match(appSource, /Runner image/);
   assert.match(appSource, /release-diagnostics/);
 });
