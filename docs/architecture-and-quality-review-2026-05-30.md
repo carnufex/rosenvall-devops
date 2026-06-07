@@ -169,6 +169,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the demo sandbox policy slice by adding a central `UserAccessProfileDto` for actor capabilities. Demo users now get one policy surface for allowed workspaces, allowed repository providers, team/workspace creation, external repository linking, GitHub integration access and GitHub provider-copy permissions; board creation, provider sync, GitHub visibility and team creation checks consume that policy. Remaining follow-up: move the policy out of `DevOpsStore` into a dedicated authorization module as the backend split continues.
 - 2026-06-07: Closed the initial EF migration startup slice. API startup now calls `DevOpsStateDatabaseInitializer.MigrateAsync` instead of `EnsureCreatedAsync`, the API project carries an initial `InitialDevOpsState` EF migration for the snapshot `Documents` table, and the initializer baselines legacy SQLite/PostgreSQL databases that were previously created by `EnsureCreated` before applying future migrations.
 - 2026-06-07: Continued the `Program.cs` module split around persistence by moving `DevOpsStateDbContext` and `DevOpsStateDocument` into `src/Rosenvall.DevOps.Api/Persistence/DevOpsStatePersistence.cs`, leaving `Program.cs` with EF startup wiring while the persistence module owns the snapshot document types.
+- 2026-06-07: Closed the syntax-highlighting first-use-cost finding. `codeHighlight.ts` keeps a single lazy Shiki highlighter but loads only the language grammar dependencies needed for the requested file path, with regression coverage for TSX/JSX dependency loading, JSON single-language loading and plaintext no-language fallback.
 
 ## Priority Findings
 
@@ -2286,6 +2287,8 @@ Recommended fix:
 
 ### P2: Syntax Highlighting Loads All Languages On First Code View
 
+Status 2026-06-07: Closed. The highlighter is still lazily created on first code view, but language grammars are now loaded per requested file path through `languagesForHighlightPath`; TSX/JSX load their TypeScript/JavaScript dependencies, JSON loads only JSON, and plaintext loads no Shiki language definitions.
+
 Evidence:
 
 - `codeHighlight.ts` lazily creates a Shiki highlighter, but the first load imports all configured languages at once.
@@ -3502,6 +3505,8 @@ Recommended fix:
   - API restart adopts an already-complete provider-sync Job instead of leaving the run `Running`.
 
 ### P2: Syntax Highlighting Is Functionally Correct But Has A Large First-Use Cost
+
+Status 2026-06-07: Closed. `frontend/src/codeHighlight.ts` uses dynamic `@shikijs/langs/*` imports and `loadLanguage` per file language instead of preloading the entire supported language set, and frontend tests cover the dependency list plus tokenization line-count preservation.
 
 Evidence:
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { highlightCodeLines, languageForPath, plainHighlightedLines, splitCodeLines, splitDiffLineForHighlight } from './codeHighlight.ts';
+import { highlightCodeLines, languageForPath, languagesForHighlightPath, plainHighlightedLines, splitCodeLines, splitDiffLineForHighlight } from './codeHighlight.ts';
 
 function tokenText(line: Array<{ content: string }>): string {
   return line.map((token) => token.content).join('');
@@ -18,6 +18,13 @@ test('languageForPath maps common source paths to shiki languages', () => {
   assert.equal(languageForPath('scripts/start-local-demo.ps1'), 'powershell');
   assert.equal(languageForPath('Program.cs'), 'csharp');
   assert.equal(languageForPath('unknown.custom'), 'plaintext');
+});
+
+test('languagesForHighlightPath loads only the language dependencies needed for a file', () => {
+  assert.deepEqual(languagesForHighlightPath('src/App.tsx'), ['typescript', 'tsx']);
+  assert.deepEqual(languagesForHighlightPath('src/main.jsx'), ['javascript', 'jsx']);
+  assert.deepEqual(languagesForHighlightPath('package.json'), ['json']);
+  assert.deepEqual(languagesForHighlightPath('unknown.custom'), []);
 });
 
 test('splitCodeLines preserves the source line count including trailing blank lines', () => {

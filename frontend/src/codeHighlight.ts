@@ -55,6 +55,10 @@ export function languageForPath(path: string | null | undefined): string {
   return 'plaintext';
 }
 
+export function languagesForHighlightPath(path: string | null | undefined): string[] {
+  return languagesForHighlightLanguage(languageForPath(path));
+}
+
 export function splitCodeLines(content: string): string[] {
   return content.replace(/\r\n/g, '\n').split('\n');
 }
@@ -130,7 +134,7 @@ async function getHighlighter(): Promise<ShikiHighlighter> {
 }
 
 async function ensureLanguageLoaded(highlighter: ShikiHighlighter, language: string): Promise<void> {
-  const languages = languageDependencies[language] ?? [language];
+  const languages = languagesForHighlightLanguage(language);
   for (const entry of languages) {
     if (highlighter.getLoadedLanguages().includes(entry)) {
       continue;
@@ -152,4 +156,8 @@ async function ensureLanguageLoaded(highlighter: ShikiHighlighter, language: str
 
     await loadPromise;
   }
+}
+
+function languagesForHighlightLanguage(language: string): string[] {
+  return language === 'plaintext' ? [] : languageDependencies[language] ?? [language];
 }
