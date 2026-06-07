@@ -6,6 +6,7 @@ import { highlightCodeLines, plainHighlightedLines, splitDiffLineForHighlight, t
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
+import { createBoardRealtimeClient, realtimeRefreshPlan, removeRealtimeWorkItem, upsertRealtimeWorkItem, type RealtimeEvent } from './realtimeClient';
 import {
   Activity,
   Bot,
@@ -891,6 +892,8 @@ function App() {
   const [toasts, setToasts] = React.useState<ToastMessage[]>([]);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
   const [apiBanner, setApiBanner] = React.useState<string | null>(null);
+  const shellRef = React.useRef<ShellState>(shell);
+  const selectedRef = React.useRef<SelectedState>(selected);
   const [selectedAiProvider, setSelectedAiProviderState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiProviderStorageKey));
   const [selectedAiModel, setSelectedAiModelState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiModelStorageKey));
   const [selectedAiReasoning, setSelectedAiReasoningState] = React.useState<string | null>(() => window.localStorage.getItem(selectedAiReasoningStorageKey));
@@ -922,6 +925,14 @@ function App() {
     }
   }, []);
   const actor = auth.status === 'ready' ? auth.userName : 'Christopher Rosenvall';
+
+  React.useEffect(() => {
+    shellRef.current = shell;
+  }, [shell]);
+
+  React.useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
   const assigneeOptions = React.useMemo(
     () => buildAssigneeOptions(shell.status === 'ready' ? shell.board : null, shell.status === 'ready' ? shell.assignees : [], auth),
     [shell, auth]
@@ -1033,6 +1044,70 @@ function App() {
       await loadWorkItem(workItemId);
     }
   }, [loadShell, loadWorkItem]);
+
+  const handleRealtimeEvent = React.useCallback((event: RealtimeEvent) => {
+    const currentShell = shellRef.current;
+    if (currentShell.status !== 'ready') return;
+
+    const currentSelected = selectedRef.current;
+    const selectedWorkItemId = currentSelected.status === 'open' ? currentSelected.detail.item.id : null;
+    const plan = realtimeRefreshPlan(event.name, event.payload, currentShell.board.id, selectedWorkItemId);
+
+    const workItemPayload = plan.patchBoardWorkItem && isRealtimeWorkItemPayload(event.payload)
+      ? event.payload
+      : null;
+    if (workItemPayload) {
+      setShell((current) => {
+        if (current.status !== 'ready') return current;
+        const nextBoard = upsertRealtimeWorkItem(current.board, workItemPayload);
+        return {
+          ...current,
+          board: nextBoard,
+          boards: current.boards.map((board) => board.id === nextBoard.id ? nextBoard : board)
+        };
+      });
+      setSelected((current) => current.status === 'open' && current.detail.item.id === workItemPayload.id
+        ? { ...current, detail: { ...current.detail, item: { ...current.detail.item, ...workItemPayload } }, busy: false }
+        : current);
+    }
+
+    if (plan.removeBoardWorkItemId) {
+      setShell((current) => {
+        if (current.status !== 'ready') return current;
+        const nextBoard = removeRealtimeWorkItem(current.board, plan.removeBoardWorkItemId!);
+        return {
+          ...current,
+          board: nextBoard,
+          boards: current.boards.map((board) => board.id === nextBoard.id ? nextBoard : board)
+        };
+      });
+      if (selectedWorkItemId === plan.removeBoardWorkItemId) {
+        setSelected({ status: 'closed' });
+      }
+    }
+
+    if (plan.refreshSelectedWorkItem && selectedWorkItemId) {
+      void loadWorkItem(selectedWorkItemId);
+    }
+
+    if (plan.refreshShell) {
+      void loadShell(currentShell.board.id, { silentBusy: true });
+    }
+  }, [loadShell, loadWorkItem]);
+
+  React.useEffect(() => {
+    if (shell.status !== 'ready' || (auth.status !== 'ready' && auth.status !== 'disabled')) return;
+
+    const client = createBoardRealtimeClient({
+      boardId: shell.board.id,
+      getAccessToken: () => auth.status === 'ready' ? latestAccessToken(auth) : null,
+      onEvent: handleRealtimeEvent
+    });
+
+    return () => {
+      void client.stop();
+    };
+  }, [auth, handleRealtimeEvent, shell.status, shell.status === 'ready' ? shell.board.id : null]);
 
   const shouldPollOpenWorkItem = selected.status === 'open' && (
     isPreviewPendingStatus(selected.detail.preview?.status) ||
@@ -6736,6 +6811,14 @@ function moveCardInBoard(board: Board, id: string, status: string, sortOrder: nu
       return { ...column, items: next.map((item, index) => ({ ...item, sortOrder: index })) };
     })
   };
+}
+
+function isRealtimeWorkItemPayload(payload: unknown): payload is WorkItemSummary {
+  return typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    typeof (payload as { id?: unknown }).id === 'string' &&
+    typeof (payload as { status?: unknown }).status === 'string';
 }
 
 function allBoardItems(board: Board | null): WorkItemSummary[] {
