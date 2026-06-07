@@ -5579,6 +5579,22 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Resource_diagnostics_live_in_operations_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var operationsPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Operations", "ResourceDiagnostics.cs");
+
+        Assert.DoesNotContain("public static class ApiResourceDiagnosticsReader", program);
+        Assert.DoesNotContain("public static class ImplementationCapacityPreflight", program);
+        Assert.True(File.Exists(operationsPath), "API resource diagnostics and implementation capacity preflight should live in Operations/ResourceDiagnostics.cs instead of Program.cs.");
+
+        var operations = File.ReadAllText(operationsPath);
+        Assert.Contains("public static class ApiResourceDiagnosticsReader", operations);
+        Assert.Contains("public static class ImplementationCapacityPreflight", operations);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
