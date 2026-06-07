@@ -5514,6 +5514,19 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_base_image_uses_lockfile_and_npm_ci()
+    {
+        var root = FindRepositoryRoot();
+        var dockerfile = File.ReadAllText(Path.Combine(root, "preview-base", "Dockerfile"));
+        var lockfile = Path.Combine(root, "preview-base", "package-lock.json");
+
+        Assert.True(File.Exists(lockfile), "preview-base should commit package-lock.json so image rebuilds are reproducible.");
+        Assert.Contains("COPY preview-base/package.json preview-base/package-lock.json ./", dockerfile);
+        Assert.Contains("npm ci --no-audit --no-fund", dockerfile);
+        Assert.DoesNotContain("npm install --no-audit --no-fund", dockerfile);
+    }
+
+    [Fact]
     public void Ci_runs_frontend_tests_before_frontend_build()
     {
         var ci = File.ReadAllText(Path.Combine(FindRepositoryRoot(), ".github", "workflows", "ci.yml"));

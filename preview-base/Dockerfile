@@ -7,8 +7,8 @@ ENV NODE_ENV=development \
     npm_config_fund=false \
     npm_config_audit=false
 
-COPY preview-base/package.json ./package.json
-RUN npm install --no-audit --no-fund \
+COPY preview-base/package.json preview-base/package-lock.json ./
+RUN npm ci --no-audit --no-fund \
     && npm cache clean --force \
     && chown -R node:node /opt/rosenvall-preview
 

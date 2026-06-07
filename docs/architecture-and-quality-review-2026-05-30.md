@@ -57,6 +57,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued runner credential-boundary hardening by moving the implementation and PR review-fix Codex phase into the versioned `/opt/rdo-runner/lib.sh` helper. Those manifests now write only a per-run Codex command fragment and call `rdo_run_codex_without_repository_credentials`, which unsets repository tokens, removes Codex auth files during execution, classifies sandbox failures and centralizes Codex status handling before the runner restores repository credentials for validation/push/PR phases. Remaining follow-up: replace the shared-process helper with a launcher/broker or split-container contract so prompt-driven Codex never shares a container filesystem with reusable Codex auth material.
 - 2026-06-07: Fixed Kubernetes runner image drift for repository implementation, preview-promotion, PR review-fix and repository cleanup Jobs. Those manifests now use `Ai:Codex:KubernetesRunnerImage` when configured, matching preview-source behavior and keeping runner pods on the digest-pinned image selected by deployment config instead of falling back to mutable `:main`.
 - 2026-06-07: Started the Codex/preview dependency reproducibility slice by pinning the API/runner image Codex CLI install to `@openai/codex@0.137.0` and adding a Dockerfile regression test that rejects unpinned global Codex installs. Remaining follow-up in the same finding: add a `preview-base/package-lock.json`, switch preview-base to `npm ci`, and add explicit dependency-update automation.
+- 2026-06-07: Continued the Codex/preview dependency reproducibility slice by committing `preview-base/package-lock.json`, switching the preview-base image build from `npm install` to `npm ci`, and adding a regression test for the lockfile/Dockerfile contract. Remaining follow-up in the same finding: add explicit dependency-update automation for the pinned Codex CLI and preview-base dependency set.
 - 2026-06-07: Completed the public app readiness gate slice. Board public app deployment now separates Kubernetes apply from readiness, moves apps through `WaitingForReadiness`, reuses the Kubernetes deployment/pod health check before marking apps `Running`, and only exposes the app link while status is actually `Running`.
 - 2026-06-07: Closed the remaining public app readiness bypasses in direct PR approval and GitHub webhook handling. Those paths now record `WaitingForReadiness` after Kubernetes apply, while the reconciler performs readiness-gated LocalGit merge, preview cleanup and card completion so `Approve PR` no longer marks delivery done immediately after apply.
 - 2026-06-07: Extended runtime health checks for preview and public app routes. `PreviewEnvironmentOrchestrator.CheckHealthAsync` now requires the Service to exist with a cluster IP/ports and the Gateway API `HTTPRoute` to report `Accepted=True` before returning `Running`, with parser tests covering service readiness and rejected routes.
@@ -1003,12 +1004,12 @@ Recommended fix:
 
 ### P1: Codex And Preview Dependencies Are Not Fully Reproducible
 
-Status 2026-06-07: Partially closed. The API/runner Dockerfile now installs a pinned Codex CLI version, `@openai/codex@0.137.0`, with a regression test rejecting unpinned global Codex installs. `preview-base` still needs a lockfile and `npm ci`, and dependency update automation remains a follow-up.
+Status 2026-06-07: Mostly closed. The API/runner Dockerfile now installs a pinned Codex CLI version, `@openai/codex@0.137.0`, with a regression test rejecting unpinned global Codex installs. `preview-base` now commits `package-lock.json` and builds with `npm ci`, with a regression test covering the lockfile/Dockerfile contract. Remaining follow-up: add Renovate/Dependabot rules or an equivalent explicit update workflow for the pinned Codex CLI and preview-base dependency set.
 
 Evidence:
 
 - API Dockerfile used to run `npm install -g @openai/codex` without a version pin; this is now pinned to `@openai/codex@0.137.0`.
-- `preview-base/Dockerfile` runs `npm install` from `preview-base/package.json`, but there is no lockfile in `preview-base`.
+- `preview-base/Dockerfile` used to run `npm install` from `preview-base/package.json` without a lockfile; it now uses committed `preview-base/package-lock.json` and `npm ci`.
 - The frontend Dockerfile correctly uses `npm ci` with `package-lock.json`.
 
 Impact:
