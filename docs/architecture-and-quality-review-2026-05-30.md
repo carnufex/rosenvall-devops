@@ -83,6 +83,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the runtime/Kubernetes split by moving `IRuntimeSecretStore`, `GitHubUserAuthorizationTokenStore` and `KubernetesRuntimeSecretStore` into `src/Rosenvall.DevOps.Api/Runtime/RuntimeSecretStore.cs`, keeping runtime Secret Kubernetes API access out of `Program.cs` behind the existing store interface.
 - 2026-06-07: Continued the minimal API/feature module split by moving `GitOpsStatusReader` into `src/Rosenvall.DevOps.Api/Features/GitOps/GitOpsStatusReader.cs`, keeping ArgoCD Application parsing and actionable kubectl failure mapping out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `PreviewHealthMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/PreviewHealthMonitor.cs`, keeping preview readiness polling and timeout recovery out of `Program.cs`.
+- 2026-06-07: Closed the OAuth callback state persistence slice. GitHub App manifest and GitHub user authorization callback state now live in the snapshot-backed `DevOpsStore` with one-time consumption, a hosted expired-state cleanup service, and reload tests covering both flows so API restarts no longer lose in-flight OAuth state.
 - 2026-06-07: Continued the runtime monitor split by moving `ProviderSyncRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ProviderSyncRunMonitor.cs`, keeping provider-sync Job adoption and completion/failure polling out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `ImplementationRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ImplementationRunMonitor.cs`, keeping repository implementation and cleanup Job status polling, stuck-run diagnostics and realtime run updates out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `BoardPublicAppDeploymentReconciler` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs`, keeping public app deployment/readiness reconciliation, LocalGit merge gating and merged-PR source adoption out of `Program.cs`.
@@ -2876,6 +2877,8 @@ Recommended fix:
 - Add a test that markdown comments cannot render script/event attributes.
 
 ### P2: OAuth Callback State Is Process-Local
+
+Status 2026-06-07: Closed. GitHub manifest and user authorization callback state is now persisted through `DevOpsStore`, consumed once, TTL-cleaned by a hosted cleanup service, and covered by reload tests.
 
 Evidence:
 

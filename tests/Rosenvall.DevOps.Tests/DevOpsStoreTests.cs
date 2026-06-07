@@ -4914,6 +4914,59 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void GitHub_manifest_callback_state_survives_store_reload_and_is_one_time()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var state = fixture.Store.CreateGitHubManifestCallbackState();
+        var reopened = fixture.Reopen();
+
+        Assert.True(reopened.TryConsumeGitHubManifestCallbackState(state, TimeSpan.FromMinutes(20)));
+        Assert.False(reopened.TryConsumeGitHubManifestCallbackState(state, TimeSpan.FromMinutes(20)));
+    }
+
+    [Fact]
+    public void GitHub_user_authorization_callback_state_survives_store_reload_and_expires()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var state = fixture.Store.CreateGitHubUserAuthorizationCallbackState("authentik|crille", 123);
+        var reopened = fixture.Reopen();
+
+        Assert.True(reopened.TryConsumeGitHubUserAuthorizationCallbackState(state, TimeSpan.FromMinutes(20), out var authorizationState));
+        Assert.Equal("authentik|crille", authorizationState.ActorSubject);
+        Assert.Equal(123, authorizationState.InstallationId);
+        Assert.False(reopened.TryConsumeGitHubUserAuthorizationCallbackState(state, TimeSpan.FromMinutes(20), out _));
+
+        var expired = reopened.CreateGitHubUserAuthorizationCallbackState("authentik|crille", 456);
+        Assert.False(reopened.TryConsumeGitHubUserAuthorizationCallbackState(expired, TimeSpan.FromTicks(-1), out _));
+    }
+
+    [Fact]
+    public void GitHub_oauth_callback_state_cleanup_removes_expired_snapshot_state()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var manifestState = fixture.Store.CreateGitHubManifestCallbackState();
+        var userState = fixture.Store.CreateGitHubUserAuthorizationCallbackState("authentik|crille", 123);
+
+        Assert.Equal(2, fixture.Store.CleanupExpiredGitHubCallbackStates(TimeSpan.FromTicks(-1), TimeSpan.FromTicks(-1)));
+
+        var reopened = fixture.Reopen();
+        Assert.False(reopened.TryConsumeGitHubManifestCallbackState(manifestState, TimeSpan.FromMinutes(20)));
+        Assert.False(reopened.TryConsumeGitHubUserAuthorizationCallbackState(userState, TimeSpan.FromMinutes(20), out _));
+    }
+
+    [Fact]
+    public void GitHub_oauth_callback_state_cleanup_service_is_registered()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var cleanupService = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "GitHubCallbackStateCleanupService.cs"));
+
+        Assert.Contains("AddHostedService<GitHubCallbackStateCleanupService>()", program);
+        Assert.Contains("CleanupExpiredGitHubCallbackStates", cleanupService);
+        Assert.Contains("TimeSpan.FromMinutes(20)", cleanupService);
+    }
+
+    [Fact]
     public void GitHub_integrations_show_only_actor_owned_or_matching_authorized_personal_accounts()
     {
         using var fixture = DevOpsStoreFixture.Create();

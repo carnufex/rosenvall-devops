@@ -2,7 +2,6 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Rosenvall.DevOps.Api;
 using Rosenvall.DevOps.Core;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Claims;
@@ -70,6 +69,7 @@ builder.Services.AddHostedService<PreviewHealthMonitor>();
 builder.Services.AddHostedService<ImplementationRunMonitor>();
 builder.Services.AddHostedService<BoardPublicAppDeploymentReconciler>();
 builder.Services.AddHostedService<ProviderSyncRunMonitor>();
+builder.Services.AddHostedService<GitHubCallbackStateCleanupService>();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("frontend", policy =>
@@ -137,15 +137,13 @@ if (realtime.Enabled)
     }
 }
 
-var githubManifestStates = new ConcurrentDictionary<string, DateTimeOffset>(StringComparer.Ordinal);
 var githubManifestStateLifetime = TimeSpan.FromMinutes(20);
-var githubUserAuthorizationStates = new ConcurrentDictionary<string, GitHubUserAuthorizationState>(StringComparer.Ordinal);
 var githubUserAuthorizationStateLifetime = TimeSpan.FromMinutes(20);
 const string GitHubOrganizationRepositoryCreationDisabledMessage = "Organization repository creation is not enabled yet. Link an existing repository instead.";
 
-app.MapGet("/integrations/github/manifest/start", (GitHubRepositoryClient github) =>
+app.MapGet("/integrations/github/manifest/start", (DevOpsStore store, GitHubRepositoryClient github) =>
 {
-    var state = NewGitHubManifestState(githubManifestStates);
+    var state = store.CreateGitHubManifestCallbackState();
     return Results.Content(github.RenderManifestStartPage(state), "text/html; charset=utf-8");
 });
 
@@ -218,7 +216,7 @@ app.MapGet("/integrations/github/callback", async (string? code, long? installat
 {
     if (!string.IsNullOrWhiteSpace(code))
     {
-        if (!TryConsumeGitHubManifestState(githubManifestStates, state, githubManifestStateLifetime))
+        if (!store.TryConsumeGitHubManifestCallbackState(state, githubManifestStateLifetime))
         {
             return Results.Problem("GitHub App manifest callback state is missing or expired.", statusCode: StatusCodes.Status400BadRequest);
         }
@@ -240,13 +238,13 @@ app.MapGet("/integrations/github/callback", async (string? code, long? installat
             return Results.Problem(secretWrite.Message, statusCode: StatusCodes.Status502BadGateway);
         }
 
-        var installationState = NewGitHubManifestState(githubManifestStates);
+        var installationState = store.CreateGitHubManifestCallbackState();
         return Results.Redirect($"https://github.com/apps/{WebUtility.UrlEncode(app.Slug)}/installations/new?state={WebUtility.UrlEncode(installationState)}");
     }
 
     if (installation_id is { } installationId)
     {
-        if (!TryConsumeGitHubManifestState(githubManifestStates, state, githubManifestStateLifetime))
+        if (!store.TryConsumeGitHubManifestCallbackState(state, githubManifestStateLifetime))
         {
             return Results.Problem("GitHub App installation callback state is missing or expired.", statusCode: StatusCodes.Status400BadRequest);
         }
@@ -271,7 +269,7 @@ app.MapGet("/integrations/github/user-authorization/callback", async (string? co
         return RedirectGitHubUserAuthorizationFailure("GitHub user authorization callback is missing a code.");
     }
 
-    if (!TryConsumeGitHubUserAuthorizationState(githubUserAuthorizationStates, state, githubUserAuthorizationStateLifetime, out var authorizationState))
+    if (!store.TryConsumeGitHubUserAuthorizationCallbackState(state, githubUserAuthorizationStateLifetime, out var authorizationState))
     {
         return RedirectGitHubUserAuthorizationFailure("GitHub user authorization state is missing or expired. Start authorization again from Settings.");
     }
@@ -821,7 +819,7 @@ api.MapGet("/integrations/github/user-authorization/start", (long installationId
         return Results.Problem("GitHub App user authorization is not configured. Add GitHub App client ID and client secret to the API configuration.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
-    var state = NewGitHubUserAuthorizationState(githubUserAuthorizationStates, actorSubject, installationId);
+    var state = store.CreateGitHubUserAuthorizationCallbackState(actorSubject, installationId);
     return Results.Ok(new GitHubUserAuthorizationStartDto(github.BuildUserAuthorizationUrl(state)));
 });
 api.MapDelete("/integrations/github/{installationId:long}/user-authorization", async (long installationId, ClaimsPrincipal user, DevOpsStore store, GitHubUserAuthorizationTokenStore tokenStore, CancellationToken cancellationToken) =>
@@ -2927,53 +2925,6 @@ api.MapGet("/settings", async (ClaimsPrincipal user, DevOpsStore store, IConfigu
         await localGit.CheckReadinessAsync(cancellationToken)));
 
 app.Run();
-
-static string NewGitHubManifestState(ConcurrentDictionary<string, DateTimeOffset> states)
-{
-    var state = Guid.NewGuid().ToString("N");
-    states[state] = DateTimeOffset.UtcNow;
-    return state;
-}
-
-static bool TryConsumeGitHubManifestState(ConcurrentDictionary<string, DateTimeOffset> states, string? state, TimeSpan lifetime)
-{
-    var now = DateTimeOffset.UtcNow;
-    foreach (var stale in states.Where(entry => now - entry.Value > lifetime).Select(entry => entry.Key).ToArray())
-    {
-        states.TryRemove(stale, out _);
-    }
-
-    return !string.IsNullOrWhiteSpace(state) &&
-        states.TryRemove(state.Trim(), out var createdAt) &&
-        now - createdAt <= lifetime;
-}
-
-static string NewGitHubUserAuthorizationState(ConcurrentDictionary<string, GitHubUserAuthorizationState> states, string actorSubject, long installationId)
-{
-    var state = Guid.NewGuid().ToString("N");
-    states[state] = new GitHubUserAuthorizationState(actorSubject, installationId, DateTimeOffset.UtcNow);
-    return state;
-}
-
-static bool TryConsumeGitHubUserAuthorizationState(ConcurrentDictionary<string, GitHubUserAuthorizationState> states, string? state, TimeSpan lifetime, out GitHubUserAuthorizationState authorizationState)
-{
-    var now = DateTimeOffset.UtcNow;
-    foreach (var stale in states.Where(entry => now - entry.Value.CreatedAt > lifetime).Select(entry => entry.Key).ToArray())
-    {
-        states.TryRemove(stale, out _);
-    }
-
-    authorizationState = default!;
-    if (string.IsNullOrWhiteSpace(state) ||
-        !states.TryRemove(state.Trim(), out var value) ||
-        now - value.CreatedAt > lifetime)
-    {
-        return false;
-    }
-
-    authorizationState = value;
-    return true;
-}
 
 static IResult RedirectGitHubUserAuthorizationFailure(string message) =>
     Results.Redirect($"/?githubUserAuthorizationError={WebUtility.UrlEncode(SanitizeUserAuthorizationMessage(message))}#settings");
@@ -10537,6 +10488,8 @@ namespace Rosenvall.DevOps.Api
         private readonly List<GitHubIntegrationDto> _githubIntegrations = [];
         private readonly List<GitHubRepositoryCreationPolicyDto> _githubRepositoryCreationPolicies = [];
         private readonly List<GitHubUserAuthorizationDto> _githubUserAuthorizations = [];
+        private readonly List<GitHubManifestCallbackStateRecord> _githubManifestCallbackStates = [];
+        private readonly List<GitHubUserAuthorizationCallbackStateRecord> _githubUserAuthorizationCallbackStates = [];
         private readonly List<BoardSecretDto> _boardSecrets = [];
         private readonly List<AiSessionDto> _aiSessions = [];
         private readonly List<BoardGitOpsSettingsDto> _boardGitOpsSettings = [];
@@ -11527,6 +11480,122 @@ namespace Rosenvall.DevOps.Api
                 _githubUserAuthorizations.Add(authorization);
                 Persist();
                 return authorization;
+            }
+        }
+
+        public string CreateGitHubManifestCallbackState()
+        {
+            lock (_lock)
+            {
+                var state = Guid.NewGuid().ToString("N");
+                _githubManifestCallbackStates.Add(new GitHubManifestCallbackStateRecord(state, DateTimeOffset.UtcNow));
+                Persist();
+                return state;
+            }
+        }
+
+        public bool TryConsumeGitHubManifestCallbackState(string? state, TimeSpan lifetime)
+        {
+            lock (_lock)
+            {
+                var removedExpired = RemoveExpiredGitHubManifestCallbackStatesWithoutLock(lifetime);
+                if (string.IsNullOrWhiteSpace(state))
+                {
+                    if (removedExpired > 0)
+                    {
+                        Persist();
+                    }
+
+                    return false;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var normalized = state.Trim();
+                var index = _githubManifestCallbackStates.FindIndex(entry => entry.State.Equals(normalized, StringComparison.Ordinal));
+                if (index < 0)
+                {
+                    if (removedExpired > 0)
+                    {
+                        Persist();
+                    }
+
+                    return false;
+                }
+
+                var entry = _githubManifestCallbackStates[index];
+                _githubManifestCallbackStates.RemoveAt(index);
+                Persist();
+                return now - entry.CreatedAt <= lifetime;
+            }
+        }
+
+        public string CreateGitHubUserAuthorizationCallbackState(string actorSubject, long installationId)
+        {
+            lock (_lock)
+            {
+                var state = Guid.NewGuid().ToString("N");
+                var effectiveActor = EffectiveActorSubjectWithoutLock(actorSubject);
+                _githubUserAuthorizationCallbackStates.Add(new GitHubUserAuthorizationCallbackStateRecord(state, effectiveActor, installationId, DateTimeOffset.UtcNow));
+                Persist();
+                return state;
+            }
+        }
+
+        public bool TryConsumeGitHubUserAuthorizationCallbackState(string? state, TimeSpan lifetime, out GitHubUserAuthorizationState authorizationState)
+        {
+            lock (_lock)
+            {
+                authorizationState = default!;
+                var removedExpired = RemoveExpiredGitHubUserAuthorizationCallbackStatesWithoutLock(lifetime);
+                if (string.IsNullOrWhiteSpace(state))
+                {
+                    if (removedExpired > 0)
+                    {
+                        Persist();
+                    }
+
+                    return false;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var normalized = state.Trim();
+                var index = _githubUserAuthorizationCallbackStates.FindIndex(entry => entry.State.Equals(normalized, StringComparison.Ordinal));
+                if (index < 0)
+                {
+                    if (removedExpired > 0)
+                    {
+                        Persist();
+                    }
+
+                    return false;
+                }
+
+                var entry = _githubUserAuthorizationCallbackStates[index];
+                _githubUserAuthorizationCallbackStates.RemoveAt(index);
+                Persist();
+                if (now - entry.CreatedAt > lifetime)
+                {
+                    return false;
+                }
+
+                authorizationState = new GitHubUserAuthorizationState(entry.ActorSubject, entry.InstallationId, entry.CreatedAt);
+                return true;
+            }
+        }
+
+        public int CleanupExpiredGitHubCallbackStates(TimeSpan manifestLifetime, TimeSpan userAuthorizationLifetime)
+        {
+            lock (_lock)
+            {
+                var removed = RemoveExpiredGitHubManifestCallbackStatesWithoutLock(manifestLifetime) +
+                    RemoveExpiredGitHubUserAuthorizationCallbackStatesWithoutLock(userAuthorizationLifetime);
+                if (removed == 0)
+                {
+                    return 0;
+                }
+
+                Persist();
+                return removed;
             }
         }
 
@@ -17551,6 +17620,8 @@ namespace Rosenvall.DevOps.Api
             _githubIntegrations.AddRange(snapshot.GitHubIntegrations ?? []);
             _githubRepositoryCreationPolicies.AddRange(snapshot.GitHubRepositoryCreationPolicies ?? []);
             _githubUserAuthorizations.AddRange(snapshot.GitHubUserAuthorizations ?? []);
+            _githubManifestCallbackStates.AddRange(snapshot.GitHubManifestCallbackStates ?? []);
+            _githubUserAuthorizationCallbackStates.AddRange(snapshot.GitHubUserAuthorizationCallbackStates ?? []);
             _boardSecrets.AddRange(snapshot.BoardSecrets ?? []);
             _aiSessions.AddRange(snapshot.AiSessions ?? []);
             _boardGitOpsSettings.AddRange(snapshot.BoardGitOpsSettings ?? []);
@@ -17728,6 +17799,18 @@ namespace Rosenvall.DevOps.Api
             return changed;
         }
 
+        private int RemoveExpiredGitHubManifestCallbackStatesWithoutLock(TimeSpan lifetime)
+        {
+            var now = DateTimeOffset.UtcNow;
+            return _githubManifestCallbackStates.RemoveAll(entry => now - entry.CreatedAt > lifetime);
+        }
+
+        private int RemoveExpiredGitHubUserAuthorizationCallbackStatesWithoutLock(TimeSpan lifetime)
+        {
+            var now = DateTimeOffset.UtcNow;
+            return _githubUserAuthorizationCallbackStates.RemoveAll(entry => now - entry.CreatedAt > lifetime);
+        }
+
         private void Persist()
         {
             var snapshot = new DevOpsSnapshot(
@@ -17763,7 +17846,9 @@ namespace Rosenvall.DevOps.Api
                 _boardPublicApps.ToArray(),
                 _epicRuns.ToArray(),
                 _epicGoalRuns.ToArray(),
-                _actionLedger.ToArray());
+                _actionLedger.ToArray(),
+                _githubManifestCallbackStates.ToArray(),
+                _githubUserAuthorizationCallbackStates.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
             var jsonBytes = Encoding.UTF8.GetByteCount(json);
             var jsonHash = ComputeSnapshotHash(json);
@@ -17840,7 +17925,9 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardTeamAccessRecord(Guid BoardId, Guid TeamId, string Role);
     internal sealed record BoardRepositoryLinkRecord(Guid BoardId, Guid RepositoryId, bool IsPrimary, string ImplementationProfile, string SyncState = "Ready");
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null);
+    internal sealed record GitHubManifestCallbackStateRecord(string State, DateTimeOffset CreatedAt);
+    internal sealed record GitHubUserAuthorizationCallbackStateRecord(string State, string ActorSubject, long InstallationId, DateTimeOffset CreatedAt);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null, IReadOnlyList<GitHubManifestCallbackStateRecord>? GitHubManifestCallbackStates = null, IReadOnlyList<GitHubUserAuthorizationCallbackStateRecord>? GitHubUserAuthorizationCallbackStates = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null, string? PublicHostname = null, string ImplementationWorkflow = "");
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder, Guid? ParentWorkItemId = null, bool IsBug = false);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);
