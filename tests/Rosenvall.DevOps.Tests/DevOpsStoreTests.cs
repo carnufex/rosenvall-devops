@@ -4715,6 +4715,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RepositorySourceFeature.EscapeSourcePathForUrl", program);
         Assert.Contains("RepositorySourceFeature.BuildBoardSourceRepositories", program);
         Assert.Contains("RepositorySourceFeature.BuildCloneInfo", program);
+        Assert.Contains("RepositorySourceFeature.BuildCloneInfoDto", program);
         Assert.Contains("RepositorySourceFeature.NormalizeTargetProvider", program);
         Assert.Contains("RepositorySourceFeature.ProviderSyncActionIdempotencyKey", program);
         Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota", program);
@@ -4726,6 +4727,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("catch (RepositorySourceProviderException", feature);
         Assert.DoesNotContain("RepositorySourceReadResultAsync", program);
         Assert.DoesNotContain("new RepositorySourceRepositoryDto", program);
+        Assert.DoesNotContain("new RepositoryCloneInfoDto", program);
         Assert.DoesNotContain("static string NormalizeApiSourcePath", program);
         Assert.DoesNotContain("static string BuildCloneCommand", program);
         Assert.DoesNotContain("static string ProviderSyncActionIdempotencyKey", program);

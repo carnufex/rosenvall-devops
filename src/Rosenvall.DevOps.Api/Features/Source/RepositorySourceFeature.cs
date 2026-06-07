@@ -108,6 +108,23 @@ public static class RepositorySourceFeature
             explanation);
     }
 
+    public static RepositoryCloneInfoDto BuildCloneInfoDto(RepositoryDto repository)
+    {
+        var cloneInfo = BuildCloneInfo(repository.Id, repository.Provider, repository.RemoteUrl, repository.WebUrl);
+        return new RepositoryCloneInfoDto(
+            cloneInfo.RepositoryId,
+            cloneInfo.Provider,
+            cloneInfo.RunnerCloneUrl,
+            cloneInfo.CloneCommand,
+            cloneInfo.InternalOnly,
+            cloneInfo.Explanation,
+            cloneInfo.HumanCloneUrl,
+            cloneInfo.RunnerCloneUrl,
+            cloneInfo.WebUrl,
+            cloneInfo.RecommendedMode,
+            cloneInfo.Explanation);
+    }
+
     public static string NormalizeTargetProvider(string? provider) =>
         provider?.Trim() switch
         {

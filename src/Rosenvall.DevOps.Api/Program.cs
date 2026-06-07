@@ -1122,19 +1122,7 @@ api.MapGet("/repositories/{repositoryId:guid}/clone-info", (Guid repositoryId, C
         return Results.NotFound();
     }
 
-    var cloneInfo = RepositorySourceFeature.BuildCloneInfo(repository.Id, repository.Provider, repository.RemoteUrl, repository.WebUrl);
-    return Results.Ok(new RepositoryCloneInfoDto(
-        cloneInfo.RepositoryId,
-        cloneInfo.Provider,
-        cloneInfo.RunnerCloneUrl,
-        cloneInfo.CloneCommand,
-        cloneInfo.InternalOnly,
-        cloneInfo.Explanation,
-        cloneInfo.HumanCloneUrl,
-        cloneInfo.RunnerCloneUrl,
-        cloneInfo.WebUrl,
-        cloneInfo.RecommendedMode,
-        cloneInfo.Explanation));
+    return Results.Ok(RepositorySourceFeature.BuildCloneInfoDto(repository));
 });
 api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid boardId, SyncRepositoryToProviderRequest request, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, IRuntimeSecretStore runtimeSecrets, PipelineJobOrchestrator jobs, IConfiguration configuration, CancellationToken cancellationToken) =>
 {
