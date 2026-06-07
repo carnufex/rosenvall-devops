@@ -2979,6 +2979,8 @@ Recommended fix:
 
 ### P1: Nested Source Paths Are Escaped As One Path Segment
 
+Status 2026-06-07: Closed. GitHub and Forgejo source-content URLs now use `RepositorySourceFeature.EscapeSourcePathForUrl`, which splits repository paths into slash-separated segments, escapes each segment independently and rejoins with `/`. Regression coverage includes `src/App.tsx`, `.github/workflows/ci.yml` and `folder with space/file #1.ts`.
+
 Evidence:
 
 - Source tree/file endpoints call provider clients with normalized paths from `NormalizeApiSourcePath(...)`.

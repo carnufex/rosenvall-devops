@@ -20,6 +20,8 @@ public sealed class RepositorySourceFeatureTests
         Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature with space", "main"));
         Assert.Equal("src/App.tsx", RepositorySourceFeature.EscapeSourcePathForUrl("src/App.tsx"));
         Assert.Equal("src/App%20Shell.tsx", RepositorySourceFeature.EscapeSourcePathForUrl("src/App Shell.tsx"));
+        Assert.Equal(".github/workflows/ci.yml", RepositorySourceFeature.EscapeSourcePathForUrl(".github/workflows/ci.yml"));
+        Assert.Equal("folder%20with%20space/file%20%231.ts", RepositorySourceFeature.EscapeSourcePathForUrl("folder with space/file #1.ts"));
         Assert.Equal("git clone https://example.test/repo.git", RepositorySourceFeature.BuildCloneCommand("https://example.test/repo.git"));
         Assert.Equal("git clone \"https://example.test/repo with spaces.git\"", RepositorySourceFeature.BuildCloneCommand("https://example.test/repo with spaces.git"));
 
