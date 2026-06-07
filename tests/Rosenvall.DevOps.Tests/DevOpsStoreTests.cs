@@ -423,6 +423,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
         Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
         Assert.Contains("pr_http_code=\"$(curl -sS -o \"$pr_response_file\" -w \"%{http_code}\" -X POST \"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("if [ \"$pr_http_code\" -lt 200 ] || [ \"$pr_http_code\" -ge 300 ]; then", manifest);
         Assert.Contains("jq -r '.message // .error // .errors[0].message // empty'", manifest);
         Assert.Contains("pr_number=\"$(jq -r '.number // empty' \"$pr_response_file\")\"", manifest);
         Assert.Contains("pr_state=\"$(jq -r '.state // empty' \"$pr_response_file\")\"", manifest);
@@ -978,6 +979,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
         Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
         Assert.Contains("pr_http_code=\"$(curl -sS -o \"$pr_response_file\" -w \"%{http_code}\" -X POST \"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
+        Assert.Contains("if [ \"$pr_http_code\" -lt 200 ] || [ \"$pr_http_code\" -ge 300 ]; then", manifest);
         Assert.Contains("jq -r '.message // .error // .errors[0].message // empty'", manifest);
         Assert.Contains("pr_number=\"$(jq -r '.number // empty' \"$pr_response_file\")\"", manifest);
         Assert.Contains("pr_state=\"$(jq -r '.state // empty' \"$pr_response_file\")\"", manifest);

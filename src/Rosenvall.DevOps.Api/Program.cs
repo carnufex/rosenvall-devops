@@ -3521,9 +3521,7 @@ namespace Rosenvall.DevOps.Api
                                    forgejo_auth="$(printf '%s:%s' "$ROSENVALL_LOCAL_GIT_USERNAME" "$ROSENVALL_GIT_TOKEN" | base64 | tr -d '\n')"
                                    pr_response_file="$workspace/forgejo-pr-response.json"
                                    pr_http_code="$(curl -sS -o "$pr_response_file" -w "%{http_code}" -X POST "$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Basic $forgejo_auth" -H "Accept: application/json" -H "Content-Type: application/json" -d "$pr_payload")" || { echo "RDO_FAILURE=Forgejo pull request API request failed"; exit 21; }
-                                   case "$pr_http_code" in
-                                     2*) ;;
-                                     *)
+                                   if [ "$pr_http_code" -lt 200 ] || [ "$pr_http_code" -ge 300 ]; then
                                        forgejo_error="$(jq -r '.message // .error // .errors[0].message // empty' "$pr_response_file" 2>/dev/null | head -c 240)"
                                        if [ -n "$forgejo_error" ]; then
                                          echo "RDO_FAILURE=Forgejo pull request API failed: HTTP $pr_http_code: $forgejo_error"
@@ -3531,8 +3529,7 @@ namespace Rosenvall.DevOps.Api
                                          echo "RDO_FAILURE=Forgejo pull request API failed: HTTP $pr_http_code"
                                        fi
                                        exit 21
-                                       ;;
-                                   esac
+                                   fi
                                    pr_number="$(jq -r '.number // empty' "$pr_response_file")"
                                    pr_state="$(jq -r '.state // empty' "$pr_response_file")"
                                    if [ -n "$pr_number" ]; then
@@ -3983,9 +3980,7 @@ namespace Rosenvall.DevOps.Api
                                    forgejo_auth="$(printf '%s:%s' "$ROSENVALL_LOCAL_GIT_USERNAME" "$ROSENVALL_GIT_TOKEN" | base64 | tr -d '\n')"
                                    pr_response_file="$workspace/forgejo-pr-response.json"
                                    pr_http_code="$(curl -sS -o "$pr_response_file" -w "%{http_code}" -X POST "$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls" -H "Authorization: Basic $forgejo_auth" -H "Accept: application/json" -H "Content-Type: application/json" -d "$pr_payload")" || { echo "RDO_FAILURE=Forgejo pull request API request failed"; exit 21; }
-                                   case "$pr_http_code" in
-                                     2*) ;;
-                                     *)
+                                   if [ "$pr_http_code" -lt 200 ] || [ "$pr_http_code" -ge 300 ]; then
                                        forgejo_error="$(jq -r '.message // .error // .errors[0].message // empty' "$pr_response_file" 2>/dev/null | head -c 240)"
                                        if [ -n "$forgejo_error" ]; then
                                          echo "RDO_FAILURE=Forgejo pull request API failed: HTTP $pr_http_code: $forgejo_error"
@@ -3993,8 +3988,7 @@ namespace Rosenvall.DevOps.Api
                                          echo "RDO_FAILURE=Forgejo pull request API failed: HTTP $pr_http_code"
                                        fi
                                        exit 21
-                                       ;;
-                                   esac
+                                   fi
                                    pr_number="$(jq -r '.number // empty' "$pr_response_file")"
                                    pr_state="$(jq -r '.state // empty' "$pr_response_file")"
                                    if [ -n "$pr_number" ]; then

@@ -85,6 +85,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the runtime monitor split by moving `PreviewHealthMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/PreviewHealthMonitor.cs`, keeping preview readiness polling and timeout recovery out of `Program.cs`.
 - 2026-06-07: Closed the OAuth callback state persistence slice. GitHub App manifest and GitHub user authorization callback state now live in the snapshot-backed `DevOpsStore` with one-time consumption, a hosted expired-state cleanup service, and reload tests covering both flows so API restarts no longer lose in-flight OAuth state.
 - 2026-06-07: Closed the CORS observability slice. Startup now resolves allowed origins through `CorsConfiguration`, fails closed outside Development when `Frontend:AllowedOrigins` is missing or invalid, logs active origins at startup, and `/api/status` includes CORS diagnostics for operational verification.
+- 2026-06-07: Closed the LocalGit runner PR API failure-handling slice. Implementation and preview-promotion runners now capture Forgejo pull-request creation HTTP status, explicitly reject non-2xx responses, parse sanitized Forgejo JSON errors with `jq`, and avoid sed-based Forgejo PR response parsing in manifest tests.
 - 2026-06-07: Continued the runtime monitor split by moving `ProviderSyncRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ProviderSyncRunMonitor.cs`, keeping provider-sync Job adoption and completion/failure polling out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `ImplementationRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ImplementationRunMonitor.cs`, keeping repository implementation and cleanup Job status polling, stuck-run diagnostics and realtime run updates out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `BoardPublicAppDeploymentReconciler` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs`, keeping public app deployment/readiness reconciliation, LocalGit merge gating and merged-PR source adoption out of `Program.cs`.
@@ -2514,6 +2515,8 @@ Recommended fix:
 - Test runner scripts with shell-focused tests outside Kubernetes.
 
 ### P1: LocalGit API Calls Do Not Fail Reliably On HTTP Errors
+
+Status 2026-06-07: Closed. LocalGit implementation and preview-promotion runners now capture Forgejo PR creation response bodies plus HTTP status, fail explicitly on non-2xx responses with sanitized `RDO_FAILURE` output, and parse PR number/state/url with `jq` instead of sed.
 
 Evidence:
 
