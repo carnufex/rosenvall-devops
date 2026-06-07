@@ -240,6 +240,16 @@ test('preview tab keeps the inline terminal while logs remain full width', () =>
   assert.match(logsTab, /<WorkItemLogsTab/);
 });
 
+test('logs tab exposes copyable run correlation ids', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /runId: string/);
+  assert.match(appSource, /className="log-run-meta"/);
+  assert.match(appSource, /copyRunId/);
+  assert.match(appSource, /navigator\.clipboard\.writeText\(runId\)/);
+  assert.match(appSource, /Copy run id/);
+});
+
 test('starting preview delivery from ai tab can switch to preview tab', () => {
   const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
 

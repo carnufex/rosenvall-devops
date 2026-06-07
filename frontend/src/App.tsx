@@ -3813,6 +3813,15 @@ function WorkItemLogsTab({ aiRuns, selectedPlan, preview, implementationRuns, re
       </nav>
       {selectedRun && (
         <section className="log-run-detail">
+          <div className="log-run-meta">
+            <span>Run id <code>{selectedRun.runId}</code></span>
+            <button className="log-run-id-copy" type="button" onClick={() => void copyRunId(selectedRun.runId)} aria-label="Copy run id">
+              <Copy size={13} />Copy run id
+            </button>
+            {selectedRun.runKind && <span>Kind <code>{selectedRun.runKind}</code></span>}
+            {selectedRun.jobName && <span>Job <code>{selectedRun.jobName}</code></span>}
+            {selectedRun.podName && <span>Pod <code>{selectedRun.podName}</code></span>}
+          </div>
           <HorizontalStepSelector
             steps={selectedRun.steps}
             selectedStepKey={selectedStep?.key ?? null}
@@ -3829,6 +3838,14 @@ function WorkItemLogsTab({ aiRuns, selectedPlan, preview, implementationRuns, re
       )}
     </div>
   );
+}
+
+async function copyRunId(runId: string) {
+  try {
+    await navigator.clipboard.writeText(runId);
+  } catch {
+    // Copy support varies by browser context; the visible run id remains available.
+  }
 }
 
 function HorizontalStepSelector({ steps, selectedStepKey, onSelectStep }: { steps: WorkItemTabRun['steps']; selectedStepKey: string | null; onSelectStep: (key: string) => void }) {
@@ -3852,6 +3869,10 @@ function HorizontalStepSelector({ steps, selectedStepKey, onSelectStep }: { step
 
 type WorkItemLogRun = WorkItemTabRun & {
   terminalTitle: string;
+  runId: string;
+  runKind?: string | null;
+  jobName?: string | null;
+  podName?: string | null;
 };
 
 function buildWorkItemLogRuns(aiRuns: AiRun[], selectedPlan?: AiRun, preview?: PreviewDto | null, implementationRuns?: ImplementationRunDto[] | null, repositoryCleanupRuns?: RepositoryCleanupRunDto[] | null): WorkItemLogRun[] {
@@ -3860,6 +3881,8 @@ function buildWorkItemLogRuns(aiRuns: AiRun[], selectedPlan?: AiRun, preview?: P
   if (plan) {
     runs.push({
       id: `ai-${plan.id}`,
+      runId: plan.id,
+      runKind: 'ai-plan',
       title: `AI plan #${plan.sequenceNumber}`,
       terminalTitle: 'AI plan',
       status: plan.status,
@@ -3881,6 +3904,10 @@ function buildWorkItemLogRuns(aiRuns: AiRun[], selectedPlan?: AiRun, preview?: P
     if (sourceStep) {
       runs.push({
         id: `preview-source-${preview.id}`,
+        runId: preview.id,
+        runKind: 'preview-source',
+        jobName: preview.resourceName ?? null,
+        podName: preview.podName ?? null,
         title: 'Preview source',
         terminalTitle: 'Preview source',
         status: preview.status,
@@ -3890,6 +3917,10 @@ function buildWorkItemLogRuns(aiRuns: AiRun[], selectedPlan?: AiRun, preview?: P
     }
     runs.push({
       id: `preview-deploy-${preview.id}`,
+      runId: preview.id,
+      runKind: 'preview-deploy',
+      jobName: preview.resourceName ?? null,
+      podName: preview.podName ?? null,
       title: 'Preview deploy',
       terminalTitle: 'Preview deploy',
       status: preview.status,
@@ -3920,6 +3951,10 @@ function repositoryRunToLogRun(run: ImplementationRunDto, title: string): WorkIt
   const presentation = repositoryRunPresentation(run.status, run.runKind);
   return {
     id: `implementation-${run.id}`,
+    runId: run.id,
+    runKind: run.runKind ?? 'codex',
+    jobName: run.jobName ?? null,
+    podName: run.podName ?? null,
     title,
     terminalTitle: presentation.terminalTitle,
     status: run.status,
@@ -3932,6 +3967,10 @@ function repositoryCleanupRunToLogRun(run: RepositoryCleanupRunDto): WorkItemLog
   const presentation = repositoryRunPresentation(run.status);
   return {
     id: `cleanup-${run.id}`,
+    runId: run.id,
+    runKind: 'repository-cleanup',
+    jobName: run.jobName ?? null,
+    podName: run.podName ?? null,
     title: 'Cleanup',
     terminalTitle: 'Cleanup log',
     status: run.status,
