@@ -5595,6 +5595,22 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Kubernetes_runner_support_lives_in_runtime_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var runtimePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "KubernetesRunnerSupport.cs");
+
+        Assert.DoesNotContain("public static class KubernetesFailureClassifier", program);
+        Assert.DoesNotContain("public static class CodexKubernetesRunner", program);
+        Assert.True(File.Exists(runtimePath), "Kubernetes failure classification and Codex runner defaults should live in Runtime/KubernetesRunnerSupport.cs instead of Program.cs.");
+
+        var runtime = File.ReadAllText(runtimePath);
+        Assert.Contains("public static class KubernetesFailureClassifier", runtime);
+        Assert.Contains("public static class CodexKubernetesRunner", runtime);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
