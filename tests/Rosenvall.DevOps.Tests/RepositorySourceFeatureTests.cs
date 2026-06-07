@@ -16,6 +16,9 @@ public sealed class RepositorySourceFeatureTests
         Assert.Equal("0123456789abcdef0123456789abcdef01234567", RepositorySourceFeature.NormalizeSourceRef("0123456789abcdef0123456789abcdef01234567", "main"));
         Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature/../secret", "main"));
         Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("/feature", "main"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature/", "main"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature@{upstream}", "main"));
+        Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature\nnext", "main"));
         Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature.lock", "main"));
         Assert.Equal("", RepositorySourceFeature.NormalizeSourceRef("feature with space", "main"));
         Assert.Equal("src/App.tsx", RepositorySourceFeature.EscapeSourcePathForUrl("src/App.tsx"));

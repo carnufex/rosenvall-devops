@@ -96,6 +96,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Closed the credential-bearing git remote slice. Implementation, preview-promotion, PR review-fix and repository cleanup runner scripts now use an in-workspace `GIT_ASKPASS` helper for git clone/push instead of constructing `https://user:token@...` remotes, with manifest tests rejecting the old `auth_remote` patterns.
 - 2026-06-07: Continued the runner manifest hardening with a versioned shared shell library. Repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync Jobs now source `/opt/rdo-runner/lib.sh` from the API runner image for git credential handling, JSON escaping and changed-file collection; provider-sync also moved onto the configured digest-pinned runner image so it can use the same shared helpers.
 - 2026-06-07: Continued the runtime monitor split by moving `ProviderSyncRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ProviderSyncRunMonitor.cs`, keeping provider-sync Job adoption and completion/failure polling out of `Program.cs`.
+- 2026-06-07: Closed the Source ref validation finding. Source tree/file endpoints normalize read refs through `RepositorySourceFeature.NormalizeSourceRef`, accepting ordinary branch/tag/SHA values while rejecting whitespace-only refs, control characters, `..`, `@{`, leading/trailing slash and lockfile-style suffixes; regression coverage now includes those rejection cases.
 - 2026-06-07: Continued the runtime monitor split by moving `ImplementationRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ImplementationRunMonitor.cs`, keeping repository implementation and cleanup Job status polling, stuck-run diagnostics and realtime run updates out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `BoardPublicAppDeploymentReconciler` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs`, keeping public app deployment/readiness reconciliation, LocalGit merge gating and merged-PR source adoption out of `Program.cs`.
 - 2026-05-30: Started ticket 8 typed manifest assertions. Backend tests now parse selected Kubernetes runtime YAML with `YamlDotNet` for preview-promotion Jobs and provider-sync Jobs/Secrets, which caught and fixed provider-sync token Secret labels being rendered outside `metadata.labels`.
@@ -3079,6 +3080,8 @@ Recommended fix:
 - Add endpoint-level tests for Forgejo unavailable, invalid JSON and provider timeout so Source displays a targeted unavailable state rather than a 500.
 
 ### P2: Source APIs Need Explicit Ref Validation
+
+Status 2026-06-07: Closed. Source tree/file endpoints normalize read refs through `RepositorySourceFeature.NormalizeSourceRef` before provider calls, accepting ordinary branch/tag/SHA values while rejecting whitespace-only refs, control characters, `..`, `@{`, leading/trailing slash and lockfile-style suffixes. Regression tests cover the validation contract.
 
 Evidence:
 
