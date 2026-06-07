@@ -416,11 +416,39 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, D
         return Results.NotFound();
     }
 
+    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+    var actionKey = BoardCleanupActionIdempotencyKey(actorSubject, boardId);
+    var quota = ReadCleanupActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        boardId,
+        null,
+        "board-cleanup",
+        actionKey,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.CleanupActionKinds);
+    if (!actionStart.Started)
+    {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
+        return Results.Conflict(new
+        {
+            message = "Board cleanup is already running for this board.",
+            operationId = actionStart.Action?.Id,
+            runId = actionStart.Action?.RunId
+        });
+    }
+
     if (!string.IsNullOrWhiteSpace(manifest))
     {
         var cleanup = await previews.DeleteAsync(manifest, cancellationToken);
         if (!cleanup.Succeeded)
         {
+            store.MarkActionFailed(actionStart.Action!.Id, cleanup.Message);
             return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
         }
     }
@@ -431,6 +459,7 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, D
         var deleted = await localGit.DeleteRepositoryAsync(repository, cancellationToken);
         if (!deleted)
         {
+            store.MarkActionFailed(actionStart.Action!.Id, $"Local Git repository {repository.Owner}/{repository.Name} could not be deleted.");
             return Results.Problem($"Local Git repository {repository.Owner}/{repository.Name} could not be deleted. The board was kept so cleanup can be retried. Any Local Git repositories already deleted in this cleanup were removed from RDO metadata.", statusCode: StatusCodes.Status502BadGateway);
         }
 
@@ -439,6 +468,7 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, D
 
     if (!store.DeleteBoard(boardId, actor))
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Board was not found.");
         return Results.NotFound();
     }
 
@@ -489,7 +519,7 @@ api.MapPost("/repositories/github/onboarding-draft", async (GitHubRepositoryOnbo
     return Results.Ok(await onboarding.CreateDraftAsync(request, cancellationToken));
 });
 
-api.MapPost("/repositories/local", async (CreateLocalGitRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, CancellationToken cancellationToken) =>
+api.MapPost("/repositories/local", async (CreateLocalGitRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, IConfiguration configuration, CancellationToken cancellationToken) =>
 {
     var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
     if (!store.CanCreateRepository(actorSubject))
@@ -497,26 +527,56 @@ api.MapPost("/repositories/local", async (CreateLocalGitRepositoryRequest reques
         return RepositoryMutationForbidden();
     }
 
+    var actionKey = RepositoryCreationActionIdempotencyKey(actorSubject, "LocalGit", request.Name, request.Private);
+    var quota = ReadRepositoryCreationActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        null,
+        null,
+        "repository-creation",
+        actionKey,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.RepositoryCreationActionKinds);
+    if (!actionStart.Started)
+    {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
+        return Results.Conflict(new
+        {
+            message = "Repository creation is already queued or completed for this request.",
+            operationId = actionStart.Action?.Id,
+            repositoryId = actionStart.Action?.RunId
+        });
+    }
+
     if (!localGit.IsConfigured())
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Local Git repository creation is not configured.");
         return Results.Problem("Local Git repository creation is not configured. Forgejo is unavailable or missing its service token.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
     var files = RepositoryOnboardingDrafts.ValidateGuidanceFiles(request.Files);
     if (files.Count == 0)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "No onboarding guidance files were provided.");
         return Results.Problem("New local Git repositories require at least one editable onboarding guidance file.", statusCode: StatusCodes.Status400BadRequest);
     }
 
     var creation = await localGit.CreateRepositoryResultAsync(request, cancellationToken);
     if (!creation.Succeeded || creation.Repository is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
         return Results.Problem(creation.Message, statusCode: creation.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway);
     }
 
     var committed = await localGit.CommitRepositoryFilesAsync(creation.Repository, files, "Initialize repository guidance", cancellationToken);
     if (!committed)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Local Git onboarding guidance commit failed.");
         return Results.Problem("Local Git repository was created, but the onboarding guidance commit failed.", statusCode: StatusCodes.Status502BadGateway);
     }
 
@@ -529,11 +589,12 @@ api.MapPost("/repositories/local", async (CreateLocalGitRepositoryRequest reques
         creation.Repository.Owner,
         request.ImplementationProfile ?? creation.Repository.ImplementationProfile,
         request.ImplementationWorkflow ?? creation.Repository.ImplementationWorkflow));
+    store.MarkActionRun(actionStart.Action!.Id, repository.Id, "Completed");
 
     return Results.Created($"/api/repositories/{repository.Id}", new GitHubRepositoryCreateResponse(repository, request.RepositoryProfile, request.AiContext));
 });
 
-api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, CancellationToken cancellationToken) =>
+api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, GitHubRepositoryClient github, GitHubUserAuthorizationTokenStore userTokenStore, IConfiguration configuration, CancellationToken cancellationToken) =>
 {
     var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
     var resolvedInstallationId = request.InstallationId ?? store.GetDefaultGitHubInstallationId(actorSubject);
@@ -569,9 +630,36 @@ api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request
         return RepositoryMutationForbidden();
     }
 
+    var actionKey = RepositoryCreationActionIdempotencyKey(actorSubject, "GitHub", request.Name, request.Private);
+    var quota = ReadRepositoryCreationActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        null,
+        null,
+        "repository-creation",
+        actionKey,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.RepositoryCreationActionKinds);
+    if (!actionStart.Started)
+    {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
+        return Results.Conflict(new
+        {
+            message = "Repository creation is already queued or completed for this request.",
+            operationId = actionStart.Action?.Id,
+            repositoryId = actionStart.Action?.RunId
+        });
+    }
+
     var files = RepositoryOnboardingDrafts.ValidateGuidanceFiles(request.Files);
     if (files.Count == 0)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "No onboarding guidance files were provided.");
         return Results.Problem("New GitHub repositories require at least one editable onboarding guidance file.", statusCode: StatusCodes.Status400BadRequest);
     }
 
@@ -579,12 +667,14 @@ api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request
     var creation = await github.CreateRepositoryResultAsync(integration, creationRequest, tokenResult.Token, cancellationToken);
     if (!creation.Succeeded || creation.Repository is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
         return Results.Problem(creation.Message, statusCode: creation.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway);
     }
 
     var committed = await github.CommitRepositoryFilesAsync(creation.Repository, files, tokenResult.Token, "Initialize repository guidance", cancellationToken);
     if (!committed)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "GitHub onboarding guidance commit failed.");
         return Results.Problem("GitHub repository was created, but the onboarding guidance commit failed.", statusCode: StatusCodes.Status502BadGateway);
     }
 
@@ -597,6 +687,7 @@ api.MapPost("/repositories/github", async (CreateGitHubRepositoryRequest request
         creation.Repository.Owner,
         request.ImplementationProfile ?? creation.Repository.ImplementationProfile,
         request.ImplementationWorkflow ?? creation.Repository.ImplementationWorkflow));
+    store.MarkActionRun(actionStart.Action!.Id, repository.Id, "Completed");
 
     return Results.Created($"/api/repositories/{repository.Id}", new GitHubRepositoryCreateResponse(repository, request.RepositoryProfile, request.AiContext));
 });
@@ -1429,6 +1520,34 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
         .Where(run => !string.IsNullOrWhiteSpace(run.PullRequestUrl))
         .OrderByDescending(run => run.UpdatedAt)
         .FirstOrDefault();
+    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+    var actionKey = WorkItemCleanupActionIdempotencyKey(actorSubject, workItemId);
+    var quota = ReadCleanupActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        store.GetWorkItemBoardId(workItemId),
+        workItemId,
+        "work-item-cleanup",
+        actionKey,
+        blockAfterRunCreation: false,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.CleanupActionKinds);
+    if (!actionStart.Started)
+    {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
+        return Results.Conflict(new
+        {
+            message = "Work item cleanup is already running for this card.",
+            operationId = actionStart.Action?.Id,
+            runId = actionStart.Action?.RunId
+        });
+    }
+
     if (sourceRun is null)
     {
         var manifest = store.RenderWorkItemCleanupManifest(workItemId);
@@ -1438,12 +1557,14 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             if (!cleanup.Succeeded)
             {
                 store.RecordPreviewFailure(workItemId, "CleanupFailed", actor, cleanup.Message);
+                store.MarkActionFailed(actionStart.Action!.Id, cleanup.Message);
                 return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
             }
         }
 
         if (!store.DeleteWorkItem(workItemId, actor))
         {
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
             return Results.NotFound();
         }
 
@@ -1457,6 +1578,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
         var localPullRequest = await localGit.GetPullRequestAsync(repository, sourceRun.PullRequestUrl!, cancellationToken);
         if (localPullRequest is null)
         {
+            store.MarkActionFailed(actionStart.Action!.Id, "Could not read local pull request state.");
             return Results.Problem("Could not read local pull request state. The card was kept so cleanup can be retried.", statusCode: StatusCodes.Status502BadGateway);
         }
 
@@ -1466,6 +1588,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             var closed = await localGit.ClosePullRequestAsync(localPullRequest, cancellationToken);
             if (!closed)
             {
+                store.MarkActionFailed(actionStart.Action!.Id, "Could not close the open local pull request.");
                 return Results.Problem("Could not close the open local pull request. The card was kept so cleanup can be retried.", statusCode: StatusCodes.Status502BadGateway);
             }
         }
@@ -1477,12 +1600,14 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             if (!cleanup.Succeeded)
             {
                 store.RecordPreviewFailure(workItemId, "CleanupFailed", actor, cleanup.Message);
+                store.MarkActionFailed(actionStart.Action!.Id, cleanup.Message);
                 return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
             }
         }
 
         if (!store.DeleteWorkItem(workItemId, actor))
         {
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
             return Results.NotFound();
         }
 
@@ -1494,12 +1619,14 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     var token = integration is null ? github.ConfiguredToken : await github.CreateInstallationTokenAsync(integration.InstallationId, cancellationToken);
     if (repository is null || string.IsNullOrWhiteSpace(token))
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Could not resolve GitHub credentials for repository cleanup.");
         return Results.Problem("Could not resolve GitHub credentials for repository cleanup.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
     var pullRequest = await github.GetPullRequestAsync(sourceRun.PullRequestUrl!, token, cancellationToken);
     if (pullRequest is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Could not read source pull request state.");
         return Results.Problem("Could not read source pull request state. The card was kept so cleanup can be retried.", statusCode: StatusCodes.Status502BadGateway);
     }
 
@@ -1509,6 +1636,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
         var closed = await github.ClosePullRequestAsync(pullRequest, token, cancellationToken);
         if (!closed)
         {
+            store.MarkActionFailed(actionStart.Action!.Id, "Could not close the open implementation pull request.");
             return Results.Problem("Could not close the open implementation pull request. The card was kept so cleanup can be retried.", statusCode: StatusCodes.Status502BadGateway);
         }
 
@@ -1519,12 +1647,14 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             if (!cleanup.Succeeded)
             {
                 store.RecordPreviewFailure(workItemId, "CleanupFailed", actor, cleanup.Message);
+                store.MarkActionFailed(actionStart.Action!.Id, cleanup.Message);
                 return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
             }
         }
 
         if (!store.DeleteWorkItem(workItemId, actor))
         {
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
             return Results.NotFound();
         }
 
@@ -1541,12 +1671,14 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
             if (!cleanup.Succeeded)
             {
                 store.RecordPreviewFailure(workItemId, "CleanupFailed", actor, cleanup.Message);
+                store.MarkActionFailed(actionStart.Action!.Id, cleanup.Message);
                 return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
             }
         }
 
         if (!store.DeleteWorkItem(workItemId, actor))
         {
+            store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
             return Results.NotFound();
         }
 
@@ -1558,8 +1690,10 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     var cleanupRun = store.StartRepositoryCleanupRun(workItemId, sourceRun.Id, actor, "merged", diff);
     if (cleanupRun is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Repository cleanup run could not be started.");
         return Results.NotFound();
     }
+    store.MarkActionRun(actionStart.Action!.Id, cleanupRun.Id, "Queued");
 
     await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", cleanupRun);
     var secretName = RepositoryCleanupJobManifestRenderer.GitHubTokenSecretName(cleanupRun);
@@ -1572,6 +1706,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     if (!tokenSecretWrite.Succeeded)
     {
         var failed = store.UpdateRepositoryCleanupRun(cleanupRun.Id, "Failed", tokenSecretWrite.Message, tokenSecretWrite.Message);
+        store.MarkActionFailed(actionStart.Action!.Id, tokenSecretWrite.Message);
         await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", failed);
         return Results.Problem(tokenSecretWrite.Message, statusCode: StatusCodes.Status502BadGateway);
     }
@@ -1580,6 +1715,7 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     if (cleanupManifest is null)
     {
         var failed = store.UpdateRepositoryCleanupRun(cleanupRun.Id, "Failed", failureReason: "Repository cleanup manifest could not be rendered.");
+        store.MarkActionFailed(actionStart.Action!.Id, failed?.FailureReason ?? "Repository cleanup manifest could not be rendered.");
         return Results.Problem(failed?.FailureReason ?? "Repository cleanup manifest could not be rendered.", statusCode: StatusCodes.Status409Conflict);
     }
 
@@ -1587,11 +1723,13 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
     if (!apply.Succeeded)
     {
         var failed = store.UpdateRepositoryCleanupRun(cleanupRun.Id, "Failed", apply.Message, apply.Message);
+        store.MarkActionFailed(actionStart.Action!.Id, apply.Message);
         await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", failed);
         return Results.Problem(apply.Message, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var updated = store.UpdateRepositoryCleanupRun(cleanupRun.Id, "Cloning", apply.Message);
+    store.MarkActionRun(actionStart.Action!.Id, cleanupRun.Id, "Running");
     await hub.Clients.All.SendAsync("repositoryCleanupRunChanged", updated);
     var detail = store.GetWorkItemDetail(workItemId);
     if (detail is not null)
@@ -3168,6 +3306,15 @@ static string PullRequestReviewFixActionIdempotencyKey(string actor, Guid workIt
 static string PreviewBuildActionIdempotencyKey(string actor, Guid workItemId) =>
     $"preview-build:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}";
 
+static string BoardCleanupActionIdempotencyKey(string actor, Guid boardId) =>
+    $"board-cleanup:{EffectiveActorSubject(actor).Trim()}:{boardId:N}";
+
+static string WorkItemCleanupActionIdempotencyKey(string actor, Guid workItemId) =>
+    $"work-item-cleanup:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}";
+
+static string RepositoryCreationActionIdempotencyKey(string actor, string provider, string? name, bool isPrivate) =>
+    $"repository-creation:{EffectiveActorSubject(actor).Trim()}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(name)}:{isPrivate.ToString().ToLowerInvariant()}";
+
 static string AiPlanActionIdempotencyKey(string actor, Guid workItemId, string provider, string model, string? reasoningEffort) =>
     $"ai-plan:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}";
 
@@ -3220,6 +3367,22 @@ static ExpensiveActionQuotaOptions ReadPreviewBuildActionQuota(IConfiguration co
     var enabled = configuration.GetValue("Actions:Quotas:PreviewBuild:Enabled", true);
     var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:PreviewBuild:MaxStartedPerActor", 6));
     var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:PreviewBuild:WindowSeconds", 900));
+    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+}
+
+static ExpensiveActionQuotaOptions ReadCleanupActionQuota(IConfiguration configuration)
+{
+    var enabled = configuration.GetValue("Actions:Quotas:Cleanup:Enabled", true);
+    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:Cleanup:MaxStartedPerActor", 4));
+    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:Cleanup:WindowSeconds", 900));
+    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+}
+
+static ExpensiveActionQuotaOptions ReadRepositoryCreationActionQuota(IConfiguration configuration)
+{
+    var enabled = configuration.GetValue("Actions:Quotas:RepositoryCreation:Enabled", true);
+    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:RepositoryCreation:MaxStartedPerActor", 3));
+    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:RepositoryCreation:WindowSeconds", 900));
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
 
@@ -3756,6 +3919,8 @@ namespace Rosenvall.DevOps.Api
         public static readonly IReadOnlyList<string> RepositoryImplementationActionKinds = ["repository-implementation"];
         public static readonly IReadOnlyList<string> PullRequestReviewFixActionKinds = ["pr-review-fix"];
         public static readonly IReadOnlyList<string> PreviewBuildActionKinds = ["preview-build"];
+        public static readonly IReadOnlyList<string> CleanupActionKinds = ["board-cleanup", "work-item-cleanup", "repository-cleanup"];
+        public static readonly IReadOnlyList<string> RepositoryCreationActionKinds = ["repository-creation"];
     }
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);

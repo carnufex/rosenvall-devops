@@ -782,6 +782,92 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Repository_creation_action_ledger_enforces_per_actor_quota()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var firstKey = $"repository-creation:demo:localgit:{Guid.NewGuid():N}:true";
+        var secondKey = $"repository-creation:demo:localgit:{Guid.NewGuid():N}:true";
+
+        var first = store.StartAction("demo", null, null, "repository-creation", firstKey, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "repository-creation" });
+        var duplicate = store.StartAction("demo", null, null, "repository-creation", firstKey, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "repository-creation" });
+        var overQuota = store.StartAction("demo", null, null, "repository-creation", secondKey, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "repository-creation" });
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action!.Id, duplicate.Action!.Id);
+        Assert.False(overQuota.Started);
+        Assert.Null(overQuota.Action);
+        Assert.Equal("QuotaExceeded", overQuota.BlockReason);
+    }
+
+    [Fact]
+    public void Repository_creation_endpoints_use_action_quota_before_creating_provider_repository()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var localEndpoint = EndpointSnippet(program, "api.MapPost(\"/repositories/local\"", "api.MapPost(\"/repositories/github\"");
+        var githubEndpoint = EndpointSnippet(program, "api.MapPost(\"/repositories/github\"", "api.MapGet(\"/me\"");
+
+        Assert.Contains("ReadRepositoryCreationActionQuota(configuration)", localEndpoint);
+        Assert.Contains("RepositoryCreationActionIdempotencyKey(actorSubject, \"LocalGit\", request.Name, request.Private)", localEndpoint);
+        Assert.Contains("ActionLedgerBlockReasons.RepositoryCreationActionKinds", localEndpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", localEndpoint);
+        Assert.True(localEndpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < localEndpoint.IndexOf("localGit.CreateRepositoryResultAsync", StringComparison.Ordinal));
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, repository.Id, \"Completed\")", localEndpoint);
+
+        Assert.Contains("ReadRepositoryCreationActionQuota(configuration)", githubEndpoint);
+        Assert.Contains("RepositoryCreationActionIdempotencyKey(actorSubject, \"GitHub\", request.Name, request.Private)", githubEndpoint);
+        Assert.Contains("ActionLedgerBlockReasons.RepositoryCreationActionKinds", githubEndpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", githubEndpoint);
+        Assert.True(githubEndpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < githubEndpoint.IndexOf("github.CreateRepositoryResultAsync", StringComparison.Ordinal));
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, repository.Id, \"Completed\")", githubEndpoint);
+    }
+
+    [Fact]
+    public void Cleanup_action_ledger_enforces_per_actor_quota()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Cleanup quota", "Avoid duplicate cleanup.", "Todo", "Medium", null));
+        var firstKey = $"work-item-cleanup:demo:{item.Id:N}";
+        var secondKey = $"board-cleanup:demo:{board.Id:N}";
+
+        var first = store.StartAction("demo", board.Id, item.Id, "work-item-cleanup", firstKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "work-item-cleanup", "board-cleanup", "repository-cleanup" });
+        var duplicate = store.StartAction("demo", board.Id, item.Id, "work-item-cleanup", firstKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "work-item-cleanup", "board-cleanup", "repository-cleanup" });
+        var overQuota = store.StartAction("demo", board.Id, null, "board-cleanup", secondKey, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "work-item-cleanup", "board-cleanup", "repository-cleanup" });
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action!.Id, duplicate.Action!.Id);
+        Assert.False(overQuota.Started);
+        Assert.Null(overQuota.Action);
+        Assert.Equal("QuotaExceeded", overQuota.BlockReason);
+    }
+
+    [Fact]
+    public void Cleanup_endpoints_use_action_quota_before_external_cleanup()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var boardEndpoint = EndpointSnippet(program, "api.MapPost(\"/boards/{boardId:guid}/delete-and-clean-up\"", "api.MapGet(\"/boards/{boardId:guid}/timeline\"");
+        var workItemEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/delete-and-clean-up\"", "api.MapPost(\"/work-items/{workItemId:guid}/cleanup-runs/adopt\"");
+
+        Assert.Contains("ReadCleanupActionQuota(configuration)", boardEndpoint);
+        Assert.Contains("BoardCleanupActionIdempotencyKey(actorSubject, boardId)", boardEndpoint);
+        Assert.Contains("ActionLedgerBlockReasons.CleanupActionKinds", boardEndpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", boardEndpoint);
+        Assert.True(boardEndpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < boardEndpoint.IndexOf("previews.DeleteAsync", StringComparison.Ordinal));
+
+        Assert.Contains("ReadCleanupActionQuota(configuration)", workItemEndpoint);
+        Assert.Contains("WorkItemCleanupActionIdempotencyKey(actorSubject, workItemId)", workItemEndpoint);
+        Assert.Contains("ActionLedgerBlockReasons.CleanupActionKinds", workItemEndpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", workItemEndpoint);
+        Assert.True(workItemEndpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < workItemEndpoint.IndexOf("previews.DeleteAsync", StringComparison.Ordinal));
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, cleanupRun.Id, \"Queued\")", workItemEndpoint);
+    }
+
+    [Fact]
     public void Ai_plan_action_ledger_blocks_only_in_flight_duplicate_provider_calls()
     {
         using var fixture = DevOpsStoreFixture.Create();
