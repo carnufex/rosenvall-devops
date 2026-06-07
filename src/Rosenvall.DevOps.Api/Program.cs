@@ -1039,7 +1039,7 @@ api.MapGet("/repositories/{repositoryId:guid}/source/tree", async (Guid reposito
 
     if (repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
     {
-        return await RepositorySourceReadResultAsync(
+        return await RepositorySourceFeature.ReadResultAsync(
             repository.Provider,
             () => localGit.GetSourceTreeAsync(repository, reference, sourcePath, cancellationToken),
             cancellationToken);
@@ -1056,7 +1056,7 @@ api.MapGet("/repositories/{repositoryId:guid}/source/tree", async (Guid reposito
         return RepositorySourceFeature.Problem(RepositorySourceFeature.GitHubSourceUnavailable());
     }
 
-    return await RepositorySourceReadResultAsync(
+    return await RepositorySourceFeature.ReadResultAsync(
         repository.Provider,
         () => github.GetSourceTreeAsync(repository, reference, sourcePath, token, cancellationToken),
         cancellationToken);
@@ -1087,7 +1087,7 @@ api.MapGet("/repositories/{repositoryId:guid}/source/file", async (Guid reposito
     }
     if (repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
     {
-        return await RepositorySourceReadResultAsync(
+        return await RepositorySourceFeature.ReadResultAsync(
             repository.Provider,
             () => localGit.GetSourceFileAsync(repository, reference, sourcePath, cancellationToken),
             cancellationToken);
@@ -1104,7 +1104,7 @@ api.MapGet("/repositories/{repositoryId:guid}/source/file", async (Guid reposito
         return RepositorySourceFeature.Problem(RepositorySourceFeature.GitHubSourceUnavailable());
     }
 
-    return await RepositorySourceReadResultAsync(
+    return await RepositorySourceFeature.ReadResultAsync(
         repository.Provider,
         () => github.GetSourceFileAsync(repository, reference, sourcePath, token, cancellationToken),
         cancellationToken);
@@ -3558,31 +3558,6 @@ static string? AuthenticatedSubjectOrNull(ClaimsPrincipal user) =>
 
 static string AuditActorFromClaims(ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated == true ? UserIdentityFromClaims(user).DisplayName : "system";
-
-static async Task<IResult> RepositorySourceReadResultAsync<T>(string provider, Func<Task<T?>> read, CancellationToken cancellationToken)
-    where T : class
-{
-    try
-    {
-        return await read() is { } value ? Results.Ok(value) : Results.NotFound();
-    }
-    catch (RepositorySourceProviderException ex)
-    {
-        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderRejectedRequest(ex.Provider, ex.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway, ex.Detail));
-    }
-    catch (JsonException ex)
-    {
-        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderBadResponse(provider, ex.Message));
-    }
-    catch (HttpRequestException ex)
-    {
-        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderUnavailable(provider, ex.Message));
-    }
-    catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-    {
-        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderUnavailable(provider, ex.Message));
-    }
-}
 
 static UserIdentityRequest UserIdentityFromClaims(ClaimsPrincipal user)
 {

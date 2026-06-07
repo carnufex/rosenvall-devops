@@ -4719,8 +4719,12 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RepositorySourceFeature.ProviderSyncActionIdempotencyKey", program);
         Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota", program);
         Assert.Contains("RepositorySourceFeature.BuildProviderSyncPipelineRunRequest", program);
-        Assert.Contains("RepositorySourceReadResultAsync", program);
+        Assert.Contains("RepositorySourceFeature.ReadResultAsync", program);
         Assert.True(File.Exists(featurePath), "Repository Source helpers should live in Features/Source/RepositorySourceFeature.cs.");
+        var feature = File.ReadAllText(featurePath);
+        Assert.Contains("ReadResultAsync", feature);
+        Assert.Contains("catch (RepositorySourceProviderException", feature);
+        Assert.DoesNotContain("RepositorySourceReadResultAsync", program);
         Assert.DoesNotContain("new RepositorySourceRepositoryDto", program);
         Assert.DoesNotContain("static string NormalizeApiSourcePath", program);
         Assert.DoesNotContain("static string BuildCloneCommand", program);

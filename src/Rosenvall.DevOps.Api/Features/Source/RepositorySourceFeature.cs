@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using System.Net;
+using System.Text.Json;
 
 namespace Rosenvall.DevOps.Api;
 
@@ -200,6 +201,31 @@ public static class RepositorySourceFeature
 
     public static IResult Problem(RepositorySourceProblem problem) =>
         Results.Problem(problem.Message, statusCode: problem.StatusCode);
+
+    public static async Task<IResult> ReadResultAsync<T>(string provider, Func<Task<T?>> read, CancellationToken cancellationToken)
+        where T : class
+    {
+        try
+        {
+            return await read() is { } value ? Results.Ok(value) : Results.NotFound();
+        }
+        catch (RepositorySourceProviderException ex)
+        {
+            return Problem(ProviderRejectedRequest(ex.Provider, ex.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway, ex.Detail));
+        }
+        catch (JsonException ex)
+        {
+            return Problem(ProviderBadResponse(provider, ex.Message));
+        }
+        catch (HttpRequestException ex)
+        {
+            return Problem(ProviderUnavailable(provider, ex.Message));
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            return Problem(ProviderUnavailable(provider, ex.Message));
+        }
+    }
 
     public static RepositorySourceProblem ProviderUnavailable(string provider, string? detail = null) =>
         new($"{NormalizeProviderName(provider)} source provider is unavailable{FormatDetail(detail)}", StatusCodes.Status503ServiceUnavailable);
