@@ -5769,14 +5769,24 @@ public sealed class DevOpsStoreTests
     {
         var root = FindRepositoryRoot();
         var propsPath = Path.Combine(root, "Directory.Build.props");
+        var editorConfigPath = Path.Combine(root, ".editorconfig");
 
         Assert.True(File.Exists(propsPath), "Shared .NET build settings should live in the repository root Directory.Build.props.");
+        Assert.True(File.Exists(editorConfigPath), "Repository formatting and analyzer conventions should live in the root .editorconfig.");
 
         var props = File.ReadAllText(propsPath);
         Assert.Contains("<Nullable>enable</Nullable>", props);
         Assert.Contains("<ImplicitUsings>enable</ImplicitUsings>", props);
         Assert.Contains("<AnalysisLevel>latest</AnalysisLevel>", props);
         Assert.Contains("<Deterministic>true</Deterministic>", props);
+
+        var editorConfig = File.ReadAllText(editorConfigPath);
+        Assert.Contains("root = true", editorConfig);
+        Assert.Contains("[*.cs]", editorConfig);
+        Assert.Contains("dotnet_style_qualification_for_field = false:suggestion", editorConfig);
+        Assert.Contains("csharp_style_namespace_declarations = file_scoped:suggestion", editorConfig);
+        Assert.Contains("[*.{ts,tsx,js,jsx,css,json,md}]", editorConfig);
+        Assert.Contains("indent_size = 2", editorConfig);
     }
 
     [Fact]
