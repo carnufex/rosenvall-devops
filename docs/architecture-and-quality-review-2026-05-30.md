@@ -108,6 +108,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-05-30: Completed the LocalGit runner API error handling slice from the twenty-fourth pass. LocalGit implementation and preview-promotion runners now check Forgejo PR creation HTTP status, parse response JSON with `jq`, emit sanitized `RDO_FAILURE` messages for non-2xx responses, and the API runner image installs `jq`.
 - 2026-05-30: Completed a Source provider capability slice. Board Source repository lists now include `sourceReadable` and `sourceUnavailableReason`, and the frontend keeps unsupported providers visible for clone/sync context while disabling tree/file loading with a clear message.
 - 2026-05-30: Completed the first CI coverage slice. The frontend GitHub Actions job now runs `npm test -- --runInBand` before `npm run build`, with a static regression test to keep that gate in place.
+- 2026-06-07: Closed the remaining runtime Secret apply-path gap. Board secrets, implementation/promotion repository tokens, cleanup tokens, provider-sync tokens and GitHub user authorization tokens now write through `IRuntimeSecretStore`/Kubernetes API create-or-replace instead of `kubectl apply`; runner renderers no longer expose applyable token Secret manifest helpers, and regression coverage rejects reintroducing those helpers or Secret `ApplyAsync` shortcuts.
 - 2026-05-30: Completed a Source ref-input stability slice. The Source page now keeps a draft ref while typing and only reloads repository trees after Enter/blur commits the normalized ref, reducing avoidable provider requests.
 - 2026-05-30: Completed the image-publish gating slice. The image publishing workflow now runs after successful `CI` via `workflow_run` (manual dispatch still allowed), checks out the tested commit SHA, and tags API/frontend/preview-base images with that tested SHA.
 - 2026-05-30: Completed the browser security headers slice. The API applies CSP, frame, MIME-sniffing, referrer, permissions and HSTS headers, and the frontend nginx config emits matching headers for the RDO UI without allowing inline scripts.
@@ -487,6 +488,8 @@ Keep snapshot for board/workspace shape until the domain stabilizes.
 ## Second Pass: Security, Operations And Test Gaps
 
 ### P0: Runtime Secrets Still Go Through `kubectl apply`
+
+Status 2026-06-07: Closed. Runtime Secret writes now route through `IRuntimeSecretStore` for board environment secrets, implementation/promotion repository tokens, cleanup tokens, provider-sync source/target tokens and GitHub user authorization tokens. Runner renderers keep only Secret names/data/labels for the runtime store and no longer expose applyable token Secret manifest helpers. Regression coverage rejects reintroducing those helpers, `stringData`, last-applied annotations or direct Secret `ApplyAsync` shortcuts.
 
 Evidence:
 
@@ -2371,6 +2374,8 @@ Recommended fix:
 
 ### P0: Some Runtime Token Secrets Still Use `stringData` And `kubectl apply`
 
+Status 2026-06-07: Closed. Repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync token Secrets now use runtime store `data` writes via the Kubernetes API. The old public `Render*TokenSecret` helpers were removed from runner renderers so token Secrets cannot be accidentally submitted through `PipelineJobOrchestrator.ApplyAsync`; tests still validate names/data/labels and cleanup delete stubs.
+
 Evidence:
 
 - `RepositoryImplementationJobManifestRenderer.RenderTokenSecret` renders implementation/repository tokens as a Kubernetes `Secret` with `stringData`.
@@ -3663,36 +3668,25 @@ Current successful counts:
 
 ## Suggested Next Slice
 
-Start with the runner credential boundary:
+Start with the stronger runner credential boundary that remains after the short-term token-unset hardening:
 
-1. Add failing manifest tests that show `codex exec` currently receives `ROSENVALL_GIT_TOKEN`.
-2. Update implementation and PR review-fix runners so the token is copied to a non-exported shell variable, then `unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN` before Codex starts.
-3. Restore/export the token only after Codex exits and the runner is ready to validate, commit, push and create/update PRs.
-4. Add redaction tests for `ROSENVALL_GIT_TOKEN`, Basic auth remotes and provider-neutral credential URLs.
-5. Prefer a follow-up split-container runner design where Codex never shares a process environment with repository write credentials.
+1. Add failing manifest/runtime tests that model split phases: clone/fetch with repository credentials, Codex edit with no repository credentials and no reusable Codex auth files, then validate/push/PR with credentials restored only in the final phase.
+2. Introduce a launcher/broker or multi-container job contract for implementation and PR review-fix runs so prompt-driven Codex never shares a process environment with repository write credentials.
+3. Preserve current `danger-full-access` Kubernetes sandbox behavior, per-run runtime Secret storage and terminal redaction while moving credentials out of the Codex phase.
+4. Extend the same boundary to preview-source and cleanup where Codex or repository-controlled content can influence runner commands.
+5. Run full backend/frontend verification plus one LocalGit smoke through preview, PR review fix, approve PR and app deploy.
 
-Then fix the webhook security defect:
+Then reduce runtime blast radius:
 
-1. Add `GitHub:WebhookSecret` and a failing endpoint test for missing/invalid `X-Hub-Signature-256`.
-2. Verify HMAC-SHA256 in constant time before parsing or acting on webhook JSON.
-3. Add a valid-signature test proving a merged PR webhook still queues deployment.
-4. Update GitHub App manifest/secret setup so the webhook secret is configured consistently.
+1. Split the API runtime image from the runner/toolchain image so the web API pod no longer carries git/kubectl/node/Codex tooling it does not need to serve requests.
+2. Narrow the runtime service account to the smallest Kubernetes verbs and namespaces each reconciler actually requires.
+3. Add typed RBAC tests that use intended capability assertions instead of string fragments.
 
-Then fix the product correctness defect in the PR-to-production contract:
+Then continue the structural refactor:
 
-1. Add a failing test: preview source A is promoted to PR, PR branch receives review-fix source B, PR is approved, and the production manifest uses B.
-2. Introduce a `BoardPublicAppSourceSnapshot` keyed by provider, repository, branch and commit SHA, or read source from the merged PR commit before render.
-3. Store the deployed source commit on `BoardPublicAppDto`.
-4. Refuse to mark the app `Running` if the production source snapshot does not match the merged PR state.
-5. Run backend tests plus a LocalGit smoke through preview, PR review fix, approve PR, and app deploy.
+1. Move remaining runner manifest renderers toward typed Kubernetes documents.
+2. Continue extracting feature route groups from `Program.cs`.
+3. Split `App.tsx`/`BoardActions` into feature modules around Board, Source, AI, Preview, Pull request and Logs.
 
-Then take the concrete cleanup defect:
-
-1. Add a failing test: provider-sync board cleanup includes `provider-sync-*` Job and `provider-sync-token-*` Secret.
-2. Add `RenderPipelineRunCleanupDocuments` with a `Stage` switch.
-3. Use it from both work-item and board cleanup.
-4. Add a static RBAC check if provider-sync Secret deletion needs additional namespace permissions.
-5. Run full backend tests.
-
-Those four slices are small, high-signal, and cover the most concrete product/security defects found in this pass.
+Those slices are now higher signal than the earlier short-term webhook/provider-sync/runtime-secret fixes, which are covered by regression tests and marked closed above.
 

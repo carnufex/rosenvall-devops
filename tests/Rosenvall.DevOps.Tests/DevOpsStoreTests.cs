@@ -223,7 +223,11 @@ public sealed class DevOpsStoreTests
         var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync", repository.Id, null, null, null, null, null))!;
         var run = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, null, "ProviderSync", "Queued", "Syncing repository.", null))!;
 
-        var payload = RepositoryProviderSyncJobManifestRenderer.RenderTokenSecret(run, "source-token", "target-token");
+        var payload = KubernetesRuntimeSecretStore.RenderSecretPayload(
+            RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run),
+            RepositoryProviderSyncJobManifestRenderer.TokenSecretData("source-token", "target-token"),
+            RepositoryProviderSyncJobManifestRenderer.TokenSecretLabels(run),
+            RepositoryImplementationJobManifestRenderer.Namespace);
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
         var metadata = root.GetProperty("metadata");
@@ -2748,7 +2752,11 @@ public sealed class DevOpsStoreTests
         var implementationRun = store.StartImplementationRun(item.Id, new StartImplementationRunRequest(aiRun.Id, "crille"))!;
         var tokenSecretName = RepositoryImplementationJobManifestRenderer.GitHubTokenSecretName(implementationRun);
 
-        var secretManifest = RepositoryImplementationJobManifestRenderer.RenderGitHubTokenSecret(implementationRun, "ghs_short_lived_installation_token");
+        var secretManifest = KubernetesRuntimeSecretStore.RenderSecretPayload(
+            tokenSecretName,
+            RepositoryImplementationJobManifestRenderer.TokenSecretData("ghs_short_lived_installation_token"),
+            RepositoryImplementationJobManifestRenderer.TokenSecretLabels(implementationRun),
+            RepositoryImplementationJobManifestRenderer.Namespace);
         var runnerManifest = store.RenderImplementationRunManifest(implementationRun.Id, new ConfigurationBuilder().Build(), tokenSecretName);
         using var document = JsonDocument.Parse(secretManifest);
         var root = document.RootElement;
@@ -4288,7 +4296,11 @@ public sealed class DevOpsStoreTests
         store.UpdateImplementationRun(implementationRun.Id, "PullRequestReady", "RDO_PULL_REQUEST_URL=https://github.com/carnufex/Rosenvalls-Homelab/pull/33");
         var cleanupRun = store.StartRepositoryCleanupRun(item.Id, implementationRun.Id, "crille", "merged", "diff")!;
 
-        var payload = RepositoryCleanupJobManifestRenderer.RenderGitHubTokenSecret(cleanupRun, "ghs_cleanup_installation_token");
+        var payload = KubernetesRuntimeSecretStore.RenderSecretPayload(
+            RepositoryCleanupJobManifestRenderer.GitHubTokenSecretName(cleanupRun),
+            RepositoryCleanupJobManifestRenderer.TokenSecretData("ghs_cleanup_installation_token"),
+            RepositoryCleanupJobManifestRenderer.TokenSecretLabels(cleanupRun),
+            RepositoryCleanupJobManifestRenderer.Namespace);
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
         var metadata = root.GetProperty("metadata");
@@ -4775,6 +4787,24 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("access-token-value", payload);
         Assert.DoesNotContain("refresh-token-value", payload);
         Assert.DoesNotContain("kubectl.kubernetes.io/last-applied-configuration", payload);
+    }
+
+    [Fact]
+    public void Runtime_runner_secret_renderers_do_not_expose_applyable_secret_manifest_helpers()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var sourceEndpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Source", "RepositorySourceEndpoints.cs"));
+
+        Assert.DoesNotContain("public static string RenderGitHubTokenSecret", program);
+        Assert.DoesNotContain("public static string RenderRepositoryTokenSecret", program);
+        Assert.DoesNotContain("public static string RenderTokenSecret(PipelineRunDto", program);
+        Assert.DoesNotContain("ApplyAsync(BoardSecretManifestRenderer", program);
+        Assert.DoesNotContain("ApplyAsync(RepositoryImplementationJobManifestRenderer.RenderGitHubTokenSecret", program);
+        Assert.DoesNotContain("ApplyAsync(RepositoryCleanupJobManifestRenderer.RenderGitHubTokenSecret", program);
+        Assert.DoesNotContain("ApplyAsync(RepositoryProviderSyncJobManifestRenderer.RenderTokenSecret", sourceEndpoints);
+        Assert.Contains("runtimeSecrets.StoreAsync", program);
+        Assert.Contains("runtimeSecrets.StoreAsync", sourceEndpoints);
     }
 
     [Fact]

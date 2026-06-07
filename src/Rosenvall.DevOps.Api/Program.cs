@@ -3241,12 +3241,6 @@ namespace Rosenvall.DevOps.Api
         public static string RepositoryTokenSecretName(ImplementationRunDto run) =>
             SafeName($"repository-token-{run.Id:N}");
 
-        public static string RenderGitHubTokenSecret(ImplementationRunDto run, string token) =>
-            RenderTokenSecret(GitHubTokenSecretName(run), run.Id, token);
-
-        public static string RenderRepositoryTokenSecret(ImplementationRunDto run, string token) =>
-            RenderTokenSecret(RepositoryTokenSecretName(run), run.Id, token);
-
         public static IReadOnlyDictionary<string, string> TokenSecretData(string token) => new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["token"] = token
@@ -3257,17 +3251,6 @@ namespace Rosenvall.DevOps.Api
             ["app.kubernetes.io/part-of"] = "rosenvall-devops-implementation",
             ["rosenvall.devops/implementation-run"] = run.Id.ToString()
         };
-
-        private static string RenderTokenSecret(string name, Guid runId, string token) =>
-            KubernetesRuntimeSecretStore.RenderSecretPayload(
-                name,
-                TokenSecretData(token),
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["app.kubernetes.io/part-of"] = "rosenvall-devops-implementation",
-                    ["rosenvall.devops/implementation-run"] = runId.ToString()
-                },
-                Namespace);
 
         public static string Render(ImplementationRunDto run, RepositoryDto repository, AiRun aiRun, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName = "rosenvall-devops-github", AiSessionDto? aiSession = null, IReadOnlyList<BoardSecretDto>? boardSecrets = null, string? sandboxMode = null, string? forgejoApiBaseUrl = null, string? localGitUsername = null, string? runnerImage = null)
         {
@@ -3718,13 +3701,6 @@ namespace Rosenvall.DevOps.Api
             ["app.kubernetes.io/part-of"] = "rosenvall-devops-provider-sync",
             ["rosenvall.devops/pipeline-run"] = run.Id.ToString()
         };
-
-        public static string RenderTokenSecret(PipelineRunDto run, string sourceToken, string targetToken) =>
-            KubernetesRuntimeSecretStore.RenderSecretPayload(
-                TokenSecretName(run),
-                TokenSecretData(sourceToken, targetToken),
-                TokenSecretLabels(run),
-                RepositoryImplementationJobManifestRenderer.Namespace);
 
         public static string Render(PipelineRunDto run, RepositoryDto source, RepositoryDto target, string tokenSecretName, string forgejoApiBaseUrl, string localGitUsername, string? runnerImage = null)
         {
@@ -4338,13 +4314,6 @@ namespace Rosenvall.DevOps.Api
 
         public static string GitHubTokenSecretName(RepositoryCleanupRunDto run) =>
             SafeName($"github-cleanup-token-{run.Id:N}");
-
-        public static string RenderGitHubTokenSecret(RepositoryCleanupRunDto run, string token) =>
-            KubernetesRuntimeSecretStore.RenderSecretPayload(
-                GitHubTokenSecretName(run),
-                TokenSecretData(token),
-                TokenSecretLabels(run),
-                Namespace);
 
         public static IReadOnlyDictionary<string, string> TokenSecretData(string token) => new Dictionary<string, string>(StringComparer.Ordinal)
         {
