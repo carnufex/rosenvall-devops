@@ -187,7 +187,8 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospa
 .hierarchy-node-button em { color: var(--muted); font-size: 12px; font-style: normal; white-space: nowrap; }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); display: grid; place-items: center; padding: 24px; z-index: 20; }
-.modal { width: min(1120px, 100%); max-height: calc(100vh - 48px); overflow: auto; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5); }
+.modal-backdrop-dismiss { position: absolute; inset: 0; border: 0; background: transparent; cursor: default; }
+.modal { position: relative; z-index: 1; width: min(1120px, 100%); max-height: calc(100vh - 48px); overflow: auto; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5); }
 .modal-wide { width: min(1280px, 100%); }
 .modal-head { min-height: 64px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; gap: 16px; position: sticky; top: 0; background: rgba(21, 22, 23, 0.97); z-index: 1; backdrop-filter: blur(12px); }
 .modal-head h2 { min-width: 0; font-size: 18px; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -197,6 +198,8 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospa
 .modal-side { display: grid; gap: 16px; align-content: start; }
 .modal-loading { padding: 24px; color: var(--muted); }
 .modal-loading .spinner { display: inline-block; margin-right: 8px; vertical-align: -2px; }
+.field-block { display: grid; gap: 6px; font-size: 13px; font-weight: 800; color: var(--muted); }
+.field-block > span { color: var(--text); }
 .work-item-shell { padding: 0 20px 20px; display: grid; gap: 18px; }
 .work-item-tabs { position: sticky; top: 64px; z-index: 1; display: flex; gap: 18px; border-bottom: 1px solid var(--line); background: rgba(21, 22, 23, 0.97); padding: 0; overflow-x: auto; }
 .work-item-tabs button { min-height: 48px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); padding: 0 2px; font-weight: 800; white-space: nowrap; }

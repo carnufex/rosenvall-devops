@@ -5800,6 +5800,7 @@ public sealed class DevOpsStoreTests
 
         Assert.True(File.Exists(eslintConfigPath), "Frontend linting should use an explicit ESLint config.");
         Assert.Contains("\"lint\"", packageJson);
+        Assert.Contains("--max-warnings=0", packageJson);
         Assert.Contains("eslint", packageJson);
         Assert.Contains("typescript-eslint", packageJson);
         Assert.Contains("eslint-plugin-react-hooks", packageJson);

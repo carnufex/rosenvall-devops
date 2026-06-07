@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { highlightCodeLines, plainHighlightedLines, splitDiffLineForHighlight, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
@@ -1095,11 +1095,12 @@ function App() {
     }
   }, [loadShell, loadWorkItem]);
 
+  const realtimeBoardId = shell.status === 'ready' ? shell.board.id : null;
   React.useEffect(() => {
-    if (shell.status !== 'ready' || (auth.status !== 'ready' && auth.status !== 'disabled')) return;
+    if (!realtimeBoardId || (auth.status !== 'ready' && auth.status !== 'disabled')) return;
 
     const client = createBoardRealtimeClient({
-      boardId: shell.board.id,
+      boardId: realtimeBoardId,
       getAccessToken: () => auth.status === 'ready' ? latestAccessToken(auth) : null,
       onEvent: handleRealtimeEvent
     });
@@ -1107,7 +1108,7 @@ function App() {
     return () => {
       void client.stop();
     };
-  }, [auth, handleRealtimeEvent, shell.status, shell.status === 'ready' ? shell.board.id : null]);
+  }, [auth, handleRealtimeEvent, realtimeBoardId]);
 
   const shouldPollOpenWorkItem = selected.status === 'open' && (
     isPreviewPendingStatus(selected.detail.preview?.status) ||
@@ -1687,11 +1688,11 @@ function App() {
             {activeView === 'source' && <SourceView board={shell.board} settings={shell.settings} onRefresh={() => loadShell(shell.board.id, { silentBusy: true })} onNotify={addToast} />}
             {activeView === 'timeline' && <TimelineView board={shell.board} timeline={shell.timeline} />}
             {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} actions={actions} onBack={() => setView('board')} />}
-            {activeView === 'ai' && <SettingsView scope="ai" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
-            {activeView === 'environment' && <SettingsView scope="environment" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
-            {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'ai' && <SettingsView scope="ai" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'environment' && <SettingsView scope="environment" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
             {activeView === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
-            {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} board={shell.board} me={shell.me} teams={shell.teams} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -1734,10 +1735,8 @@ function App() {
       )}
       {syncBoardOpen && shell.status === 'ready' && (
         <SyncBoardRepositoryModal
-          board={shell.board}
           repositories={shell.repositories}
           settings={shell.settings}
-          githubIntegrations={shell.githubIntegrations}
           onSync={(request) => actions.syncBoardRepository(shell.board.id, request)}
           onClose={() => setSyncBoardOpen(false)}
         />
@@ -2444,16 +2443,18 @@ function SourceView({ board, settings, onRefresh, onNotify }: {
 
   const selectedRepository = repositories.find((repository) => repository.repositoryId === selectedRepositoryId) ?? null;
   const selectedSourceAvailability = selectedRepository ? repositorySourceAvailability(selectedRepository) : null;
+  const selectedRepositoryDefaultBranch = selectedRepository?.defaultBranch ?? 'main';
+  const selectedRepositorySourceId = selectedRepository?.repositoryId ?? null;
 
   React.useEffect(() => {
     if (!selectedRepository) return;
-    const nextRef = committedSourceRef('', selectedRepository.defaultBranch);
+    const nextRef = committedSourceRef('', selectedRepositoryDefaultBranch);
     setRef(nextRef);
     setDraftRef(nextRef);
     setPath('');
     setSelectedFilePath('');
     setFile(null);
-  }, [selectedRepository?.repositoryId]);
+  }, [selectedRepository, selectedRepositoryDefaultBranch]);
 
   React.useEffect(() => {
     if (!selectedRepository) return;
@@ -2468,10 +2469,10 @@ function SourceView({ board, settings, onRefresh, onNotify }: {
     }
     let active = true;
     const controller = new AbortController();
-    const query = new URLSearchParams({ ref: ref || selectedRepository.defaultBranch || 'main', path });
+    const query = new URLSearchParams({ ref: ref || selectedRepositoryDefaultBranch, path });
     setLoading(true);
     setError(null);
-    api.get<RepositorySourceTreeDto>(`/api/repositories/${selectedRepository.repositoryId}/source/tree?${query.toString()}`, { signal: controller.signal })
+    api.get<RepositorySourceTreeDto>(`/api/repositories/${selectedRepositorySourceId}/source/tree?${query.toString()}`, { signal: controller.signal })
       .then((result) => {
         if (!active) return;
         setTree(result);
@@ -2489,7 +2490,7 @@ function SourceView({ board, settings, onRefresh, onNotify }: {
       active = false;
       controller.abort();
     };
-  }, [selectedRepository?.repositoryId, ref, path]);
+  }, [selectedRepository, selectedRepositoryDefaultBranch, selectedRepositorySourceId, ref, path]);
 
   async function openFile(entry: RepositorySourceEntryDto) {
     if (!selectedRepository) return;
@@ -2720,26 +2721,26 @@ function CloneDrawer({ cloneInfo, onCopy, onClose }: { cloneInfo: RepositoryClon
         {!humanCloneUrl && <div className="inline-warning">LocalGit is internal-only in v1. This URL is for RDO runners or cluster-network access, not a normal workstation clone.</div>}
         {humanCloneUrl ? (
           <>
-            <label>
-              Human clone URL
+            <div className="field-block">
+              <span>Human clone URL</span>
               <div className="copy-row"><code>{humanCloneUrl}</code><button className="secondary" onClick={() => void onCopy(humanCloneUrl)} type="button"><Copy size={14} />Copy</button></div>
-            </label>
-            <label>
-              Command
+            </div>
+            <div className="field-block">
+              <span>Command</span>
               <div className="copy-row"><code>{command}</code><button className="secondary" onClick={() => void onCopy(command)} type="button"><Copy size={14} />Copy</button></div>
-            </label>
+            </div>
           </>
         ) : (
-          <label>
-            Runner clone URL
+          <div className="field-block">
+            <span>Runner clone URL</span>
             <div className="copy-row"><code>{runnerCloneUrl}</code><button className="secondary" onClick={() => void onCopy(runnerCloneUrl)} type="button"><Copy size={14} />Copy</button></div>
-          </label>
+          </div>
         )}
         {humanCloneUrl && runnerCloneUrl !== humanCloneUrl && (
-          <label>
-            Runner clone URL
+          <div className="field-block">
+            <span>Runner clone URL</span>
             <div className="copy-row"><code>{runnerCloneUrl}</code><button className="secondary" onClick={() => void onCopy(runnerCloneUrl)} type="button"><Copy size={14} />Copy</button></div>
-          </label>
+          </div>
         )}
       </aside>
     </div>
@@ -3076,14 +3077,23 @@ function WorkItemCard({ item, actions }: { item: WorkItemSummary; actions: Board
     data: { type: 'card', status: item.status }
   });
   const style = { transform: CSS.Transform.toString(transform), transition };
+  const openCard = () => actions.openWorkItem(item.id);
+  const handleCardKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openCard();
+  };
   return (
-    <article
+    <div
       ref={setNodeRef}
       style={style}
       className={`${item.status === 'AI Planning' ? 'card ai-card' : 'card'}${isDragging ? ' dragging' : ''}`}
-      onClick={() => actions.openWorkItem(item.id)}
       {...attributes}
       {...listeners}
+      onClick={openCard}
+      onKeyDown={handleCardKeyDown}
+      role="button"
+      tabIndex={0}
     >
       <div className="card-row">
         <WorkItemTypeBadges item={item} />
@@ -3099,7 +3109,7 @@ function WorkItemCard({ item, actions }: { item: WorkItemSummary; actions: Board
       {item.aiStatus && <div className="ai-state"><Sparkles size={14} />{item.aiStatus}</div>}
       {item.previewUrl && <div className="preview-chip"><ExternalLink size={13} />Demo ready</div>}
       <div className="card-footer"><span>{item.assignee ?? 'Unassigned'}</span><span>{item.commentCount ? `${item.commentCount} comments` : ''}</span></div>
-    </article>
+    </div>
   );
 }
 
@@ -3144,7 +3154,10 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const defaultPlan = [...sortedPlans].reverse().find((run) => run.status === 'PlanReady') ?? sortedPlans[sortedPlans.length - 1];
   const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(() => defaultPlan?.id ?? null);
   const selectedPlan = sortedPlans.find((run) => run.id === selectedPlanId) ?? defaultPlan;
-  const targetRepositories = board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [];
+  const targetRepositories = React.useMemo(
+    () => board?.repositories?.length ? board.repositories : board?.repository ? [{ boardId: board.id, repositoryId: board.repository.id, isPrimary: true, implementationProfile: board.repository.implementationProfile, implementationWorkflow: board.implementationWorkflow ?? board.repository.implementationWorkflow, repository: board.repository }] : [],
+    [board]
+  );
   const [targetRepositoryId, setTargetRepositoryId] = React.useState<string | null>(() => targetRepositories.find((entry) => entry.isPrimary)?.repositoryId ?? targetRepositories[0]?.repositoryId ?? null);
   const selectedTargetRepository = targetRepositories.find((entry) => entry.repositoryId === targetRepositoryId) ?? targetRepositories.find((entry) => entry.isPrimary) ?? targetRepositories[0];
   const selectedWorkflow = workflowForRepositoryProfile(selectedTargetRepository?.implementationProfile ?? board?.repository?.implementationProfile, selectedTargetRepository?.implementationWorkflow ?? board?.implementationWorkflow ?? board?.repository?.implementationWorkflow ?? null);
@@ -3183,7 +3196,6 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
       : hasRepositoryPr && detail.item.status === 'Done'
         ? 'Start repository cleanup'
         : 'Delete and clean up';
-  const activityComments = React.useMemo(() => dedupeGeneratedActivityComments(detail.comments), [detail.comments]);
   const [pullRequestDiffState, setPullRequestDiffState] = React.useState<
     { status: 'closed' } |
     { status: 'loading' } |
@@ -3314,7 +3326,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
       size="wide"
     >
       <div className="work-item-shell">
-        <nav className="work-item-tabs" aria-label="Work item sections" role="tablist">
+        <div className="work-item-tabs" aria-label="Work item sections" role="tablist">
           {workItemModalTabs.map((tab) => (
             <button
               aria-controls={workItemPanelId(tab.key)}
@@ -3332,7 +3344,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
               {tab.label}
             </button>
           ))}
-        </nav>
+        </div>
         {metadataDialogOpen && (
           <section className="work-item-metadata-dialog" role="dialog" aria-label="Card metadata">
             <div>
@@ -3358,7 +3370,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
             <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
             <label>Status<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{board?.columns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>
             <label>Priority<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
-            <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
+            <div className="field-block"><span>Assignee</span><AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></div>
           </div>
           <div className={`autosave-status ${autosaveStatus}`}>
             {autosaveStatus === 'saving' && <span className="spinner" />}
@@ -4060,7 +4072,6 @@ function AiPlanPanel({ detail, board, targetRepositoryId, onTargetRepositoryChan
     () => selectedPlan ? planReviewComments.filter((comment) => comment.aiRunId === selectedPlan.id) : [],
     [planReviewComments, selectedPlan]
   );
-  const unresolvedPlanComments = selectedPlan ? unresolvedAiPlanReviewCommentCount(planReviewComments, selectedPlan.id) : 0;
   const selectedPlanCanStart = selectedPlan ? canApproveAiPlanWithComments(selectedPlan.id, planReviewComments) : false;
   const [activeAnchorKey, setActiveAnchorKey] = React.useState<string | null>(null);
   const [commentDraft, setCommentDraft] = React.useState('');
@@ -4303,43 +4314,6 @@ function PlanQuestionStepper({ questions, busy, onSubmit }: {
           <button className="secondary compact inline" disabled={activeIndex >= questions.length - 1} onClick={() => setActiveIndex((index) => Math.min(questions.length - 1, index + 1))} type="button">Next</button>
         </div>
       </div>
-    </section>
-  );
-}
-
-function ImplementationRunPanel({ run }: { run: ImplementationRunDto }) {
-  const pending = isImplementationRunPendingStatus(run.status);
-  const failed = run.status === 'Failed';
-  const ready = run.status === 'PullRequestReady';
-  const isLocalGit = run.pullRequestProvider?.toLowerCase() === 'localgit';
-  const presentation = repositoryRunPresentation(run.status, run.runKind);
-  const steps = presentation.steps;
-  return (
-    <section className="panel compact-panel implementation-panel">
-      <PanelHeader icon={<GitPullRequest size={20} />} title={presentation.title} />
-      <ol className="preview-stepper implementation-stepper" aria-label={presentation.ariaLabel}>
-        {steps.map((step, index) => (
-          <li className={`stepper-item ${step.state}`} key={step.key}>
-            <span className="stepper-marker">{step.state === 'done' ? <CheckCircle2 size={13} /> : index + 1}</span>
-            <span className="stepper-body"><strong>{step.title}</strong><span>{step.description}</span></span>
-          </li>
-        ))}
-      </ol>
-      <p className="namespace-note">Branch: <code>{run.branch}</code></p>
-      {run.commitSha && <p className="namespace-note">Commit: <code>{run.commitSha.slice(0, 12)}</code></p>}
-      {ready && run.pullRequestUrl && isLocalGit && <div className="url-box local-url-box">Local pull request{run.pullRequestNumber ? ` #${run.pullRequestNumber}` : ''}<span>{run.pullRequestState ?? 'open'}</span></div>}
-      {ready && run.pullRequestUrl && !isLocalGit && <SafeExternalLink className="url-box" href={run.pullRequestUrl}>Open pull request <ExternalLink size={16} /></SafeExternalLink>}
-      {failed && run.failureReason && <p className="failure-reason">Reason: {run.failureReason}</p>}
-      {(run.jobName || run.podName || run.lastCondition || run.lastEventSummary) && (
-        <div className="cleanup-diagnostics">
-          {run.jobName && <p>Job: <code>{run.jobName}</code></p>}
-          {run.podName && <p>Pod: <code>{run.podName}</code></p>}
-          {run.lastCondition && <p>Condition: {run.lastCondition}</p>}
-          {run.lastEventSummary && <p>Last event: {run.lastEventSummary}</p>}
-        </div>
-      )}
-      <PreviewTerminal lines={run.terminalLines ?? []} active={pending} title={presentation.terminalTitle} />
-      <div className="split-stats"><span>Status<br /><strong>{run.status}</strong></span><span>Updated<br /><strong>{relativeTime(run.updatedAt)}</strong></span></div>
     </section>
   );
 }
@@ -4605,7 +4579,7 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
           })
           .finally(() => setSubmitting(false));
       }}>
-        <label>Title<input autoFocus value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
+        <label>Title<input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
         <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
         <div className="form-grid two">
           <label>Type<select value={form.type} onChange={(event) => {
@@ -4614,7 +4588,7 @@ function CreateWorkItemModal({ board, initialStatus, assigneeOptions, onCreate, 
           }}>{workItemTypeOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
           <label>Status<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{board.columns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>
           <label>Priority<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
-          <label>Assignee<AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></label>
+          <div className="field-block"><span>Assignee</span><AssigneeSelect value={form.assignee} options={assigneeOptions} onChange={(assignee) => setForm({ ...form, assignee })} /></div>
           <label>Parent<select value={form.parentWorkItemId} disabled={form.type === 'Epic'} onChange={(event) => setForm({ ...form, parentWorkItemId: event.target.value })}>
             <option value="">No parent</option>
             {parentOptions.map((item) => <option value={item.id} key={item.id}>{item.key} - {item.title}</option>)}
@@ -5002,7 +4976,7 @@ function CreateBoardModal({ teams, githubIntegrations, settings, me, actions, on
           })
           .finally(() => setSubmitting(false));
       }}>
-        <label>Board name<input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Gatewaybound" /></label>
+        <label>Board name<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Gatewaybound" /></label>
         <div className="form-grid two">
           <label>Provider<select value={form.providerMode} onChange={(event) => {
             const providerMode = event.target.value as CreateBoardForm['providerMode'];
@@ -5217,11 +5191,9 @@ function NewRepositoryOnboardingPanel({ form, localGitMode = false, installation
   );
 }
 
-function SyncBoardRepositoryModal({ board, repositories, settings, githubIntegrations, onSync, onClose }: {
-  board: Board;
+function SyncBoardRepositoryModal({ repositories, settings, onSync, onClose }: {
   repositories: RepositoryDto[];
   settings: SettingsDto;
-  githubIntegrations: GitHubIntegrationDto[];
   onSync: (request: SyncBoardRepositoryRequest) => Promise<boolean>;
   onClose: () => void;
 }) {
@@ -5391,7 +5363,7 @@ function RepositoryProfileEditor({ form, profile, profileStatus, aiProfileStatus
           : form.skillDrafts.map((draft, index) => (
             <details className="skill-draft-row" key={`${draft.name}-${index}`}>
               <summary>
-                <label className="checkbox-row" onClick={(event) => event.stopPropagation()}>
+                <label className="checkbox-row">
                   <input type="checkbox" checked={draft.enabled} onChange={(event) => updateDraft(index, { enabled: event.target.checked })} />
                   <span>{draft.name || 'Unnamed skill'}</span>
                 </label>
@@ -5540,12 +5512,11 @@ function TeamsView({ teams, boards, me, actions }: {
   );
 }
 
-function SettingsView({ scope, settings, board, me, teams, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
+function SettingsView({ scope, settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
   scope: 'global' | 'board' | 'ai' | 'environment';
   settings: SettingsDto;
   board: Board;
   me: UserDto;
-  teams: TeamDto[];
   repositories: RepositoryDto[];
   boardSecrets: BoardSecretDto[];
   githubIntegrations: GitHubIntegrationDto[];
@@ -5911,7 +5882,7 @@ function RepositorySettingsProfileEditor({ board, entry, actions }: { board: Boa
     setProfileStatus('loaded');
     setAiProfileStatus('idle');
     setProfileError(null);
-  }, [board.id, board.aiContext, board.gitOpsSettings, entry.profile, entry.implementationProfile, entry.repository.defaultBranch, entry.repository.name, entry.repository.owner]);
+  }, [board, entry]);
 
   const analyzeAgain = async () => {
     if (!entry.repository.owner) {
@@ -6083,7 +6054,9 @@ function ModalFrame({ title, titleLabel, headerAction, onClose, children, size =
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="modal-backdrop" role="presentation">
+      <button className="modal-backdrop-dismiss" type="button" aria-label="Close dialog" onMouseDown={onClose} />
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- ModalFrame handles Escape and focus-trap keyboard behavior at the dialog boundary. */}
       <section className={size === 'wide' ? 'modal modal-wide' : 'modal'} role="dialog" aria-modal="true" aria-label={accessibleTitle} tabIndex={-1} ref={dialogRef} onKeyDown={handleKeyDown}>
         <header className="modal-head">
           <h2>{title}</h2>
@@ -6095,15 +6068,6 @@ function ModalFrame({ title, titleLabel, headerAction, onClose, children, size =
         {children}
       </section>
     </div>
-  );
-}
-
-function PullRequestDiffModal(props: PullRequestDiffReviewProps) {
-  const title = props.state.status === 'loaded' ? `Local pull request #${props.state.diff.number}` : 'Local pull request diff';
-  return (
-    <ModalFrame title={title} onClose={props.onClose} size="wide">
-      <PullRequestDiffReview {...props} />
-    </ModalFrame>
   );
 }
 
@@ -6136,7 +6100,7 @@ function PullRequestDiffReview({ state, busy, busyLabel, onSelectFile, onRetry, 
   const loadedState = state.status === 'loaded' ? state : null;
   const diff = loadedState?.diff ?? emptyPullRequestDiff();
   const parsed = React.useMemo(() => parseUnifiedDiffForContinuousReview(diff.diff, diff.files), [diff.diff, diff.files]);
-  const comments = diff.reviewComments ?? [];
+  const comments = React.useMemo(() => diff.reviewComments ?? [], [diff.reviewComments]);
   const countsByFile = React.useMemo(() => reviewCommentCountsByFile(comments), [comments]);
   const unresolvedCount = unresolvedReviewCommentCount(comments);
   const approvalState = buildLocalPullRequestApprovalState({
@@ -7029,10 +6993,6 @@ function normalizeRepositoryNameInput(value: string) {
   return normalized || 'new-repository';
 }
 
-function looksLikeWebsiteText(value: string) {
-  return /website|hemsida|frontend|react|vite|webapp|landing|site|clock|klock/i.test(value);
-}
-
 function boardRepositorySummary(board: Board) {
   const repositories = board.repositories?.length
     ? board.repositories
@@ -7174,23 +7134,6 @@ function workflowLabel(workflow?: string | null) {
 
 function latestRepositoryCleanupRun(runs?: RepositoryCleanupRunDto[] | null) {
   return [...(runs ?? [])].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-}
-
-function extractUnifiedDiffForFile(diff: string, path: string): string {
-  if (!diff.trim()) return '';
-  const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`(^diff --git a\\/.* b\\/${escapedPath}[\\s\\S]*?)(?=^diff --git |(?![\\s\\S]))`, 'm');
-  const match = diff.match(pattern);
-  if (match?.[1]) return match[1].trimEnd();
-
-  const lines = diff.split(/\r?\n/);
-  const start = lines.findIndex((line) => line === `+++ b/${path}` || line.endsWith(` b/${path}`));
-  if (start < 0) return '';
-  let header = start;
-  while (header > 0 && !lines[header].startsWith('diff --git ')) header -= 1;
-  let end = start + 1;
-  while (end < lines.length && !lines[end].startsWith('diff --git ')) end += 1;
-  return lines.slice(header, end).join('\n').trimEnd();
 }
 
 function initials(value: string) {
