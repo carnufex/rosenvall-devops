@@ -17342,7 +17342,8 @@ namespace Rosenvall.DevOps.Api
                 sourceFiles: sourceFiles,
                 hostnameOverride: hostname,
                 namespacePrefix: "devops-app",
-                partOf: "rosenvall-devops-board-app");
+                partOf: "rosenvall-devops-board-app",
+                sourceServingMode: PreviewSourceServingMode.StaticBuild);
         }
 
         private static bool RequiresGeneratedPreviewSource(PreviewDto preview) =>

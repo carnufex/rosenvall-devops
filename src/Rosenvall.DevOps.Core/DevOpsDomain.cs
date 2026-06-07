@@ -234,8 +234,11 @@ public sealed record PreviewResourceSet(
     IReadOnlyList<PreviewSourceFile> SourceFiles,
     bool IncludeNamespace,
     string PartOf,
-    IReadOnlyDictionary<string, string> NamespaceLabels)
+    IReadOnlyDictionary<string, string> NamespaceLabels,
+    PreviewSourceServingMode SourceServingMode = PreviewSourceServingMode.DevServer)
 {
+    public const string StaticRuntimeImage = "nginxinc/nginx-unprivileged:1.27-alpine";
+
     public static PreviewResourceSet Create(
         string key,
         string title,
@@ -247,7 +250,8 @@ public sealed record PreviewResourceSet(
         string? hostnameOverride = null,
         string namespacePrefix = "devops-preview",
         string partOf = "rosenvall-devops-preview",
-        IReadOnlyDictionary<string, string>? namespaceLabels = null)
+        IReadOnlyDictionary<string, string>? namespaceLabels = null,
+        PreviewSourceServingMode sourceServingMode = PreviewSourceServingMode.DevServer)
     {
         if (string.IsNullOrWhiteSpace(image))
         {
@@ -267,8 +271,15 @@ public sealed record PreviewResourceSet(
             sourceFiles ?? [],
             includeNamespace,
             string.IsNullOrWhiteSpace(partOf) ? "rosenvall-devops-preview" : partOf.Trim(),
-            namespaceLabels ?? new Dictionary<string, string>());
+            namespaceLabels ?? new Dictionary<string, string>(),
+            sourceServingMode);
     }
+}
+
+public enum PreviewSourceServingMode
+{
+    DevServer,
+    StaticBuild
 }
 
 public sealed record PreviewSourceFile(string Key, string Path, string Content);
@@ -278,6 +289,8 @@ public static class PreviewManifestRenderer
     public static string Render(PreviewResourceSet resources)
     {
         var builder = new StringBuilder();
+        var hasSource = resources.SourceFiles.Count > 0;
+        var usesStaticSourceBuild = hasSource && resources.SourceServingMode == PreviewSourceServingMode.StaticBuild;
         if (resources.IncludeNamespace)
         {
             builder.AppendLine("apiVersion: v1");
@@ -306,7 +319,7 @@ public static class PreviewManifestRenderer
             builder.AppendLine(IndentBlock(resources.StaticHtml, 4));
             builder.AppendLine("---");
         }
-        if (resources.SourceFiles.Count > 0)
+        if (hasSource)
         {
             builder.AppendLine("apiVersion: v1");
             builder.AppendLine("kind: ConfigMap");
@@ -342,7 +355,7 @@ public static class PreviewManifestRenderer
         builder.AppendLine("      labels:");
         builder.AppendLine($"        app.kubernetes.io/name: {resources.Name}");
         builder.AppendLine($"        app.kubernetes.io/part-of: {resources.PartOf}");
-        if (resources.SourceFiles.Count > 0)
+        if (hasSource)
         {
             builder.AppendLine("      annotations:");
             builder.AppendLine($"        rosenvall.dev/source-hash: {ComputeSourceHash(resources.SourceFiles)}");
@@ -356,15 +369,17 @@ public static class PreviewManifestRenderer
         builder.AppendLine("        fsGroup: 101");
         builder.AppendLine("        seccompProfile:");
         builder.AppendLine("          type: RuntimeDefault");
-        if (resources.SourceFiles.Count > 0)
+        if (hasSource)
         {
             builder.AppendLine("      initContainers:");
-            builder.AppendLine("        - name: prepare-source");
+            builder.AppendLine(usesStaticSourceBuild ? "        - name: build-static-source" : "        - name: prepare-source");
             builder.AppendLine($"          image: {resources.Image}");
             builder.AppendLine("          command:");
             builder.AppendLine("            - sh");
             builder.AppendLine("            - -c");
-            builder.AppendLine("            - cp -R /source/. /workspace/ && mkdir -p /workspace/node_modules && cp -R /opt/rosenvall-preview/node_modules/. /workspace/node_modules/");
+            builder.AppendLine(usesStaticSourceBuild
+                ? "            - cp -R /source/. /workspace/ && mkdir -p /workspace/node_modules && cp -R /opt/rosenvall-preview/node_modules/. /workspace/node_modules/ && cd /workspace && npm run build && cp -R /workspace/dist/. /public/"
+                : "            - cp -R /source/. /workspace/ && mkdir -p /workspace/node_modules && cp -R /opt/rosenvall-preview/node_modules/. /workspace/node_modules/");
             builder.AppendLine("          securityContext:");
             builder.AppendLine("            allowPrivilegeEscalation: false");
             builder.AppendLine("            capabilities:");
@@ -376,11 +391,16 @@ public static class PreviewManifestRenderer
             builder.AppendLine("              readOnly: true");
             builder.AppendLine("            - name: app-workspace");
             builder.AppendLine("              mountPath: /workspace");
+            if (usesStaticSourceBuild)
+            {
+                builder.AppendLine("            - name: app-public");
+                builder.AppendLine("              mountPath: /public");
+            }
         }
         builder.AppendLine("      containers:");
         builder.AppendLine("        - name: app");
-        builder.AppendLine($"          image: {resources.Image}");
-        if (resources.SourceFiles.Count > 0)
+        builder.AppendLine($"          image: {(usesStaticSourceBuild ? PreviewResourceSet.StaticRuntimeImage : resources.Image)}");
+        if (hasSource && !usesStaticSourceBuild)
         {
             builder.AppendLine("          workingDir: /workspace");
             builder.AppendLine("          command:");
@@ -403,13 +423,13 @@ public static class PreviewManifestRenderer
             builder.AppendLine("              mountPath: /usr/share/nginx/html/index.html");
             builder.AppendLine("              subPath: index.html");
         }
-        if (resources.SourceFiles.Count > 0)
+        if (hasSource)
         {
             builder.AppendLine("          volumeMounts:");
-            builder.AppendLine("            - name: app-workspace");
-            builder.AppendLine("              mountPath: /workspace");
+            builder.AppendLine(usesStaticSourceBuild ? "            - name: app-public" : "            - name: app-workspace");
+            builder.AppendLine(usesStaticSourceBuild ? "              mountPath: /usr/share/nginx/html" : "              mountPath: /workspace");
         }
-        if (resources.StaticHtml is not null || resources.SourceFiles.Count > 0)
+        if (resources.StaticHtml is not null || hasSource)
         {
             builder.AppendLine("      volumes:");
         }
@@ -419,7 +439,7 @@ public static class PreviewManifestRenderer
             builder.AppendLine("          configMap:");
             builder.AppendLine($"            name: {resources.Name}-content");
         }
-        if (resources.SourceFiles.Count > 0)
+        if (hasSource)
         {
             builder.AppendLine("        - name: app-source");
             builder.AppendLine("          configMap:");
@@ -432,6 +452,11 @@ public static class PreviewManifestRenderer
             }
             builder.AppendLine("        - name: app-workspace");
             builder.AppendLine("          emptyDir: {}");
+            if (usesStaticSourceBuild)
+            {
+                builder.AppendLine("        - name: app-public");
+                builder.AppendLine("          emptyDir: {}");
+            }
         }
 
         builder.AppendLine("---");

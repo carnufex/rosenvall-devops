@@ -1540,8 +1540,13 @@ public sealed class DevOpsStoreTests
         Assert.Contains("app.kubernetes.io/part-of: rosenvall-devops-board-app", manifest);
         Assert.Contains("- demo-klocka.rosenvall.se", manifest);
         Assert.Contains("export default function App()", manifest);
+        Assert.Contains("name: build-static-source", manifest);
+        Assert.Contains("npm run build", manifest);
+        Assert.Contains("nginxinc/nginx-unprivileged", manifest);
+        Assert.Contains("mountPath: /usr/share/nginx/html", manifest);
         Assert.DoesNotContain("app.kubernetes.io/part-of: rosenvall-devops-preview", manifest);
-        Assert.DoesNotContain("npm run build", manifest);
+        Assert.DoesNotContain("npm run dev -- --host 0.0.0.0 --port 8080", manifest);
+        Assert.DoesNotContain("workingDir: /workspace", manifest);
         Assert.DoesNotContain("codex exec", manifest);
     }
 
