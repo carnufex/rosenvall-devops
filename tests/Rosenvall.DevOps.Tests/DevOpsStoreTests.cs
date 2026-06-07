@@ -5660,6 +5660,22 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_health_monitor_lives_in_runtime_monitor_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var runtimePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "PreviewHealthMonitor.cs");
+
+        Assert.DoesNotContain("public sealed class PreviewHealthMonitor", program);
+        Assert.True(File.Exists(runtimePath), "Preview health monitoring should live in Runtime/Monitors/PreviewHealthMonitor.cs instead of Program.cs.");
+
+        var runtime = File.ReadAllText(runtimePath);
+        Assert.Contains("public sealed class PreviewHealthMonitor", runtime);
+        Assert.Contains("store.GetPreviewsAwaitingHealthCheck()", runtime);
+        Assert.Contains("previews.CheckHealthAsync(preview, cancellationToken)", runtime);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
