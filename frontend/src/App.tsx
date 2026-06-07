@@ -4,6 +4,7 @@ import { createApiClient, type AuthSession } from './apiClient';
 import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { highlightCodeLines, plainHighlightedLines, splitDiffLineForHighlight, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
+import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import {
   Activity,
@@ -5901,10 +5902,51 @@ function GitOpsApplicationsPanel({ response }: { response: GitOpsApplicationsRes
 }
 
 function ModalFrame({ title, titleLabel, headerAction, onClose, children, size = 'default' }: { title: React.ReactNode; titleLabel?: string; headerAction?: React.ReactNode; onClose: () => void; children: React.ReactNode; size?: 'default' | 'wide' }) {
+  const dialogRef = React.useRef<HTMLElement | null>(null);
+  const previouslyFocusedRef = React.useRef<HTMLElement | null>(null);
   const accessibleTitle = titleLabel ?? (typeof title === 'string' ? title : 'Dialog');
+  const focusableElements = React.useCallback(() => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(modalFocusableSelector) ?? [])
+    .filter((element) => !element.hasAttribute('disabled') && element.getAttribute('aria-hidden') !== 'true'), []);
+
+  React.useEffect(() => {
+    previouslyFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    window.setTimeout(() => {
+      const firstFocusable = focusableElements()[0];
+      (firstFocusable ?? dialogRef.current)?.focus();
+    }, 0);
+
+    return () => {
+      const previous = previouslyFocusedRef.current;
+      if (previous && document.contains(previous)) previous.focus();
+    };
+  }, [focusableElements]);
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+
+    if (event.key !== 'Tab') return;
+
+    const focusable = focusableElements();
+    event.preventDefault();
+    if (focusable.length === 0) {
+      dialogRef.current?.focus();
+      return;
+    }
+
+    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const currentIndex = activeElement ? focusable.indexOf(activeElement) : -1;
+    const nextIndex = nextModalFocusIndex(currentIndex, focusable.length, event.shiftKey);
+    focusable[nextIndex]?.focus();
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={size === 'wide' ? 'modal modal-wide' : 'modal'} role="dialog" aria-modal="true" aria-label={accessibleTitle}>
+      <section className={size === 'wide' ? 'modal modal-wide' : 'modal'} role="dialog" aria-modal="true" aria-label={accessibleTitle} tabIndex={-1} ref={dialogRef} onKeyDown={handleKeyDown}>
         <header className="modal-head">
           <h2>{title}</h2>
           <div className="modal-head-actions">
