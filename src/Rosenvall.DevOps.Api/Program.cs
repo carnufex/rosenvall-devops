@@ -1679,8 +1679,30 @@ api.MapGet("/work-items/{workItemId:guid}/pull-request/diff", async (Guid workIt
         return Results.Problem("Local pull request could not be read from Forgejo. Retry after Forgejo is available.", statusCode: StatusCodes.Status502BadGateway);
     }
 
-    var files = await localGit.GetPullRequestFilesAsync(pullRequest, cancellationToken) ?? [];
-    var diff = await localGit.GetPullRequestDiffAsync(pullRequest, cancellationToken) ?? "";
+    IReadOnlyList<PullRequestDiffFileDto> files;
+    string diff;
+    try
+    {
+        files = await localGit.GetPullRequestFilesAsync(pullRequest, cancellationToken) ?? [];
+        diff = await localGit.GetPullRequestDiffAsync(pullRequest, cancellationToken) ?? "";
+    }
+    catch (RepositorySourceProviderException ex)
+    {
+        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderRejectedRequest(ex.Provider, ex.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway, ex.Detail));
+    }
+    catch (JsonException ex)
+    {
+        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderBadResponse("LocalGit", ex.Message));
+    }
+    catch (HttpRequestException ex)
+    {
+        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderUnavailable("LocalGit", ex.Message));
+    }
+    catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+    {
+        return RepositorySourceFeature.Problem(RepositorySourceFeature.ProviderUnavailable("LocalGit", ex.Message));
+    }
+
     const int maxDiffCharacters = 320_000;
     var truncated = diff.Length > maxDiffCharacters;
     if (truncated)
@@ -7404,7 +7426,10 @@ namespace Rosenvall.DevOps.Api
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                return null;
+                throw new RepositorySourceProviderException(
+                    "LocalGit",
+                    response.StatusCode,
+                    await RepositorySourceFeature.ProviderResponseDetailAsync(response, cancellationToken));
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -7431,9 +7456,15 @@ namespace Rosenvall.DevOps.Api
             request.Headers.Accept.Clear();
             request.Headers.Accept.ParseAdd("text/plain");
             using var response = await httpClient.SendAsync(request, cancellationToken);
-            return response.IsSuccessStatusCode
-                ? await response.Content.ReadAsStringAsync(cancellationToken)
-                : null;
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new RepositorySourceProviderException(
+                    "LocalGit",
+                    response.StatusCode,
+                    await RepositorySourceFeature.ProviderResponseDetailAsync(response, cancellationToken));
+            }
+
+            return await response.Content.ReadAsStringAsync(cancellationToken);
         }
 
         public async Task<bool> MergePullRequestAsync(GitHubPullRequestDto pullRequest, CancellationToken cancellationToken)

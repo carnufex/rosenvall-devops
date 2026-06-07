@@ -136,6 +136,21 @@ public sealed class RepositorySourceFeatureTests
     }
 
     [Fact]
+    public void Local_pull_request_diff_endpoint_maps_provider_failures_to_source_problems()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("api.MapGet(\"/work-items/{workItemId:guid}/pull-request/diff\"", program);
+        Assert.Contains("catch (RepositorySourceProviderException ex)", program);
+        Assert.Contains("RepositorySourceFeature.ProviderRejectedRequest(ex.Provider", program);
+        Assert.Contains("catch (JsonException ex)", program);
+        Assert.Contains("RepositorySourceFeature.ProviderBadResponse(\"LocalGit\", ex.Message)", program);
+        Assert.Contains("catch (HttpRequestException ex)", program);
+        Assert.Contains("RepositorySourceFeature.ProviderUnavailable(\"LocalGit\", ex.Message)", program);
+    }
+
+    [Fact]
     public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
     {
         var root = FindRepositoryRoot();

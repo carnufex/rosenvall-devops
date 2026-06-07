@@ -98,6 +98,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the runtime monitor split by moving `ProviderSyncRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ProviderSyncRunMonitor.cs`, keeping provider-sync Job adoption and completion/failure polling out of `Program.cs`.
 - 2026-06-07: Closed the Source ref validation finding. Source tree/file endpoints normalize read refs through `RepositorySourceFeature.NormalizeSourceRef`, accepting ordinary branch/tag/SHA values while rejecting whitespace-only refs, control characters, `..`, `@{`, leading/trailing slash and lockfile-style suffixes; regression coverage now includes those rejection cases.
 - 2026-06-07: Closed the repository-scoped GitHub Source credential findings. GitHub Source tree/file and provider-sync source credentials now resolve only from the linked repository's matching GitHub App installation and actor authorization; the Source read helper no longer falls back to actor default installations or the process-wide configured GitHub token. `GetGitHubIntegrationForRepository` also no longer falls back to the newest integration when owner metadata is missing.
+- 2026-06-07: Closed the Source/LocalGit PR provider-error mapping finding for RDO-native read surfaces. Source tree/file clients preserve non-404 provider failures as `RepositorySourceProviderException`, Source endpoints map provider/transport/JSON failures to 502/503 problems, and LocalGit PR files/diff reads now use the same provider-error contract instead of returning `null` and rendering an empty diff.
 - 2026-06-07: Continued the runtime monitor split by moving `ImplementationRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ImplementationRunMonitor.cs`, keeping repository implementation and cleanup Job status polling, stuck-run diagnostics and realtime run updates out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `BoardPublicAppDeploymentReconciler` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs`, keeping public app deployment/readiness reconciliation, LocalGit merge gating and merged-PR source adoption out of `Program.cs`.
 - 2026-05-30: Started ticket 8 typed manifest assertions. Backend tests now parse selected Kubernetes runtime YAML with `YamlDotNet` for preview-promotion Jobs and provider-sync Jobs/Secrets, which caught and fixed provider-sync token Secret labels being rendered outside `metadata.labels`.
@@ -3059,6 +3060,8 @@ Recommended fix:
 
 ### P2: Provider Read Errors Are Collapsed Into `null`
 
+Status 2026-06-07: Closed for Source tree/file and RDO-native LocalGit PR diff reads. Forgejo and GitHub Source tree/file clients now preserve non-404 provider failures as `RepositorySourceProviderException`, Source endpoints map provider rejections, malformed JSON, transport errors and timeouts to provider-aware problem responses, and LocalGit PR files/diff reads no longer collapse non-success HTTP responses to `null`.
+
 Evidence:
 
 - `ForgejoRepositoryClient.GetSourceTreeAsync`, `GetSourceFileAsync`, `GetPullRequestFilesAsync` and `GetPullRequestDiffAsync` return `null` for non-success HTTP responses.
@@ -3559,6 +3562,8 @@ Recommended fix:
 - Add one async unit test with a small real language sample, plus one forced-fallback test, so later Shiki upgrades cannot silently break line preservation.
 
 ### P2: Source API Error Handling Should Return Provider-Aware Problems
+
+Status 2026-06-07: Closed. Source tree/file endpoints route provider reads through `RepositorySourceFeature.ReadResultAsync`, which maps provider rejections to 502, unreadable provider JSON to 502 and transport/timeout failures to 503. LocalGit PR diff now uses the same provider-aware problem helpers for Forgejo files/diff failures.
 
 Evidence:
 

@@ -4560,6 +4560,17 @@ public sealed class DevOpsStoreTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, localError.StatusCode);
         Assert.Contains("forgejo is starting", localError.Detail);
 
+        var pullRequest = new GitHubPullRequestDto("rdo", "demo-app", 7, "open", false, "http://forgejo.local/rdo/demo-app/pulls/7");
+        var localFilesError = await Assert.ThrowsAsync<RepositorySourceProviderException>(() => forgejo.GetPullRequestFilesAsync(pullRequest, CancellationToken.None));
+        var localDiffError = await Assert.ThrowsAsync<RepositorySourceProviderException>(() => forgejo.GetPullRequestDiffAsync(pullRequest, CancellationToken.None));
+
+        Assert.Equal("LocalGit", localFilesError.Provider);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, localFilesError.StatusCode);
+        Assert.Contains("forgejo is starting", localFilesError.Detail);
+        Assert.Equal("LocalGit", localDiffError.Provider);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, localDiffError.StatusCode);
+        Assert.Contains("forgejo is starting", localDiffError.Detail);
+
         using var githubHttpClient = new HttpClient(new RoutingHttpMessageHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.BadGateway)
             {
