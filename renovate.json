@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "matchManagers": ["npm"],
+      "matchFileNames": [
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        "preview-base/package.json",
+        "preview-base/package-lock.json"
+      ],
+      "groupName": "npm dependencies"
+    },
+    {
+      "matchPackageNames": ["@openai/codex"],
+      "groupName": "Codex CLI"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^src\\/Rosenvall\\.DevOps\\.Api\\/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "npm install -g (?<depName>@openai\\/codex)@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "npm"
+    }
+  ]
+}

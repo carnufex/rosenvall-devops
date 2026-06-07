@@ -58,6 +58,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Fixed Kubernetes runner image drift for repository implementation, preview-promotion, PR review-fix and repository cleanup Jobs. Those manifests now use `Ai:Codex:KubernetesRunnerImage` when configured, matching preview-source behavior and keeping runner pods on the digest-pinned image selected by deployment config instead of falling back to mutable `:main`.
 - 2026-06-07: Started the Codex/preview dependency reproducibility slice by pinning the API/runner image Codex CLI install to `@openai/codex@0.137.0` and adding a Dockerfile regression test that rejects unpinned global Codex installs. Remaining follow-up in the same finding: add a `preview-base/package-lock.json`, switch preview-base to `npm ci`, and add explicit dependency-update automation.
 - 2026-06-07: Continued the Codex/preview dependency reproducibility slice by committing `preview-base/package-lock.json`, switching the preview-base image build from `npm install` to `npm ci`, and adding a regression test for the lockfile/Dockerfile contract. Remaining follow-up in the same finding: add explicit dependency-update automation for the pinned Codex CLI and preview-base dependency set.
+- 2026-06-07: Closed the Codex/preview dependency reproducibility slice by adding Renovate configuration for frontend and preview-base npm lockfiles plus a regex-managed `@openai/codex` Dockerfile pin. Dependency updates for these runner and preview surfaces now have an explicit PR path instead of depending on implicit image rebuild drift.
 - 2026-06-07: Completed the public app readiness gate slice. Board public app deployment now separates Kubernetes apply from readiness, moves apps through `WaitingForReadiness`, reuses the Kubernetes deployment/pod health check before marking apps `Running`, and only exposes the app link while status is actually `Running`.
 - 2026-06-07: Closed the remaining public app readiness bypasses in direct PR approval and GitHub webhook handling. Those paths now record `WaitingForReadiness` after Kubernetes apply, while the reconciler performs readiness-gated LocalGit merge, preview cleanup and card completion so `Approve PR` no longer marks delivery done immediately after apply.
 - 2026-06-07: Extended runtime health checks for preview and public app routes. `PreviewEnvironmentOrchestrator.CheckHealthAsync` now requires the Service to exist with a cluster IP/ports and the Gateway API `HTTPRoute` to report `Accepted=True` before returning `Running`, with parser tests covering service readiness and rejected routes.
@@ -1004,7 +1005,7 @@ Recommended fix:
 
 ### P1: Codex And Preview Dependencies Are Not Fully Reproducible
 
-Status 2026-06-07: Mostly closed. The API/runner Dockerfile now installs a pinned Codex CLI version, `@openai/codex@0.137.0`, with a regression test rejecting unpinned global Codex installs. `preview-base` now commits `package-lock.json` and builds with `npm ci`, with a regression test covering the lockfile/Dockerfile contract. Remaining follow-up: add Renovate/Dependabot rules or an equivalent explicit update workflow for the pinned Codex CLI and preview-base dependency set.
+Status 2026-06-07: Closed. The API/runner Dockerfile now installs a pinned Codex CLI version, `@openai/codex@0.137.0`, with a regression test rejecting unpinned global Codex installs. `preview-base` now commits `package-lock.json` and builds with `npm ci`, with a regression test covering the lockfile/Dockerfile contract. `renovate.json` tracks frontend and preview-base npm lockfiles plus the regex-managed Codex CLI Dockerfile pin, so dependency changes now arrive through explicit update PRs.
 
 Evidence:
 
@@ -1022,7 +1023,7 @@ Recommended fix:
 
 - Pin Codex explicitly, for example `@openai/codex@<known-version>`, or install from a lockfile in a dedicated runner package directory.
 - Add `preview-base/package-lock.json` and switch preview-base Dockerfile to `npm ci`.
-- Add Renovate/Dependabot rules so dependency updates are explicit PRs, not implicit image rebuild changes.
+- Add Renovate/Dependabot rules so dependency updates are explicit PRs, not implicit image rebuild changes. Status: implemented with Renovate coverage for frontend, preview-base and the Codex CLI Dockerfile pin.
 
 ### P2: External Binaries Should Be Checksum-Verified Or Image-Pinned
 

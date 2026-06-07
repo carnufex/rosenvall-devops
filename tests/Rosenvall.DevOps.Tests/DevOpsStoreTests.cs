@@ -5527,6 +5527,21 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Renovate_tracks_preview_base_and_codex_cli_dependencies()
+    {
+        var config = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "renovate.json"));
+
+        Assert.Contains("\"customType\": \"regex\"", config);
+        Assert.Contains("src\\\\/Rosenvall\\\\.DevOps\\\\.Api\\\\/Dockerfile", config);
+        Assert.Contains("npm install -g (?<depName>@openai\\\\/codex)@(?<currentValue>", config);
+        Assert.Contains("\"datasourceTemplate\": \"npm\"", config);
+        Assert.Contains("preview-base/package.json", config);
+        Assert.Contains("preview-base/package-lock.json", config);
+        Assert.Contains("frontend/package.json", config);
+        Assert.Contains("frontend/package-lock.json", config);
+    }
+
+    [Fact]
     public void Ci_runs_frontend_tests_before_frontend_build()
     {
         var ci = File.ReadAllText(Path.Combine(FindRepositoryRoot(), ".github", "workflows", "ci.yml"));
