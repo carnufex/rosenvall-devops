@@ -1175,7 +1175,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
         return BoardMutationForbidden();
     }
 
-    if (source.Provider.Equals(targetProvider, StringComparison.OrdinalIgnoreCase))
+    if (RepositorySourceFeature.SameProvider(source.Provider, targetProvider))
     {
         return Results.Problem("Choose a different target provider for repository sync.", statusCode: StatusCodes.Status400BadRequest);
     }
@@ -1189,8 +1189,8 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
     }
 
     var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
-    var actionKey = ProviderSyncActionIdempotencyKey(actorSubject, boardId, source.Id, targetProvider, request.TargetName, request.Private);
-    var quota = ReadProviderSyncActionQuota(configuration);
+    var actionKey = RepositorySourceFeature.ProviderSyncActionIdempotencyKey(actorSubject, boardId, source.Id, targetProvider, request.TargetName, request.Private);
+    var quota = RepositorySourceFeature.ReadProviderSyncActionQuota(configuration);
     var actionStart = store.StartAction(
         actorSubject,
         boardId,
@@ -1199,7 +1199,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
         actionKey,
         maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
         quotaWindow: quota.Window,
-        quotaOperationKinds: ActionLedgerBlockReasons.ProviderSyncActionKinds);
+        quotaOperationKinds: RepositorySourceFeature.ProviderSyncActionKinds);
     if (!actionStart.Started)
     {
         if (IsQuotaExceeded(actionStart))
@@ -1226,12 +1226,9 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
             return Results.Problem("LocalGit is unavailable or missing its service credential.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
-        var creation = await localGit.CreateRepositoryResultAsync(new CreateLocalGitRepositoryRequest(
-            request.TargetName,
-            request.Private,
-            $"Synced from {source.Provider} / {source.Owner}/{source.Name}.",
-            source.ImplementationProfile,
-            ImplementationWorkflow: source.ImplementationWorkflow), cancellationToken);
+        var creation = await localGit.CreateRepositoryResultAsync(
+            RepositorySourceFeature.BuildLocalGitProviderSyncCreateRequest(request, source),
+            cancellationToken);
         if (!creation.Succeeded || creation.Repository is null)
         {
             store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
@@ -1264,14 +1261,11 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
             return Results.Problem(tokenResult.Message, statusCode: tokenResult.StatusCode);
         }
 
-        var creation = await github.CreateRepositoryResultAsync(integration, new CreateGitHubRepositoryRequest(
-            installationId,
-            request.TargetName,
-            request.Private,
-            $"Synced from {source.Provider} / {source.Owner}/{source.Name}.",
-            integration.AccountLogin,
-            source.ImplementationProfile,
-            ImplementationWorkflow: source.ImplementationWorkflow), tokenResult.Token, cancellationToken);
+        var creation = await github.CreateRepositoryResultAsync(
+            integration,
+            RepositorySourceFeature.BuildGitHubProviderSyncCreateRequest(installationId.Value, request, source, integration),
+            tokenResult.Token,
+            cancellationToken);
         if (!creation.Succeeded || creation.Repository is null)
         {
             store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
@@ -1282,18 +1276,10 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
         targetToken = tokenResult.Token;
     }
 
-    var target = store.CreateRepository(new CreateRepositoryRequest(
-        targetTemplate.Provider,
-        targetTemplate.Name,
-        targetTemplate.RemoteUrl,
-        targetTemplate.DefaultBranch,
-        targetTemplate.WebUrl,
-        targetTemplate.Owner,
-        source.ImplementationProfile,
-        source.ImplementationWorkflow));
-    _ = store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(target.Id, false, source.ImplementationProfile, "PendingSync"));
+    var target = store.CreateRepository(RepositorySourceFeature.BuildProviderSyncTargetRepositoryCreateRequest(targetTemplate, source));
+    _ = store.LinkRepositoryToBoard(boardId, RepositorySourceFeature.BuildProviderSyncBoardLinkRequest(target, source));
 
-    var run = store.RecordPipelineRun(new RecordPipelineRunRequest(source.Id, boardId, null, "ProviderSync", "Queued", $"Syncing {source.Name} to {target.Provider}.", target.WebUrl ?? target.RemoteUrl, TargetRepositoryId: target.Id));
+    var run = store.RecordPipelineRun(RepositorySourceFeature.BuildProviderSyncPipelineRunRequest(boardId, source, target));
     if (run is null)
     {
         store.MarkBoardRepositorySyncState(boardId, target.Id, "Failed");
@@ -3286,17 +3272,6 @@ static string SanitizeUserAuthorizationMessage(string message)
 static string EffectiveActorSubject(string? actorSubject) =>
     string.IsNullOrWhiteSpace(actorSubject) ? "local-dev" : actorSubject;
 
-static string ProviderSyncActionIdempotencyKey(string actor, Guid boardId, Guid sourceRepositoryId, string targetProvider, string targetName, bool isPrivate)
-{
-    var normalizedName = Regex.Replace((string.IsNullOrWhiteSpace(targetName) ? "repository" : targetName.Trim()).ToLowerInvariant(), "[^a-z0-9._-]+", "-").Trim('-', '.', '_');
-    if (string.IsNullOrWhiteSpace(normalizedName))
-    {
-        normalizedName = "repository";
-    }
-
-    return $"provider-sync:{EffectiveActorSubject(actor).Trim()}:{boardId:N}:{sourceRepositoryId:N}:{(string.IsNullOrWhiteSpace(targetProvider) ? "provider" : targetProvider.Trim().ToLowerInvariant())}:{normalizedName}:{isPrivate.ToString().ToLowerInvariant()}";
-}
-
 static string RepositoryImplementationActionIdempotencyKey(string actor, Guid workItemId, Guid aiRunId, Guid? repositoryId) =>
     $"repository-implementation:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{aiRunId:N}:{repositoryId?.ToString("N") ?? "default"}";
 
@@ -3335,14 +3310,6 @@ static ExpensiveActionQuotaOptions ReadAiPlanningActionQuota(IConfiguration conf
     var enabled = configuration.GetValue("Actions:Quotas:AiPlanning:Enabled", true);
     var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:AiPlanning:MaxStartedPerActor", 12));
     var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:AiPlanning:WindowSeconds", 600));
-    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
-}
-
-static ExpensiveActionQuotaOptions ReadProviderSyncActionQuota(IConfiguration configuration)
-{
-    var enabled = configuration.GetValue("Actions:Quotas:ProviderSync:Enabled", true);
-    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:ProviderSync:MaxStartedPerActor", 4));
-    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:ProviderSync:WindowSeconds", 900));
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
 
@@ -3915,7 +3882,6 @@ namespace Rosenvall.DevOps.Api
     {
         public const string QuotaExceeded = "QuotaExceeded";
         public static readonly IReadOnlyList<string> AiPlanningActionKinds = ["ai-plan", "ai-plan-revise"];
-        public static readonly IReadOnlyList<string> ProviderSyncActionKinds = ["provider-sync"];
         public static readonly IReadOnlyList<string> RepositoryImplementationActionKinds = ["repository-implementation"];
         public static readonly IReadOnlyList<string> PullRequestReviewFixActionKinds = ["pr-review-fix"];
         public static readonly IReadOnlyList<string> PreviewBuildActionKinds = ["preview-build"];
@@ -18220,9 +18186,6 @@ namespace Rosenvall.DevOps.Api
 
         private static string PreviewPromotionIdempotencyKey(string actor, Guid workItemId, Guid repositoryId, Guid previewId) =>
             $"preview-promotion:{NormalizeText(actor, "system")}:{workItemId:N}:{repositoryId:N}:{previewId:N}";
-
-        private static string ProviderSyncIdempotencyKey(string actor, Guid boardId, Guid sourceRepositoryId, string targetProvider, string targetName, bool isPrivate) =>
-            $"provider-sync:{NormalizeText(actor, "system")}:{boardId:N}:{sourceRepositoryId:N}:{NormalizeText(targetProvider, "provider").ToLowerInvariant()}:{SlugifyRepositoryName(targetName)}:{isPrivate.ToString().ToLowerInvariant()}";
 
         private static string NormalizeText(string? value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();

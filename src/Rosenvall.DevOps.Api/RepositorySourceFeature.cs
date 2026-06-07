@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using System.Net;
 
 namespace Rosenvall.DevOps.Api;
@@ -11,6 +12,7 @@ public static class RepositorySourceFeature
     public const string RequiredSourcePathMessage = "Source file path is required.";
     public const string InvalidTargetProviderMessage = "Target provider must be LocalGit or GitHub.";
     public const string GitHubSourceUnavailableMessage = "GitHub source access is unavailable. Sync the GitHub App installation first.";
+    public static readonly IReadOnlyList<string> ProviderSyncActionKinds = ["provider-sync"];
 
     public static string NormalizeSourcePath(string? value)
     {
@@ -113,6 +115,60 @@ public static class RepositorySourceFeature
             _ => ""
         };
 
+    public static bool SameProvider(string? sourceProvider, string? targetProvider) =>
+        !string.IsNullOrWhiteSpace(sourceProvider) &&
+        !string.IsNullOrWhiteSpace(targetProvider) &&
+        sourceProvider.Trim().Equals(targetProvider.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    public static string ProviderSyncActionIdempotencyKey(string actorSubject, Guid boardId, Guid sourceRepositoryId, string targetProvider, string targetName, bool isPrivate) =>
+        $"provider-sync:{NormalizeActionKeyPart(actorSubject, "local-dev")}:{boardId:N}:{sourceRepositoryId:N}:{NormalizeActionKeyPart(targetProvider, "provider")}:{NormalizeActionKeyPart(targetName, "repository")}:{isPrivate.ToString().ToLowerInvariant()}";
+
+    public static ExpensiveActionQuotaOptions ReadProviderSyncActionQuota(IConfiguration configuration)
+    {
+        var enabled = configuration.GetValue("Actions:Quotas:ProviderSync:Enabled", true);
+        var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:ProviderSync:MaxStartedPerActor", 4));
+        var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:ProviderSync:WindowSeconds", 900));
+        return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+    }
+
+    public static string ProviderSyncRepositoryDescription(RepositoryDto source) =>
+        $"Synced from {source.Provider} / {source.Owner}/{source.Name}.";
+
+    public static CreateLocalGitRepositoryRequest BuildLocalGitProviderSyncCreateRequest(SyncRepositoryToProviderRequest request, RepositoryDto source) =>
+        new(
+            request.TargetName,
+            request.Private,
+            ProviderSyncRepositoryDescription(source),
+            source.ImplementationProfile,
+            ImplementationWorkflow: source.ImplementationWorkflow);
+
+    public static CreateGitHubRepositoryRequest BuildGitHubProviderSyncCreateRequest(long installationId, SyncRepositoryToProviderRequest request, RepositoryDto source, GitHubIntegrationDto integration) =>
+        new(
+            installationId,
+            request.TargetName,
+            request.Private,
+            ProviderSyncRepositoryDescription(source),
+            integration.AccountLogin,
+            source.ImplementationProfile,
+            ImplementationWorkflow: source.ImplementationWorkflow);
+
+    public static CreateRepositoryRequest BuildProviderSyncTargetRepositoryCreateRequest(RepositoryDto targetTemplate, RepositoryDto source) =>
+        new(
+            targetTemplate.Provider,
+            targetTemplate.Name,
+            targetTemplate.RemoteUrl,
+            targetTemplate.DefaultBranch,
+            targetTemplate.WebUrl,
+            targetTemplate.Owner,
+            source.ImplementationProfile,
+            source.ImplementationWorkflow);
+
+    public static LinkBoardRepositoryRequest BuildProviderSyncBoardLinkRequest(RepositoryDto target, RepositoryDto source) =>
+        new(target.Id, false, source.ImplementationProfile, "PendingSync");
+
+    public static RecordPipelineRunRequest BuildProviderSyncPipelineRunRequest(Guid boardId, RepositoryDto source, RepositoryDto target) =>
+        new(source.Id, boardId, null, "ProviderSync", "Queued", $"Syncing {source.Name} to {target.Provider}.", target.WebUrl ?? target.RemoteUrl, TargetRepositoryId: target.Id);
+
     public static bool IsSourceReadableProvider(string? provider) =>
         provider?.Trim() switch
         {
@@ -180,6 +236,19 @@ public static class RepositorySourceFeature
 
     private static string FormatDetail(string? detail) =>
         string.IsNullOrWhiteSpace(detail) ? "." : $": {detail.Trim()}";
+
+    private static string NormalizeActionKeyPart(string? value, string fallback)
+    {
+        var input = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+        var normalized = new string(input
+            .ToLowerInvariant()
+            .Select(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-'
+                ? character
+                : '-')
+            .ToArray())
+            .Trim('-', '.', '_');
+        return string.IsNullOrWhiteSpace(normalized) ? fallback : normalized;
+    }
 }
 
 public sealed record RepositorySourceProblem(string Message, int StatusCode);

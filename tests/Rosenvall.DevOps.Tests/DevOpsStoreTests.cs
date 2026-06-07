@@ -562,10 +562,10 @@ public sealed class DevOpsStoreTests
         var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
         var endpoint = EndpointSnippet(program, "api.MapPost(\"/boards/{boardId:guid}/repositories/sync-to-provider\"", "api.MapGet(\"/boards/{boardId:guid}/teams\"");
 
-        Assert.Contains("ReadProviderSyncActionQuota(configuration)", endpoint);
+        Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota(configuration)", endpoint);
         Assert.Contains("\"provider-sync\"", endpoint);
         Assert.Contains("maxStartsPerActor", endpoint);
-        Assert.Contains("ActionLedgerBlockReasons.ProviderSyncActionKinds", endpoint);
+        Assert.Contains("RepositorySourceFeature.ProviderSyncActionKinds", endpoint);
         Assert.Contains("ActionQuotaExceededResult(actionStart)", endpoint);
         Assert.True(endpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < endpoint.IndexOf("CreateRepositoryResultAsync", StringComparison.Ordinal));
     }
@@ -4560,6 +4560,34 @@ public sealed class DevOpsStoreTests
         Assert.Equal(expected, RepositorySourceFeature.NormalizeTargetProvider(input));
     }
 
+    [Fact]
+    public void Repository_source_feature_owns_provider_sync_policy_helpers()
+    {
+        var actor = "Demo User";
+        var boardId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        var sourceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+
+        var key = RepositorySourceFeature.ProviderSyncActionIdempotencyKey(actor, boardId, sourceId, " GitHub ", "My Repo!", true);
+
+        Assert.Equal("provider-sync:demo-user:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:github:my-repo:true", key);
+        Assert.True(RepositorySourceFeature.SameProvider("LocalGit", "localgit"));
+        Assert.False(RepositorySourceFeature.SameProvider("LocalGit", "GitHub"));
+        Assert.Equal(new[] { "provider-sync" }, RepositorySourceFeature.ProviderSyncActionKinds);
+
+        var quota = RepositorySourceFeature.ReadProviderSyncActionQuota(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Actions:Quotas:ProviderSync:Enabled"] = "true",
+                ["Actions:Quotas:ProviderSync:MaxStartedPerActor"] = "0",
+                ["Actions:Quotas:ProviderSync:WindowSeconds"] = "10"
+            })
+            .Build());
+
+        Assert.True(quota.Enabled);
+        Assert.Equal(1, quota.MaxStartedPerActor);
+        Assert.Equal(TimeSpan.FromSeconds(60), quota.Window);
+    }
+
     [Theory]
     [InlineData("LocalGit", true)]
     [InlineData("GitHub", true)]
@@ -4585,9 +4613,14 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RepositorySourceFeature.EscapeSourcePathForUrl", program);
         Assert.Contains("RepositorySourceFeature.BuildCloneInfo", program);
         Assert.Contains("RepositorySourceFeature.NormalizeTargetProvider", program);
+        Assert.Contains("RepositorySourceFeature.ProviderSyncActionIdempotencyKey", program);
+        Assert.Contains("RepositorySourceFeature.ReadProviderSyncActionQuota", program);
+        Assert.Contains("RepositorySourceFeature.BuildProviderSyncPipelineRunRequest", program);
         Assert.Contains("RepositorySourceReadResultAsync", program);
         Assert.DoesNotContain("static string NormalizeApiSourcePath", program);
         Assert.DoesNotContain("static string BuildCloneCommand", program);
+        Assert.DoesNotContain("static string ProviderSyncActionIdempotencyKey", program);
+        Assert.DoesNotContain("private static string ProviderSyncIdempotencyKey", program);
     }
 
     [Fact]
