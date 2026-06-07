@@ -158,6 +158,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the runtime correlation scope slice in the frontend. The work-item `Logs` tab now shows the selected AI/preview/implementation/cleanup run id with a copy action, plus run kind and Kubernetes job/pod metadata where available, so users can correlate UI logs with API and Kubernetes diagnostics.
 - 2026-06-07: Continued the runtime correlation scope slice by adding `aiRunId` to the shared runtime log scope. Repository implementation monitor logs now carry the AI run id together with board/work-item/run/job fields.
 - 2026-06-07: Closed the shared .NET build-policy slice. Root `Directory.Build.props` now centralizes nullable reference types, implicit usings, latest analyzer level, deterministic builds and a narrow warnings-as-errors ratchet for unawaited tasks plus unreachable code, while root `.editorconfig` defines shared C# plus frontend formatting/style conventions.
+- 2026-06-07: Started the frontend lint quality-gate slice. Frontend now has ESLint 9 flat config with TypeScript, React hooks and JSX accessibility plugins, `npm run lint`, and CI runs lint after frontend tests and before build. Existing App.tsx hook/a11y/unused-symbol findings are currently warnings; turning selected warnings into failures remains a follow-up ratchet.
 
 ## Priority Findings
 
@@ -3186,6 +3187,8 @@ Recommended fix:
 - Start warnings-as-errors narrowly if needed, then ratchet as the large `Program.cs` split proceeds.
 
 ### P2: Frontend Has Tests But No Lint Or Type-Level Contract Gate Beyond Build
+
+Status 2026-06-07: Started. `frontend/package.json` now has `npm run lint`, `frontend/eslint.config.js` loads TypeScript, React hooks and JSX accessibility lint plugins, and CI runs lint between frontend tests and build. Existing App.tsx hook/a11y/unused-symbol findings are warnings for the first baseline; selected warning ratcheting remains open.
 
 Evidence:
 

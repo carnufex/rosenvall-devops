@@ -5791,6 +5791,34 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Frontend_has_lint_quality_gate()
+    {
+        var root = FindRepositoryRoot();
+        var packageJson = File.ReadAllText(Path.Combine(root, "frontend", "package.json"));
+        var workflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "ci.yml"));
+        var eslintConfigPath = Path.Combine(root, "frontend", "eslint.config.js");
+
+        Assert.True(File.Exists(eslintConfigPath), "Frontend linting should use an explicit ESLint config.");
+        Assert.Contains("\"lint\"", packageJson);
+        Assert.Contains("eslint", packageJson);
+        Assert.Contains("typescript-eslint", packageJson);
+        Assert.Contains("eslint-plugin-react-hooks", packageJson);
+        Assert.Contains("eslint-plugin-jsx-a11y", packageJson);
+
+        var eslintConfig = File.ReadAllText(eslintConfigPath);
+        Assert.Contains("reactHooks.configs", eslintConfig);
+        Assert.Contains("jsxA11y", eslintConfig);
+        Assert.Contains("typescript-eslint", eslintConfig);
+
+        Assert.Contains("name: Lint", workflow);
+        Assert.Contains("npm run lint", workflow);
+        Assert.True(
+            workflow.IndexOf("npm test", StringComparison.Ordinal) < workflow.IndexOf("npm run lint", StringComparison.Ordinal)
+            && workflow.IndexOf("npm run lint", StringComparison.Ordinal) < workflow.IndexOf("npm run build", StringComparison.Ordinal),
+            "Frontend CI should run lint after tests and before build.");
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
