@@ -39,6 +39,7 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
 
             var jobName = RepositoryImplementationJobManifestRenderer.JobName(run, detail);
             var implementationNamespace = RepositoryImplementationJobManifestRenderer.Namespace;
+            using var scope = RunLogScope.BeginImplementationRunScope(logger, run, detail, jobName);
             var logsResult = await jobs.GetOutputAsync(["logs", "-n", implementationNamespace, $"job/{jobName}", "--all-containers", "--tail=160"], cancellationToken);
             var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
             if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)
@@ -107,6 +108,7 @@ public sealed class ImplementationRunMonitor(DevOpsStore store, PipelineJobOrche
 
             var jobName = RepositoryCleanupJobManifestRenderer.JobName(run, detail);
             var cleanupNamespace = RepositoryCleanupJobManifestRenderer.Namespace;
+            using var scope = RunLogScope.BeginRepositoryCleanupRunScope(logger, run, detail, jobName);
             var logsResult = await jobs.GetOutputAsync(["logs", "-n", cleanupNamespace, $"job/{jobName}", "--all-containers", "--tail=160"], cancellationToken);
             var logs = logsResult.Succeeded ? logsResult.Message : string.Empty;
             if (string.IsNullOrWhiteSpace(logs) && DateTimeOffset.UtcNow - run.UpdatedAt > RunStuckTimeout)

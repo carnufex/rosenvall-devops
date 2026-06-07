@@ -36,6 +36,7 @@ public sealed class BoardPublicAppDeploymentReconciler(
 
         foreach (var app in store.GetBoardPublicAppsAwaitingDeployment())
         {
+            using var scope = RunLogScope.BeginPublicAppScope(logger, app);
             var manifest = store.RenderBoardPublicAppManifest(app.BoardId);
             if (string.IsNullOrWhiteSpace(manifest))
             {
@@ -56,6 +57,7 @@ public sealed class BoardPublicAppDeploymentReconciler(
 
         foreach (var app in store.GetBoardPublicAppsAwaitingReadiness())
         {
+            using var scope = RunLogScope.BeginPublicAppScope(logger, app);
             var health = await previews.CheckHealthAsync(ToPreviewHealthTarget(app), cancellationToken);
             if (string.Equals(health.Status, "Running", StringComparison.OrdinalIgnoreCase))
             {

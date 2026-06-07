@@ -5733,6 +5733,37 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Runtime_monitors_use_structured_run_log_scopes()
+    {
+        var root = FindRepositoryRoot();
+        var scopePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "RunLogScope.cs");
+        var implementationMonitor = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "ImplementationRunMonitor.cs"));
+        var providerSyncMonitor = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "ProviderSyncRunMonitor.cs"));
+        var previewMonitor = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "PreviewHealthMonitor.cs"));
+        var publicAppReconciler = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "BoardPublicAppDeploymentReconciler.cs"));
+
+        Assert.True(File.Exists(scopePath), "Runtime monitor log scopes should use a shared helper.");
+        var scope = File.ReadAllText(scopePath);
+
+        Assert.Contains("public static class RunLogScope", scope);
+        Assert.Contains("\"boardId\"", scope);
+        Assert.Contains("\"workItemId\"", scope);
+        Assert.Contains("\"workItemKey\"", scope);
+        Assert.Contains("\"runId\"", scope);
+        Assert.Contains("\"runKind\"", scope);
+        Assert.Contains("\"provider\"", scope);
+        Assert.Contains("\"jobName\"", scope);
+        Assert.Contains("\"podName\"", scope);
+        Assert.Contains("logger.BeginScope", scope);
+
+        Assert.Contains("RunLogScope.BeginImplementationRunScope", implementationMonitor);
+        Assert.Contains("RunLogScope.BeginRepositoryCleanupRunScope", implementationMonitor);
+        Assert.Contains("RunLogScope.BeginProviderSyncRunScope", providerSyncMonitor);
+        Assert.Contains("RunLogScope.BeginPreviewScope", previewMonitor);
+        Assert.Contains("RunLogScope.BeginPublicAppScope", publicAppReconciler);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()

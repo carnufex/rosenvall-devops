@@ -31,6 +31,7 @@ public sealed class ProviderSyncRunMonitor(DevOpsStore store, PipelineJobOrchest
         {
             var jobName = RepositoryProviderSyncJobManifestRenderer.JobName(run);
             var jobNamespace = RepositoryImplementationJobManifestRenderer.Namespace;
+            using var scope = RunLogScope.BeginProviderSyncRunScope(logger, run, jobName);
             var jobResult = await jobs.GetOutputAsync(["get", "job", jobName, "-n", jobNamespace, "-o", "json"], cancellationToken);
             if (!jobResult.Succeeded)
             {

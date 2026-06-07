@@ -30,6 +30,7 @@ public sealed class PreviewHealthMonitor(DevOpsStore store, PreviewEnvironmentOr
     {
         foreach (var preview in store.GetPreviewsAwaitingHealthCheck())
         {
+            using var scope = RunLogScope.BeginPreviewScope(logger, preview);
             var isTimedOutRecovery = string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(preview.FailureReason, "Timeout", StringComparison.OrdinalIgnoreCase);
             if (!_startedAt.ContainsKey(preview.Id))

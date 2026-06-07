@@ -154,6 +154,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-05-30: Completed the first appsettings drift slice. Base API settings now default preview/pipeline kubeconfig paths to in-cluster auth and use LocalGit/InternalForgejo repository intent without the stale external `git.rosenvall.se` defaults; `appsettings.Development.json` carries the local `tofu/output/kubeconfig` discovery contract.
 - 2026-06-07: Closed the structured kubectl argument slice. Preview and pipeline orchestration now populate `ProcessStartInfo.ArgumentList`, `PipelineJobOrchestrator.GetOutputAsync` accepts structured argument lists, and GitOps label selectors are passed as a single `-l` argument without command-string quote rewriting.
 - 2026-06-07: Started the Epic/Goal state-machine hardening slice. `Rosenvall.DevOps.Core` now has a pure `EpicGoalStateMachine` with explicit `PlanningChildren`, `RunningChildren`, `WaitingForReview`, `Blocked`, `Complete` and `Cancelled` outcomes, `StartEpicGoal` uses it for new goal status, and the frontend treats those explicit active states as running goals. A hosted reconciler that queues child AI/implementation work remains the next step for this finding.
+- 2026-06-07: Started the runtime correlation scope slice. Repository implementation, cleanup, provider-sync, preview-health and public-app reconciler monitor loops now use a shared `RunLogScope` helper so API logs carry consistent board/work-item/run/job/provider fields. Endpoint-triggered submissions, terminal/timeline metadata and frontend copy-run-id affordances remain follow-up work for the same finding.
 
 ## Priority Findings
 
@@ -1492,6 +1493,8 @@ Recommended fix:
 ## Thirteenth Pass: Observability And Incident Debugging
 
 ### P1: Runtime Work Needs Correlation Scopes
+
+Status 2026-06-07: Started. Runtime monitor loops now use a shared `RunLogScope` helper for repository implementation, repository cleanup, provider-sync, preview health and public app deployment/readiness reconciliation. The helper carries `boardId`, `workItemId`, `workItemKey`, `runId`, `runKind`, `provider`, `jobName` and `podName` through `ILogger.BeginScope`. Remaining follow-up: extend the same correlation model to endpoint-triggered job submissions, AI run ids, terminal/timeline metadata, and frontend copy-run-id affordances.
 
 Evidence:
 
