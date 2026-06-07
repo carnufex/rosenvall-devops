@@ -699,6 +699,89 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_build_action_ledger_blocks_same_work_item_duplicate_before_preview_starts_but_allows_later_rebuild()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Preview quota", "Avoid duplicate preview builds.", "Todo", "Medium", null));
+        var firstAiRunId = Guid.NewGuid();
+        var secondAiRunId = Guid.NewGuid();
+        var key = $"preview-build:demo:{item.Id:N}";
+
+        var first = store.StartAction("demo", board.Id, item.Id, "preview-build", key, blockAfterRunCreation: false);
+        var duplicateBeforePreview = store.StartAction("demo", board.Id, item.Id, "preview-build", key, blockAfterRunCreation: false);
+
+        Assert.True(first.Started);
+        Assert.False(duplicateBeforePreview.Started);
+        Assert.Equal(first.Action!.Id, duplicateBeforePreview.Action!.Id);
+
+        store.MarkActionRun(first.Action.Id, firstAiRunId, "Running");
+        var sameWorkItemDifferentAiRunBeforePreview = store.StartAction("demo", board.Id, item.Id, "preview-build", key, blockAfterRunCreation: false);
+
+        Assert.True(sameWorkItemDifferentAiRunBeforePreview.Started);
+        Assert.NotEqual(first.Action.Id, sameWorkItemDifferentAiRunBeforePreview.Action!.Id);
+
+        store.MarkActionRun(sameWorkItemDifferentAiRunBeforePreview.Action.Id, secondAiRunId, "Running");
+        var deliberateRebuild = store.StartAction("demo", board.Id, item.Id, "preview-build", key, blockAfterRunCreation: false);
+
+        Assert.True(deliberateRebuild.Started);
+        Assert.NotEqual(sameWorkItemDifferentAiRunBeforePreview.Action.Id, deliberateRebuild.Action!.Id);
+    }
+
+    [Fact]
+    public void Preview_build_action_ledger_enforces_per_actor_quota()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Preview quota", "Avoid duplicate preview builds.", "Todo", "Medium", null));
+        var firstKey = $"preview-build:demo:{Guid.NewGuid():N}";
+        var secondKey = $"preview-build:demo:{Guid.NewGuid():N}";
+
+        var first = store.StartAction("demo", board.Id, item.Id, "preview-build", firstKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "preview-build" });
+        var duplicate = store.StartAction("demo", board.Id, item.Id, "preview-build", firstKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "preview-build" });
+        var overQuota = store.StartAction("demo", board.Id, item.Id, "preview-build", secondKey, blockAfterRunCreation: false, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "preview-build" });
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action!.Id, duplicate.Action!.Id);
+        Assert.False(overQuota.Started);
+        Assert.Null(overQuota.Action);
+        Assert.Equal("QuotaExceeded", overQuota.BlockReason);
+    }
+
+    [Fact]
+    public void Preview_build_endpoint_uses_action_quota_before_approving_ai_run()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpoint = EndpointSnippet(program, "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"");
+
+        Assert.Contains("ReadPreviewBuildActionQuota(configuration)", endpoint);
+        Assert.Contains("\"preview-build\"", endpoint);
+        Assert.Contains("PreviewBuildActionIdempotencyKey(actorSubject, runContext.WorkItemId)", endpoint);
+        Assert.Contains("ActionLedgerBlockReasons.PreviewBuildActionKinds", endpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", endpoint);
+        Assert.Contains("IsPreviewBuildInProgress(store.GetWorkItemDetail(runContext.WorkItemId)?.Preview)", endpoint);
+        Assert.Contains("blockAfterRunCreation: false", endpoint);
+        Assert.True(endpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < endpoint.IndexOf("store.ApproveAiRun", StringComparison.Ordinal));
+        Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, result.Id, \"Running\")", endpoint);
+    }
+
+    [Fact]
+    public void Preview_build_endpoint_treats_applying_preview_as_in_progress()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var helper = EndpointSnippet(program, "static bool IsPreviewBuildInProgress(PreviewDto? preview)", "static bool IsQuotaExceeded(ActionStartResultDto startResult)");
+
+        Assert.Contains("\"Implementing\"", helper);
+        Assert.Contains("\"Applying\"", helper);
+        Assert.Contains("\"Provisioning\"", helper);
+    }
+
+    [Fact]
     public void Ai_plan_action_ledger_blocks_only_in_flight_duplicate_provider_calls()
     {
         using var fixture = DevOpsStoreFixture.Create();

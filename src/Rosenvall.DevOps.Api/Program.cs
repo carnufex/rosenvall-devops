@@ -2391,6 +2391,53 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     }
 
     var actor = AuditActorFromClaims(user);
+    var runContext = store.GetAiRun(aiRunId);
+    if (runContext is null)
+    {
+        return Results.NotFound();
+    }
+
+    var boardId = store.GetWorkItemBoardId(runContext.WorkItemId);
+    if (boardId is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (IsPreviewBuildInProgress(store.GetWorkItemDetail(runContext.WorkItemId)?.Preview))
+    {
+        return Results.Problem(
+            "Preview build is already queued or running for this work item.",
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
+    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+    var actionKey = PreviewBuildActionIdempotencyKey(actorSubject, runContext.WorkItemId);
+    var quota = ReadPreviewBuildActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        boardId,
+        runContext.WorkItemId,
+        "preview-build",
+        actionKey,
+        blockAfterRunCreation: false,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.PreviewBuildActionKinds);
+    if (!actionStart.Started)
+    {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
+        return Results.Conflict(new
+        {
+            message = "Preview build is already queued or running for this request.",
+            operationId = actionStart.Action?.Id,
+            runId = actionStart.Action?.RunId
+        });
+    }
+
     AiRun? result;
     try
     {
@@ -2398,11 +2445,13 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     }
     catch (InvalidOperationException ex)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, ex.Message);
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
     }
 
     if (result is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "AI run was not found.");
         return Results.NotFound();
     }
 
@@ -2410,8 +2459,10 @@ api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRun
     var preview = store.BeginPreviewImplementation(result.WorkItemId, "codex");
     if (preview is null)
     {
+        store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
         return Results.NotFound();
     }
+    store.MarkActionRun(actionStart.Action!.Id, result.Id, "Running");
 
     await hub.Clients.All.SendAsync("previewChanged", preview);
     _ = Task.Run(() => previewImplementationRunner.RunAsync(result, actor, CancellationToken.None), CancellationToken.None);
@@ -3114,6 +3165,9 @@ static string RepositoryImplementationActionIdempotencyKey(string actor, Guid wo
 static string PullRequestReviewFixActionIdempotencyKey(string actor, Guid workItemId, string? reasoningEffort) =>
     $"pr-review-fix:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(reasoningEffort)}";
 
+static string PreviewBuildActionIdempotencyKey(string actor, Guid workItemId) =>
+    $"preview-build:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}";
+
 static string AiPlanActionIdempotencyKey(string actor, Guid workItemId, string provider, string model, string? reasoningEffort) =>
     $"ai-plan:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}";
 
@@ -3160,6 +3214,20 @@ static ExpensiveActionQuotaOptions ReadPullRequestReviewFixActionQuota(IConfigur
     var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:PullRequestReviewFix:WindowSeconds", 900));
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
+
+static ExpensiveActionQuotaOptions ReadPreviewBuildActionQuota(IConfiguration configuration)
+{
+    var enabled = configuration.GetValue("Actions:Quotas:PreviewBuild:Enabled", true);
+    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:PreviewBuild:MaxStartedPerActor", 6));
+    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:PreviewBuild:WindowSeconds", 900));
+    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+}
+
+static bool IsPreviewBuildInProgress(PreviewDto? preview) =>
+    preview is not null &&
+    (string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
+     string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
+     string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase));
 
 static bool IsQuotaExceeded(ActionStartResultDto startResult) =>
     string.Equals(startResult.BlockReason, ActionLedgerBlockReasons.QuotaExceeded, StringComparison.OrdinalIgnoreCase);
@@ -3687,6 +3755,7 @@ namespace Rosenvall.DevOps.Api
         public static readonly IReadOnlyList<string> ProviderSyncActionKinds = ["provider-sync"];
         public static readonly IReadOnlyList<string> RepositoryImplementationActionKinds = ["repository-implementation"];
         public static readonly IReadOnlyList<string> PullRequestReviewFixActionKinds = ["pr-review-fix"];
+        public static readonly IReadOnlyList<string> PreviewBuildActionKinds = ["preview-build"];
     }
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);
