@@ -85,6 +85,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the runtime monitor split by moving `PreviewHealthMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/PreviewHealthMonitor.cs`, keeping preview readiness polling and timeout recovery out of `Program.cs`.
 - 2026-06-07: Closed the OAuth callback state persistence slice. GitHub App manifest and GitHub user authorization callback state now live in the snapshot-backed `DevOpsStore` with one-time consumption, a hosted expired-state cleanup service, and reload tests covering both flows so API restarts no longer lose in-flight OAuth state.
 - 2026-06-07: Closed the CORS observability slice. Startup now resolves allowed origins through `CorsConfiguration`, fails closed outside Development when `Frontend:AllowedOrigins` is missing or invalid, logs active origins at startup, and `/api/status` includes CORS diagnostics for operational verification.
+- 2026-06-07: Started the deployment/release drift visibility slice. `/api/status` now includes release diagnostics for API version, commit SHA, build timestamp, API image, frontend image, runner image and configuration mode, and global Settings shows the same runtime identity so users can spot local/deployed/API/frontend drift without reading GitOps manifests. Remaining follow-up: add the local doctor script, deployed-version comparison script, and full release checklist automation.
 - 2026-06-07: Closed the LocalGit runner PR API failure-handling slice. Implementation and preview-promotion runners now capture Forgejo pull-request creation HTTP status, explicitly reject non-2xx responses, parse sanitized Forgejo JSON errors with `jq`, and avoid sed-based Forgejo PR response parsing in manifest tests.
 - 2026-06-07: Closed the preview source manifest-safety slice. `PreviewSourcePolicy` now rejects manifest-unsafe deployable paths, duplicate normalized source paths and duplicate ConfigMap keys while preserving allowed `src/` and `public/` preview assets.
 - 2026-06-07: Closed the credential-bearing git remote slice. Implementation, preview-promotion, PR review-fix and repository cleanup runner scripts now use an in-workspace `GIT_ASKPASS` helper for git clone/push instead of constructing `https://user:token@...` remotes, with manifest tests rejecting the old `auth_remote` patterns.
@@ -566,6 +567,8 @@ Recommended fix:
 - Add authorization tests for Source and clone-info endpoints against demo and non-demo users, not only board creation.
 
 ### P1: Deployment Drift Is Still A Product Risk
+
+Status 2026-06-07: Started. `/api/status` now exposes `ReleaseDiagnosticsDto` with API version, commit SHA, build timestamp, API image, frontend image, runner image and configuration mode. The global Settings page loads `/api/status` with the shell and renders a compact Release diagnostics panel, including an API/frontend mismatch warning when the frontend image identity does not include the reported API SHA. Remaining follow-up: add `scripts/doctor-local-demo.ps1`, richer frontend build-SHA metadata, and endpoint checks for Source/diff availability.
 
 Evidence:
 
@@ -1623,6 +1626,8 @@ Recommended fix:
 
 ### P2: Release State Should Be Visible Without Reading GitOps Manifests
 
+Status 2026-06-07: Started. Release identity is now part of the `/api/status` contract and visible in Settings, covering API/frontend/runner image identity and configuration mode. Remaining follow-up: add a release checklist artifact and `scripts/check-deployed-version.ps1` to compare local git SHA, published image digest, Homelab digest pins and live `/api/status`.
+
 Evidence:
 
 - Recent issues repeatedly came from "merged but not live" and local-vs-deployed drift.
@@ -2561,6 +2566,8 @@ Recommended fix:
 - Add tests for Forgejo 401/403/409/500 response bodies.
 
 ### P2: Runtime Runner Images Are Hard-Coded In Several Renderers
+
+Status 2026-06-07: Closed for the known repository runner families. Repository implementation, preview-promotion, PR review-fix, repository cleanup, provider-sync and preview-source manifests now use the configured runner image instead of bare `:main`, and `/api/status` exposes the configured runner image alongside API/frontend image identity for drift checks.
 
 Evidence:
 

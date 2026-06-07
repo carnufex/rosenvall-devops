@@ -685,6 +685,21 @@ type SettingsDto = {
   };
 };
 
+type ReleaseDiagnosticsDto = {
+  version: string;
+  commitSha: string;
+  buildTimestamp: string;
+  apiImage: string;
+  frontendImage: string;
+  runnerImage: string;
+  configurationMode: string;
+};
+
+type ApiStatusDto = {
+  authMode: string;
+  release: ReleaseDiagnosticsDto;
+};
+
 type AiProviderSettingsDto = {
   provider: string;
   displayName: string;
@@ -966,9 +981,10 @@ function App() {
       const boards = await api.get<Board[]>(`/api/workspaces/${workspace.id}/boards`);
       const board = boards.find((entry) => entry.id === (preferredBoardId ?? selectedBoardIdRef.current)) ?? boards[0];
       if (!board) throw new Error('No board returned by API');
-      const [repositories, settings, previews, events, pipelines, timeline, metrics, assignees, teams, githubIntegrations, boardSecrets, gitOpsApplications] = await Promise.all([
+      const [repositories, settings, apiStatus, previews, events, pipelines, timeline, metrics, assignees, teams, githubIntegrations, boardSecrets, gitOpsApplications] = await Promise.all([
         api.get<RepositoryDto[]>('/api/repositories'),
         api.get<SettingsDto>('/api/settings'),
+        api.get<ApiStatusDto>('/api/status'),
         api.get<PreviewEnvironmentDto[]>('/api/preview-environments'),
         api.get<PreviewEventDto[]>('/api/preview-events'),
         api.get<PipelineStatusDto[]>('/api/pipelines'),
@@ -982,7 +998,7 @@ function App() {
       ]);
       setSelectedBoardId(board.id);
       setApiBanner(null);
-      setShell({ status: 'ready', workspace, boards, board, repositories, settings, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, gitOpsApplications, busy: false });
+      setShell({ status: 'ready', workspace, boards, board, repositories, settings, apiStatus, previews, events, pipelines, timeline, metrics, assignees, me, teams, githubIntegrations, boardSecrets, gitOpsApplications, busy: false });
     } catch (loadError) {
       const banner = apiUnavailableBannerMessage(loadError);
       if (banner) {
@@ -1688,11 +1704,11 @@ function App() {
             {activeView === 'source' && <SourceView board={shell.board} settings={shell.settings} onRefresh={() => loadShell(shell.board.id, { silentBusy: true })} onNotify={addToast} />}
             {activeView === 'timeline' && <TimelineView board={shell.board} timeline={shell.timeline} />}
             {activeView === 'gitops' && <GitOpsView board={shell.board} gitOpsApplications={shell.gitOpsApplications} actions={actions} onBack={() => setView('board')} />}
-            {activeView === 'ai' && <SettingsView scope="ai" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
-            {activeView === 'environment' && <SettingsView scope="environment" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
-            {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'ai' && <SettingsView scope="ai" settings={shell.settings} apiStatus={shell.apiStatus} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'environment' && <SettingsView scope="environment" settings={shell.settings} apiStatus={shell.apiStatus} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'configuration' && <SettingsView scope="board" settings={shell.settings} apiStatus={shell.apiStatus} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
             {activeView === 'teams' && <TeamsView teams={shell.teams} boards={shell.boards} me={shell.me} actions={actions} />}
-            {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
+            {activeView === 'settings' && <SettingsView scope="global" settings={shell.settings} apiStatus={shell.apiStatus} board={shell.board} me={shell.me} repositories={shell.repositories} boardSecrets={shell.boardSecrets} githubIntegrations={shell.githubIntegrations} selectedProvider={selectedAiProvider} selectedModel={selectedAiModel} selectedReasoning={selectedAiReasoning} actions={actions} onProviderChange={setSelectedAiProvider} onModelChange={setSelectedAiModel} onReasoningChange={setSelectedAiReasoning} onSyncBoard={() => setSyncBoardOpen(true)} onBack={() => setView('board')} />}
           </>
         )}
       </main>
@@ -1929,7 +1945,7 @@ async function initializeAuth(): Promise<User> {
 type ShellState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; workspace: Workspace; boards: Board[]; board: Board; repositories: RepositoryDto[]; settings: SettingsDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; timeline: TimelineEventDto[]; metrics: MetricsDto; assignees: AssigneeDto[]; me: UserDto; teams: TeamDto[]; githubIntegrations: GitHubIntegrationDto[]; boardSecrets: BoardSecretDto[]; gitOpsApplications: GitOpsApplicationsResponseDto; busy: boolean };
+  | { status: 'ready'; workspace: Workspace; boards: Board[]; board: Board; repositories: RepositoryDto[]; settings: SettingsDto; apiStatus: ApiStatusDto; previews: PreviewEnvironmentDto[]; events: PreviewEventDto[]; pipelines: PipelineStatusDto[]; timeline: TimelineEventDto[]; metrics: MetricsDto; assignees: AssigneeDto[]; me: UserDto; teams: TeamDto[]; githubIntegrations: GitHubIntegrationDto[]; boardSecrets: BoardSecretDto[]; gitOpsApplications: GitOpsApplicationsResponseDto; busy: boolean };
 
 type SelectedState =
   | { status: 'closed' }
@@ -5512,9 +5528,10 @@ function TeamsView({ teams, boards, me, actions }: {
   );
 }
 
-function SettingsView({ scope, settings, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
+function SettingsView({ scope, settings, apiStatus, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
   scope: 'global' | 'board' | 'ai' | 'environment';
   settings: SettingsDto;
+  apiStatus: ApiStatusDto;
   board: Board;
   me: UserDto;
   repositories: RepositoryDto[];
@@ -5709,10 +5726,47 @@ function SettingsView({ scope, settings, board, me, repositories, boardSecrets, 
           <div className="connected"><Users size={28} /><div><strong>{settings.authentik.enabled ? 'Enabled' : 'Disabled'}</strong><p>{settings.authentik.authority}</p></div><span>{settings.authentik.enabled ? 'Active' : 'Local'}</span></div>
           <label>Users endpoint<input value={settings.authentik.usersEndpoint} readOnly /></label>
         </section>
+        <SectionTitle icon={<Activity size={22} />} title="Release diagnostics" />
+        <section className="panel form-panel release-diagnostics">
+          <div className="settings-inline">
+            <div>
+              <strong>Runtime identity</strong>
+              <p>Use these values to compare local code, published images and the API currently serving RDO.</p>
+            </div>
+            <span className="state-muted">{apiStatus.release.configurationMode}</span>
+          </div>
+          <div className="release-diagnostics-grid">
+            <label>API build<input value={`${shortReleaseValue(apiStatus.release.commitSha)} - ${apiStatus.release.buildTimestamp}`} readOnly /></label>
+            <label>Frontend build<input value={apiStatus.release.frontendImage} readOnly /></label>
+            <label>API image<input value={apiStatus.release.apiImage} readOnly /></label>
+            <label>Runner image<input value={apiStatus.release.runnerImage} readOnly /></label>
+            <label>Version<input value={apiStatus.release.version} readOnly /></label>
+            <label>Auth mode<input value={apiStatus.authMode} readOnly /></label>
+          </div>
+          {releaseMismatchMessage(apiStatus.release) && <p className="provider-status">{releaseMismatchMessage(apiStatus.release)}</p>}
+        </section>
         </>}
       </div>
     </section>
   );
+}
+
+function shortReleaseValue(value: string | null | undefined) {
+  const normalized = value?.trim();
+  if (!normalized || normalized === 'unknown') return normalized || 'unknown';
+  return normalized.length > 12 ? normalized.slice(0, 12) : normalized;
+}
+
+function releaseMismatchMessage(release: ReleaseDiagnosticsDto) {
+  const apiSha = release.commitSha?.trim();
+  const frontendImage = release.frontendImage?.trim() ?? '';
+  if (!apiSha || apiSha === 'unknown' || !frontendImage || frontendImage === 'unknown') {
+    return null;
+  }
+
+  return frontendImage.includes(apiSha)
+    ? null
+    : 'Frontend image does not include the reported API commit SHA. Verify the deployed image pins if UI/API behavior looks out of sync.';
 }
 
 function BoardHostingForm({ board, actions }: { board: Board; actions: BoardActions }) {

@@ -326,6 +326,7 @@ api.MapGet("/status", async (IConfiguration configuration, DevOpsStore store, Fo
         authentication.Mode,
         ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics),
         cors.Diagnostics,
+        ReleaseDiagnosticsReader.Read(configuration),
         await localGit.CheckReadinessAsync(cancellationToken),
         store.GetDemoSandboxPolicyStatus())));
 

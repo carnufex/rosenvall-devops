@@ -185,6 +185,21 @@ test('api unavailable banner uses structured status when available', () => {
   assert.equal(apiUnavailableBannerMessage({ status: 422, requestPath: '/api/source', message: 'Validation failed' }), null);
 });
 
+test('settings loads and renders release diagnostics from api status', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /type ApiStatusDto = \{/);
+  assert.match(appSource, /release: ReleaseDiagnosticsDto/);
+  assert.match(appSource, /api\.get<ApiStatusDto>\('\/api\/status'\)/);
+  assert.match(appSource, /apiStatus: ApiStatusDto/);
+  assert.match(appSource, /<SettingsView[\s\S]*apiStatus=\{shell\.apiStatus\}/);
+  assert.match(appSource, /Release diagnostics/);
+  assert.match(appSource, /API build/);
+  assert.match(appSource, /Frontend build/);
+  assert.match(appSource, /Runner image/);
+  assert.match(appSource, /release-diagnostics/);
+});
+
 test('ai plan review blocks are stable paragraph and list anchors', () => {
   const blocks = splitAiPlanReviewBlocks(`# Implementation Plan
 

@@ -5563,6 +5563,32 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Api_status_contract_exposes_release_diagnostics()
+    {
+        var root = FindRepositoryRoot();
+        var contracts = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Contracts", "ApiContracts.cs"));
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var operationsPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Operations", "ReleaseDiagnostics.cs");
+
+        Assert.Contains("ReleaseDiagnosticsDto", contracts);
+        Assert.Contains("ReleaseDiagnosticsDto Release", contracts);
+        Assert.Contains("CommitSha", contracts);
+        Assert.Contains("BuildTimestamp", contracts);
+        Assert.Contains("ApiImage", contracts);
+        Assert.Contains("FrontendImage", contracts);
+        Assert.Contains("RunnerImage", contracts);
+        Assert.Contains("ConfigurationMode", contracts);
+        Assert.True(File.Exists(operationsPath), "Release diagnostics should live in Operations/ReleaseDiagnostics.cs.");
+
+        var operations = File.ReadAllText(operationsPath);
+        Assert.Contains("public static class ReleaseDiagnosticsReader", operations);
+        Assert.Contains("Ai:Codex:KubernetesRunnerImage", operations);
+        Assert.Contains("Release:CommitSha", operations);
+        Assert.Contains("Release:ConfigurationMode", operations);
+        Assert.Contains("ReleaseDiagnosticsReader.Read(configuration", program);
+    }
+
+    [Fact]
     public void Authentication_mode_resolution_lives_in_auth_module()
     {
         var root = FindRepositoryRoot();

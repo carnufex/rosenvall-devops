@@ -572,6 +572,8 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .gitops-page .gitops-applications { margin-top: 0; }
 .status-badges { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .status-badges a { color: var(--focus); display: inline-flex; align-items: center; }
+.release-diagnostics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.release-diagnostics input { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; }
 
 .board-select { min-width: 260px; max-width: min(480px, 80vw); height: 42px; font-size: 22px; font-weight: 800; background: #090a0b; border-color: var(--line-strong); color: var(--text); padding: 0 34px 0 12px; }
 .board-select:focus { border-color: var(--focus); }
@@ -671,7 +673,7 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
   .search { width: min(100%, 360px); }
   .page { padding: 20px 14px; }
   h1 { font-size: 26px; line-height: 34px; }
-  .metrics, .dashboard-grid, .modal-grid, .form-grid, .form-grid.two, .overview-status-grid, .overview-delivery-row, .logs-workspace, .diff-layout, .ai-review-workspace, .source-layout, .source-toolbar, .work-item-metadata-dialog { grid-template-columns: 1fr; }
+  .metrics, .dashboard-grid, .modal-grid, .form-grid, .form-grid.two, .overview-status-grid, .overview-delivery-row, .logs-workspace, .diff-layout, .ai-review-workspace, .source-layout, .source-toolbar, .work-item-metadata-dialog, .release-diagnostics-grid { grid-template-columns: 1fr; }
   .modal-head { align-items: stretch; flex-direction: column; padding: 12px 14px; }
   .modal-head-actions { width: 100%; justify-content: space-between; }
   .work-item-identity-chip { max-width: calc(100vw - 86px); }
