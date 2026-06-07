@@ -5611,6 +5611,21 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Generic_pipeline_job_manifest_renderer_lives_in_runtime_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var runtimePath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "PipelineJobManifestRenderer.cs");
+
+        Assert.DoesNotContain("public static class PipelineJobManifestRenderer", program);
+        Assert.True(File.Exists(runtimePath), "Generic pipeline job manifest rendering should live in Runtime/PipelineJobManifestRenderer.cs instead of Program.cs.");
+
+        var runtime = File.ReadAllText(runtimePath);
+        Assert.Contains("public static class PipelineJobManifestRenderer", runtime);
+        Assert.Contains("image: alpine/git:2.47.2", runtime);
+    }
+
+    [Fact]
     public void Authentication_mode_fails_closed_outside_development()
     {
         var missingRequired = new ConfigurationBuilder()
