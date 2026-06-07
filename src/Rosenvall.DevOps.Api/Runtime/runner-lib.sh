@@ -32,6 +32,31 @@ rdo_git_with_repository_credentials() {
   GIT_ASKPASS="$workspace/git-askpass.sh" GIT_TERMINAL_PROMPT=0 GIT_USERNAME="$username" GIT_PASSWORD="$token" "$@"
 }
 
+rdo_run_codex_without_repository_credentials() {
+  workspace="$1"
+  codex_command_file="$2"
+  codex_log="$workspace/codex-output.log"
+  unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN
+  set +e
+  ( . "$codex_command_file" ) > "$codex_log" 2>&1 &
+  codex_pid=$!
+  sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
+  rm -f "${CODEX_HOME:-}/auth.json" "${CODEX_HOME:-}/installation_id"
+  wait "$codex_pid"
+  codex_status=$?
+  set -e
+  rm -f "${CODEX_HOME:-}/auth.json" "${CODEX_HOME:-}/installation_id"
+  cat "$codex_log"
+  if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then
+    echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"
+    return 26
+  fi
+  if [ "$codex_status" -ne 0 ]; then
+    echo "RDO_FAILURE=Codex CLI failed"
+    return 27
+  fi
+}
+
 rdo_collect_changed_files() {
   workspace="$1"
   git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > "$workspace/uncommitted-files.txt"

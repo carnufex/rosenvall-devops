@@ -3426,21 +3426,11 @@ namespace Rosenvall.DevOps.Api
                                   echo "RDO_STEP=Implementing"
                                   repository_token_for_runner="$ROSENVALL_GIT_TOKEN"
                                   {{secretShellCapture}}
-                                  unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN
                                   {{secretShellUnset}}
-                                  codex_log="$workspace/codex-output.log"
-                                  set +e
-                                  {{codexCommand}} > "$codex_log" 2>&1 &
-                                  codex_pid=$!
-                                  sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
-                                  rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                  wait "$codex_pid"
-                                  codex_status=$?
-                                  set -e
-                                  rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                  cat "$codex_log"
-                                  if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
-                                  if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
+                                  cat > "$workspace/codex-command.sh" <<'RDO_CODEX_COMMAND'
+                                  {{codexCommand}}
+                                  RDO_CODEX_COMMAND
+                                  rdo_run_codex_without_repository_credentials "$workspace" "$workspace/codex-command.sh"
                                   ROSENVALL_GIT_TOKEN="$repository_token_for_runner"
                                   export ROSENVALL_GIT_TOKEN
                                   {{secretShellRestore}}
@@ -4175,20 +4165,10 @@ namespace Rosenvall.DevOps.Api
                                  printf '%s' "$ROSENVALL_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
                                  echo "RDO_STEP=FixingReviewComments"
                                  repository_token_for_runner="$ROSENVALL_GIT_TOKEN"
-                                 unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN
-                                 codex_log="$workspace/codex-output.log"
-                                 set +e
-                                 {{codexCommand}} > "$codex_log" 2>&1 &
-                                 codex_pid=$!
-                                 sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
-                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                 wait "$codex_pid"
-                                 codex_status=$?
-                                 set -e
-                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                 cat "$codex_log"
-                                 if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
-                                 if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
+                                 cat > "$workspace/codex-command.sh" <<'RDO_CODEX_COMMAND'
+                                 {{codexCommand}}
+                                 RDO_CODEX_COMMAND
+                                 rdo_run_codex_without_repository_credentials "$workspace" "$workspace/codex-command.sh"
                                  ROSENVALL_GIT_TOKEN="$repository_token_for_runner"
                                  export ROSENVALL_GIT_TOKEN
                                  echo "RDO_STEP=Validating"

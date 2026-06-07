@@ -1285,13 +1285,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("value: \"7\"", manifest);
         Assert.Contains("RDO_PULL_REQUEST_NUMBER=$ROSENVALL_PULL_REQUEST_NUMBER", manifest);
         Assert.Contains("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", manifest);
-        Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", manifest);
-        Assert.True(manifest.IndexOf("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", StringComparison.Ordinal) < manifest.IndexOf("codex exec", StringComparison.Ordinal));
-        Assert.Contains("codex_pid=$!", manifest);
-        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", manifest);
-        Assert.Contains("wait \"$codex_pid\"", manifest);
-        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) > manifest.IndexOf("codex exec", StringComparison.Ordinal));
-        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < manifest.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
+        Assert.Contains("cat > \"$workspace/codex-command.sh\"", manifest);
+        Assert.Contains("rdo_run_codex_without_repository_credentials \"$workspace\" \"$workspace/codex-command.sh\"", manifest);
+        Assert.True(manifest.IndexOf("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", StringComparison.Ordinal) < manifest.IndexOf("rdo_run_codex_without_repository_credentials", StringComparison.Ordinal));
+        Assert.DoesNotContain("codex_pid=$!", manifest);
+        Assert.DoesNotContain("wait \"$codex_pid\"", manifest);
         Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         Assert.DoesNotContain("auth_remote", manifest);
         Assert.DoesNotContain("/pulls\" -H", manifest);
@@ -2672,13 +2670,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("mountPath: /app/codex-home", manifest);
         Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
         Assert.Contains("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", manifest);
-        Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", manifest);
-        Assert.True(manifest.IndexOf("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", StringComparison.Ordinal) < manifest.IndexOf("codex exec", StringComparison.Ordinal));
-        Assert.Contains("codex_pid=$!", manifest);
-        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", manifest);
-        Assert.Contains("wait \"$codex_pid\"", manifest);
-        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) > manifest.IndexOf("codex exec", StringComparison.Ordinal));
-        Assert.True(manifest.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < manifest.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
+        Assert.Contains("cat > \"$workspace/codex-command.sh\"", manifest);
+        Assert.Contains("rdo_run_codex_without_repository_credentials \"$workspace\" \"$workspace/codex-command.sh\"", manifest);
+        Assert.True(manifest.IndexOf("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", StringComparison.Ordinal) < manifest.IndexOf("rdo_run_codex_without_repository_credentials", StringComparison.Ordinal));
+        Assert.DoesNotContain("codex_pid=$!", manifest);
+        Assert.DoesNotContain("wait \"$codex_pid\"", manifest);
         Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         AssertGitCredentialsUseAskPass(manifest, "$ROSENVALL_REPOSITORY_PROVIDER", "$ROSENVALL_GIT_TOKEN");
         Assert.DoesNotContain("auth_remote", manifest);
@@ -2686,8 +2682,6 @@ public sealed class DevOpsStoreTests
         Assert.Contains("codex exec", manifest);
         Assert.Contains("codex exec --ephemeral", manifest);
         Assert.Contains("--sandbox danger-full-access", manifest);
-        Assert.Contains("codex-output.log", manifest);
-        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("RDO_FAILURE=npm test failed", manifest);
         Assert.Contains("RDO_FAILURE=npm build failed", manifest);
@@ -3840,7 +3834,7 @@ public sealed class DevOpsStoreTests
         var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_CLEANUP_PROMPT_B64");
         var sourceDiff = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_SOURCE_PR_DIFF_B64");
 
-        AssertCodexRepositoryJobYamlContract(manifest, "ghcr.io/carnufex/rosenvall-devops-api@sha256:cleanupdigest", "GITHUB_TOKEN");
+        AssertCodexRepositoryJobYamlContract(manifest, "ghcr.io/carnufex/rosenvall-devops-api@sha256:cleanupdigest", "GITHUB_TOKEN", codexPhaseUsesSharedHelper: false);
         Assert.EndsWith("-test-cleanup", cleanupRun.Branch, StringComparison.Ordinal);
         Assert.Contains("Source pull request: https://github.com/carnufex/Rosenvalls-Homelab/pull/33", prompt);
         Assert.Contains("Remove or revert repository resources introduced by the source pull request.", prompt);
@@ -3851,8 +3845,6 @@ public sealed class DevOpsStoreTests
         Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:cleanupdigest", manifest);
         Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
         Assert.Contains("--sandbox danger-full-access", manifest);
-        Assert.Contains("codex-output.log", manifest);
-        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
         Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
         Assert.Contains("unset GITHUB_TOKEN", manifest);
         Assert.Contains("codex_pid=$!", manifest);
@@ -4909,8 +4901,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("codex exec resume", manifest);
         Assert.Contains("codex exec resume --ephemeral", manifest);
         Assert.Contains("--sandbox danger-full-access", manifest);
-        Assert.Contains("codex-output.log", manifest);
-        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", manifest);
+        Assert.Contains("rdo_run_codex_without_repository_credentials \"$workspace\" \"$workspace/codex-command.sh\"", manifest);
         Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", manifest);
         Assert.Contains("ROSENVALL_CODEX_SESSION_ID", manifest);
         Assert.Contains("CODEX_REASONING_EFFORT", manifest);
@@ -6116,6 +6107,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("rdo_git_with_repository_credentials()", library);
         Assert.Contains("GIT_ASKPASS=\"$workspace/git-askpass.sh\"", library);
         Assert.Contains("rdo_json_escape()", library);
+        Assert.Contains("rdo_run_codex_without_repository_credentials()", library);
+        Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", library);
+        Assert.Contains("rm -f \"${CODEX_HOME:-}/auth.json\"", library);
+        Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", library);
         Assert.Contains("rdo_collect_changed_files()", library);
         Assert.Contains("rdo_collect_uncommitted_files()", library);
     }
@@ -7639,7 +7634,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("ALL", runner.SecurityContext.Capabilities.Drop);
     }
 
-    private static void AssertCodexRepositoryJobYamlContract(string manifest, string expectedImage, string secretEnvName)
+    private static void AssertCodexRepositoryJobYamlContract(string manifest, string expectedImage, string secretEnvName, bool codexPhaseUsesSharedHelper = true)
     {
         var job = KubernetesYaml.SingleDocument(manifest, "Job");
         var pod = job.Spec.Template.Spec;
@@ -7663,10 +7658,21 @@ public sealed class DevOpsStoreTests
         Assert.Equal("token", secretEnv.ValueFrom.SecretKeyRef.Key);
 
         var command = string.Join('\n', runner.Command ?? []);
-        Assert.Contains("codex_pid=$!", command);
-        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", command);
-        Assert.Contains("wait \"$codex_pid\"", command);
-        Assert.True(command.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < command.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
+        Assert.Contains(". /opt/rdo-runner/lib.sh", command);
+        if (codexPhaseUsesSharedHelper)
+        {
+            Assert.Contains("cat > \"$workspace/codex-command.sh\"", command);
+            Assert.Contains("rdo_run_codex_without_repository_credentials \"$workspace\" \"$workspace/codex-command.sh\"", command);
+            Assert.DoesNotContain("codex_pid=$!", command);
+            Assert.DoesNotContain("wait \"$codex_pid\"", command);
+        }
+        else
+        {
+            Assert.Contains("codex_pid=$!", command);
+            Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", command);
+            Assert.Contains("wait \"$codex_pid\"", command);
+            Assert.True(command.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < command.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
+        }
     }
 
     private static void AssertGitCredentialsUseAskPass(string manifest, string providerArgument, string tokenArgument)

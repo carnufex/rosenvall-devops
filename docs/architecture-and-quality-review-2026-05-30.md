@@ -31,7 +31,7 @@ Finding count in this report:
 
 RDO is moving quickly and the product workflow is now much richer: LocalGit, preview-first delivery, PR review, source browsing, app hosting, hierarchy, goals, and syntax highlighting all exist in some form. The largest risk is that most of that behavior is concentrated in a few large files and one snapshot-backed in-memory store. That is workable for a prototype, but every new flow now increases the chance of hidden lifecycle bugs, stale UI states, and cleanup gaps.
 
-The highest-priority security issues found in this review are the runner credential boundary and the GitHub webhook deploy path. Codex implementation/review-fix runs still receive `ROSENVALL_GIT_TOKEN` and board secret environment variables, and Kubernetes Codex jobs also expose reusable `CODEX_HOME` auth files in the same prompt-driven container. Prompt-injected repo or review content can therefore ask Codex to read or print runtime credentials. GitHub merge webhooks are also not signature-verified before RDO queues production deployment and preview cleanup. The highest-priority product issue is the production app source contract. Preview source is used to render production apps, but Local PRs can receive additional AI review-fix commits after preview promotion. That means "Approve PR" can merge one diff while production deploys older preview source. The LocalGit approval endpoint also merges the PR before production deployment succeeds, so a deployment failure leaves an irreversible merged PR with an uncompleted card. The highest-priority cleanup issue is provider-sync cleanup: provider-sync jobs and token secrets use their own renderer names, board cleanup currently deletes generic pipeline job names and does not delete provider-sync token secrets, and provider-sync runs do not have a durable completion observer.
+The highest-priority security issue still open from this review is the runner credential boundary. The short-term repository token and board-secret exposure windows for implementation and PR review-fix Codex phases have been closed with a shared runner helper, and GitHub webhooks are now signature-verified before deployment actions. However, Kubernetes Codex jobs still run in the same prompt-driven container that receives reusable `CODEX_HOME` auth material, so the stronger follow-up is still a launcher, broker or split-container boundary where Codex cannot read long-lived auth files. The highest-priority product issue was the production app source contract; it is now covered by merged-branch deployable source snapshots and LocalGit approval ordering. The highest-priority cleanup issue was provider-sync cleanup and observation; provider-sync Jobs, token Secrets and completion monitoring are now covered by cleanup and monitor tests.
 
 The best next implementation direction is not a broad rewrite. Split by vertical runtime domains, starting with the newest/highest-risk flows: Source/provider sync, LocalGit PR review, and runner manifests. Keep the UI moving, but move new code into feature modules and typed service boundaries instead of expanding `Program.cs` and `App.tsx` further.
 
@@ -54,6 +54,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 
 - 2026-05-30: Started ticket 1 by removing repository tokens and board secret values from the `codex exec` process environment in implementation and PR review-fix manifests. Remaining hardening from the same finding: isolate Codex auth material instead of exposing reusable `CODEX_HOME` files in the prompt-driven container.
 - 2026-06-07: Mitigated the remaining Codex auth-file exposure window for Kubernetes Codex jobs. Implementation, PR review-fix, cleanup and preview-source manifests now run `codex exec` as a tracked child process and remove `CODEX_HOME/auth.json` plus `installation_id` while Codex is running, with manifest tests covering all four job families. A full launcher/broker boundary that never places reusable Codex auth material in the prompt-driven execution environment remains the stronger follow-up for this P0 finding.
+- 2026-06-07: Continued runner credential-boundary hardening by moving the implementation and PR review-fix Codex phase into the versioned `/opt/rdo-runner/lib.sh` helper. Those manifests now write only a per-run Codex command fragment and call `rdo_run_codex_without_repository_credentials`, which unsets repository tokens, removes Codex auth files during execution, classifies sandbox failures and centralizes Codex status handling before the runner restores repository credentials for validation/push/PR phases. Remaining follow-up: replace the shared-process helper with a launcher/broker or split-container contract so prompt-driven Codex never shares a container filesystem with reusable Codex auth material.
 - 2026-06-07: Fixed Kubernetes runner image drift for repository implementation, preview-promotion, PR review-fix and repository cleanup Jobs. Those manifests now use `Ai:Codex:KubernetesRunnerImage` when configured, matching preview-source behavior and keeping runner pods on the digest-pinned image selected by deployment config instead of falling back to mutable `:main`.
 - 2026-06-07: Completed the public app readiness gate slice. Board public app deployment now separates Kubernetes apply from readiness, moves apps through `WaitingForReadiness`, reuses the Kubernetes deployment/pod health check before marking apps `Running`, and only exposes the app link while status is actually `Running`.
 - 2026-06-07: Closed the remaining public app readiness bypasses in direct PR approval and GitHub webhook handling. Those paths now record `WaitingForReadiness` after Kubernetes apply, while the reconciler performs readiness-gated LocalGit merge, preview cleanup and card completion so `Approve PR` no longer marks delivery done immediately after apply.
@@ -165,6 +166,8 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 ## Priority Findings
 
 ### P0: Codex Runs Can Read Runtime Credentials
+
+Status 2026-06-07: Partially mitigated, still open for the stronger architecture boundary. Implementation and PR review-fix no longer run Codex with exported repository tokens or board secret values; their Codex phase is centralized in `rdo_run_codex_without_repository_credentials` and the manifests restore repository credentials only after Codex exits. Kubernetes Codex jobs still copy reusable `CODEX_HOME` auth material into the prompt-driven container, so the recommended launcher/broker or split-container boundary remains unimplemented.
 
 Evidence:
 
@@ -2049,6 +2052,8 @@ Recommended fix:
 
 ### P0: Codex Runs With `ROSENVALL_GIT_TOKEN` Still In Its Environment
 
+Status 2026-06-07: Closed for implementation and PR review-fix. Both runner manifests now capture the repository token in shell state, remove board secret env vars from the Codex phase, delegate Codex execution to `rdo_run_codex_without_repository_credentials`, and restore `ROSENVALL_GIT_TOKEN` only for validation, commit, push and PR work after Codex exits. The broader `CODEX_HOME` auth-material isolation remains tracked under the runner credential-boundary finding above.
+
 Evidence:
 
 - Implementation job rendering injects `ROSENVALL_GIT_TOKEN` from the per-run Secret.
@@ -2519,7 +2524,7 @@ Recommended fix:
 
 ### P1: Runner Scripts Need A Shared Shell Library
 
-Status 2026-06-07: Mostly closed for repository runner families. The API image now packages `src/Rosenvall.DevOps.Api/Runtime/runner-lib.sh` as `/opt/rdo-runner/lib.sh`; repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync scripts source it for `GIT_ASKPASS` credentialed git operations, JSON escaping and changed-file collection. Manifest regressions cover those runners. Remaining follow-up: add shell-focused tests for the library itself and continue moving API response helpers/redaction into the shared runner layer where useful.
+Status 2026-06-07: Mostly closed for repository runner families. The API image now packages `src/Rosenvall.DevOps.Api/Runtime/runner-lib.sh` as `/opt/rdo-runner/lib.sh`; repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync scripts source it for `GIT_ASKPASS` credentialed git operations, JSON escaping and changed-file collection. Implementation and PR review-fix also use the library for the tokenless Codex phase, Codex auth-file cleanup and sandbox failure classification. Manifest regressions cover those runners and the library packaging. Remaining follow-up: add shell-focused behavior tests for the library itself and continue moving API response helpers/redaction into the shared runner layer where useful.
 
 Evidence:
 
@@ -3668,11 +3673,11 @@ Current successful counts:
 
 ## Suggested Next Slice
 
-Start with the stronger runner credential boundary that remains after the short-term token-unset hardening:
+Start with the stronger runner credential boundary that remains after the shared shell helper hardening:
 
 1. Add failing manifest/runtime tests that model split phases: clone/fetch with repository credentials, Codex edit with no repository credentials and no reusable Codex auth files, then validate/push/PR with credentials restored only in the final phase.
-2. Introduce a launcher/broker or multi-container job contract for implementation and PR review-fix runs so prompt-driven Codex never shares a process environment with repository write credentials.
-3. Preserve current `danger-full-access` Kubernetes sandbox behavior, per-run runtime Secret storage and terminal redaction while moving credentials out of the Codex phase.
+2. Introduce a launcher/broker or multi-container job contract for implementation and PR review-fix runs so prompt-driven Codex never shares a container filesystem with reusable Codex auth files or a process environment with repository write credentials.
+3. Preserve current `danger-full-access` Kubernetes sandbox behavior, per-run runtime Secret storage and terminal redaction while moving Codex auth out of the prompt-driven phase.
 4. Extend the same boundary to preview-source and cleanup where Codex or repository-controlled content can influence runner commands.
 5. Run full backend/frontend verification plus one LocalGit smoke through preview, PR review fix, approve PR and app deploy.
 
