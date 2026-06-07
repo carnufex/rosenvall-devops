@@ -156,6 +156,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Started the Epic/Goal state-machine hardening slice. `Rosenvall.DevOps.Core` now has a pure `EpicGoalStateMachine` with explicit `PlanningChildren`, `RunningChildren`, `WaitingForReview`, `Blocked`, `Complete` and `Cancelled` outcomes, `StartEpicGoal` uses it for new goal status, and the frontend treats those explicit active states as running goals. A hosted reconciler that queues child AI/implementation work remains the next step for this finding.
 - 2026-06-07: Started the runtime correlation scope slice. Repository implementation, cleanup, provider-sync, preview-health and public-app reconciler monitor loops now use a shared `RunLogScope` helper so API logs carry consistent board/work-item/run/job/provider fields. Endpoint-triggered submissions, terminal/timeline metadata and frontend copy-run-id affordances remain follow-up work for the same finding.
 - 2026-06-07: Continued the runtime correlation scope slice in the frontend. The work-item `Logs` tab now shows the selected AI/preview/implementation/cleanup run id with a copy action, plus run kind and Kubernetes job/pod metadata where available, so users can correlate UI logs with API and Kubernetes diagnostics.
+- 2026-06-07: Continued the runtime correlation scope slice by adding `aiRunId` to the shared runtime log scope. Repository implementation monitor logs now carry the AI run id together with board/work-item/run/job fields.
 
 ## Priority Findings
 
@@ -1495,7 +1496,7 @@ Recommended fix:
 
 ### P1: Runtime Work Needs Correlation Scopes
 
-Status 2026-06-07: Started. Runtime monitor loops now use a shared `RunLogScope` helper for repository implementation, repository cleanup, provider-sync, preview health and public app deployment/readiness reconciliation. The helper carries `boardId`, `workItemId`, `workItemKey`, `runId`, `runKind`, `provider`, `jobName` and `podName` through `ILogger.BeginScope`. The work-item `Logs` tab also exposes a copyable run id and shows run kind/job/pod metadata where available. Remaining follow-up: extend the same correlation model to endpoint-triggered job submissions, AI run ids in backend scopes, and persisted terminal/timeline metadata.
+Status 2026-06-07: Started. Runtime monitor loops now use a shared `RunLogScope` helper for repository implementation, repository cleanup, provider-sync, preview health and public app deployment/readiness reconciliation. The helper carries `boardId`, `workItemId`, `workItemKey`, `aiRunId`, `runId`, `runKind`, `provider`, `jobName` and `podName` through `ILogger.BeginScope`. The work-item `Logs` tab also exposes a copyable run id and shows run kind/job/pod metadata where available. Remaining follow-up: extend the same correlation model to endpoint-triggered job submissions and persisted terminal/timeline metadata.
 
 Evidence:
 

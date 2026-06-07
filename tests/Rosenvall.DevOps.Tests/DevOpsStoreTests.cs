@@ -5749,6 +5749,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("\"boardId\"", scope);
         Assert.Contains("\"workItemId\"", scope);
         Assert.Contains("\"workItemKey\"", scope);
+        Assert.Contains("\"aiRunId\"", scope);
         Assert.Contains("\"runId\"", scope);
         Assert.Contains("\"runKind\"", scope);
         Assert.Contains("\"provider\"", scope);
