@@ -525,6 +525,52 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Provider_sync_action_ledger_quota_blocks_new_sync_without_blocking_idempotent_duplicate()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var source = store.CreateRepository(new CreateRepositoryRequest(
+            "LocalGit",
+            "source-app",
+            "http://forgejo.local/rdo/source-app.git",
+            "main",
+            null,
+            "rdo",
+            "react-preview",
+            "preview-then-pr"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Source app", source.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var firstKey = $"provider-sync:demo:{board.Id:N}:{source.Id:N}:github:first:true";
+        var secondKey = $"provider-sync:demo:{board.Id:N}:{source.Id:N}:github:second:true";
+
+        var first = store.StartAction("demo", board.Id, null, "provider-sync", firstKey, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "provider-sync" });
+        var duplicate = store.StartAction("demo", board.Id, null, "provider-sync", firstKey, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "provider-sync" });
+        var overQuota = store.StartAction("demo", board.Id, null, "provider-sync", secondKey, maxStartsPerActor: 1, quotaWindow: TimeSpan.FromMinutes(15), quotaOperationKinds: new[] { "provider-sync" });
+
+        Assert.True(first.Started);
+        Assert.False(duplicate.Started);
+        Assert.Equal(first.Action!.Id, duplicate.Action!.Id);
+        Assert.False(overQuota.Started);
+        Assert.Null(overQuota.Action);
+        Assert.Equal("QuotaExceeded", overQuota.BlockReason);
+        Assert.Single(store.GetActionLedger(), action => action.OperationKind == "provider-sync");
+    }
+
+    [Fact]
+    public void Provider_sync_endpoint_uses_action_quota_before_creating_target_resources()
+    {
+        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpoint = EndpointSnippet(program, "api.MapPost(\"/boards/{boardId:guid}/repositories/sync-to-provider\"", "api.MapGet(\"/boards/{boardId:guid}/teams\"");
+
+        Assert.Contains("ReadProviderSyncActionQuota(configuration)", endpoint);
+        Assert.Contains("\"provider-sync\"", endpoint);
+        Assert.Contains("maxStartsPerActor", endpoint);
+        Assert.Contains("ActionLedgerBlockReasons.ProviderSyncActionKinds", endpoint);
+        Assert.Contains("ActionQuotaExceededResult(actionStart)", endpoint);
+        Assert.True(endpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < endpoint.IndexOf("CreateRepositoryResultAsync", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Ai_plan_action_ledger_blocks_only_in_flight_duplicate_provider_calls()
     {
         using var fixture = DevOpsStoreFixture.Create();

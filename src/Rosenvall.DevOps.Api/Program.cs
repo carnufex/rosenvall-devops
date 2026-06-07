@@ -1099,14 +1099,28 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
 
     var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
     var actionKey = ProviderSyncActionIdempotencyKey(actorSubject, boardId, source.Id, targetProvider, request.TargetName, request.Private);
-    var actionStart = store.StartAction(actorSubject, boardId, null, "provider-sync", actionKey);
+    var quota = ReadProviderSyncActionQuota(configuration);
+    var actionStart = store.StartAction(
+        actorSubject,
+        boardId,
+        null,
+        "provider-sync",
+        actionKey,
+        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+        quotaWindow: quota.Window,
+        quotaOperationKinds: ActionLedgerBlockReasons.ProviderSyncActionKinds);
     if (!actionStart.Started)
     {
+        if (IsQuotaExceeded(actionStart))
+        {
+            return ActionQuotaExceededResult(actionStart);
+        }
+
         return Results.Conflict(new
         {
             message = "Provider sync is already queued or running for this request.",
-            operationId = actionStart.Action.Id,
-            runId = actionStart.Action.RunId
+            operationId = actionStart.Action?.Id,
+            runId = actionStart.Action?.RunId
         });
     }
 
@@ -1117,7 +1131,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
         var localToken = ResolveLocalGitCredential(localGit);
         if (!localGit.IsConfigured() || string.IsNullOrWhiteSpace(localToken))
         {
-            store.MarkActionFailed(actionStart.Action.Id, "LocalGit is unavailable or missing its service credential.");
+            store.MarkActionFailed(actionStart.Action!.Id, "LocalGit is unavailable or missing its service credential.");
             return Results.Problem("LocalGit is unavailable or missing its service credential.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
@@ -1129,7 +1143,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
             ImplementationWorkflow: source.ImplementationWorkflow), cancellationToken);
         if (!creation.Succeeded || creation.Repository is null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, creation.Message);
+            store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
             return Results.Problem(creation.Message, statusCode: creation.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway);
         }
 
@@ -1141,21 +1155,21 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
         var installationId = store.GetDefaultGitHubInstallationId(actorSubject);
         if (installationId is null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, "No personal GitHub installation is available for provider sync.");
+            store.MarkActionFailed(actionStart.Action!.Id, "No personal GitHub installation is available for provider sync.");
             return Results.Problem("No personal GitHub installation is available for provider sync.", statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
         var integration = store.GetGitHubIntegration(installationId.Value);
         if (integration is null || !IsUserAccount(integration))
         {
-            store.MarkActionFailed(actionStart.Action.Id, GitHubOrganizationRepositoryCreationDisabledMessage);
+            store.MarkActionFailed(actionStart.Action!.Id, GitHubOrganizationRepositoryCreationDisabledMessage);
             return Results.Problem(GitHubOrganizationRepositoryCreationDisabledMessage, statusCode: StatusCodes.Status403Forbidden);
         }
 
         var tokenResult = await ResolveRepositoryCreationTokenAsync(store, github, userTokenStore, integration, actorSubject, cancellationToken);
         if (!tokenResult.Succeeded)
         {
-            store.MarkActionFailed(actionStart.Action.Id, tokenResult.Message);
+            store.MarkActionFailed(actionStart.Action!.Id, tokenResult.Message);
             return Results.Problem(tokenResult.Message, statusCode: tokenResult.StatusCode);
         }
 
@@ -1169,7 +1183,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
             ImplementationWorkflow: source.ImplementationWorkflow), tokenResult.Token, cancellationToken);
         if (!creation.Succeeded || creation.Repository is null)
         {
-            store.MarkActionFailed(actionStart.Action.Id, creation.Message);
+            store.MarkActionFailed(actionStart.Action!.Id, creation.Message);
             return Results.Problem(creation.Message, statusCode: creation.StatusCode is { } status ? (int)status : StatusCodes.Status502BadGateway);
         }
 
@@ -1192,10 +1206,10 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
     if (run is null)
     {
         store.MarkBoardRepositorySyncState(boardId, target.Id, "Failed");
-        store.MarkActionFailed(actionStart.Action.Id, "Could not record provider sync run.");
+        store.MarkActionFailed(actionStart.Action!.Id, "Could not record provider sync run.");
         return Results.NotFound();
     }
-    store.MarkActionRun(actionStart.Action.Id, run.Id, "Queued");
+    store.MarkActionRun(actionStart.Action!.Id, run.Id, "Queued");
 
     var secretName = RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run);
     var secretWrite = await runtimeSecrets.StoreAsync(
@@ -1207,7 +1221,7 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
     if (!secretWrite.Succeeded)
     {
         var failed = store.MarkPipelineRunFailed(run.Id, "system", secretWrite.Message);
-        store.MarkActionFailed(actionStart.Action.Id, secretWrite.Message);
+        store.MarkActionFailed(actionStart.Action!.Id, secretWrite.Message);
         return Results.Problem(failed?.Message ?? secretWrite.Message, statusCode: StatusCodes.Status502BadGateway);
     }
 
@@ -1216,12 +1230,12 @@ api.MapPost("/boards/{boardId:guid}/repositories/sync-to-provider", async (Guid 
     if (!apply.Succeeded)
     {
         var failed = store.MarkPipelineRunFailed(run.Id, "system", apply.Message);
-        store.MarkActionFailed(actionStart.Action.Id, apply.Message);
+        store.MarkActionFailed(actionStart.Action!.Id, apply.Message);
         return Results.Problem(failed?.Message ?? apply.Message, statusCode: StatusCodes.Status502BadGateway);
     }
 
     var executing = store.MarkPipelineRunExecuting(run.Id, "system") ?? run;
-    store.MarkActionRun(actionStart.Action.Id, executing.Id, "Running");
+    store.MarkActionRun(actionStart.Action!.Id, executing.Id, "Running");
     return Results.Accepted($"/api/pipeline-runs/{run.Id}", new SyncRepositoryToProviderResponse(target, executing, "Provider sync job queued."));
 });
 api.MapGet("/boards/{boardId:guid}/teams", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
@@ -3030,6 +3044,14 @@ static ExpensiveActionQuotaOptions ReadAiPlanningActionQuota(IConfiguration conf
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
 
+static ExpensiveActionQuotaOptions ReadProviderSyncActionQuota(IConfiguration configuration)
+{
+    var enabled = configuration.GetValue("Actions:Quotas:ProviderSync:Enabled", true);
+    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:ProviderSync:MaxStartedPerActor", 4));
+    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:ProviderSync:WindowSeconds", 900));
+    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+}
+
 static bool IsQuotaExceeded(ActionStartResultDto startResult) =>
     string.Equals(startResult.BlockReason, ActionLedgerBlockReasons.QuotaExceeded, StringComparison.OrdinalIgnoreCase);
 
@@ -3553,6 +3575,7 @@ namespace Rosenvall.DevOps.Api
     {
         public const string QuotaExceeded = "QuotaExceeded";
         public static readonly IReadOnlyList<string> AiPlanningActionKinds = ["ai-plan", "ai-plan-revise"];
+        public static readonly IReadOnlyList<string> ProviderSyncActionKinds = ["provider-sync"];
     }
 
     public sealed record UserIdentityRequest(string Subject, string DisplayName, string Email, string? AvatarUrl = null);
