@@ -846,6 +846,7 @@ public sealed class DevOpsStoreTests
             })
             .Build(), "repository-token")!;
 
+        AssertCodexRepositoryJobYamlContract(manifest, "ghcr.io/carnufex/rosenvall-devops-api@sha256:reviewfixdigest", "ROSENVALL_GIT_TOKEN");
         Assert.Equal("pr-review-fix", run.RunKind);
         Assert.Equal(repository.Id, run.RepositoryId);
         Assert.Equal(developmentBranch, run.Branch);
@@ -2034,6 +2035,7 @@ public sealed class DevOpsStoreTests
         var manifest = store.RenderImplementationRunManifest(implementationRun!.Id, configuration);
 
         Assert.NotNull(manifest);
+        AssertCodexRepositoryJobYamlContract(manifest, "ghcr.io/carnufex/rosenvall-devops-api@sha256:implementationdigest", "ROSENVALL_GIT_TOKEN");
         Assert.Equal("unity", repository.ImplementationProfile);
         Assert.Equal("Queued", implementationRun.Status);
         Assert.Contains("kind: Job", manifest);
@@ -3221,6 +3223,7 @@ public sealed class DevOpsStoreTests
         var prompt = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_CLEANUP_PROMPT_B64");
         var sourceDiff = DecodeManifestEnvironmentValue(manifest, "ROSENVALL_SOURCE_PR_DIFF_B64");
 
+        AssertCodexRepositoryJobYamlContract(manifest, "ghcr.io/carnufex/rosenvall-devops-api@sha256:cleanupdigest", "GITHUB_TOKEN");
         Assert.EndsWith("-test-cleanup", cleanupRun.Branch, StringComparison.Ordinal);
         Assert.Contains("Source pull request: https://github.com/carnufex/Rosenvalls-Homelab/pull/33", prompt);
         Assert.Contains("Remove or revert repository resources introduced by the source pull request.", prompt);
@@ -6042,6 +6045,7 @@ public sealed class DevOpsStoreTests
 
         var manifest = PreviewSourceJobManifestRenderer.Render(run, context, "gpt-5.4", "high", runnerImage: "ghcr.io/carnufex/rosenvall-devops-api@sha256:testdigest");
 
+        AssertPreviewSourceJobYamlContract(manifest, "ghcr.io/carnufex/rosenvall-devops-api@sha256:testdigest");
         Assert.Contains("kind: Job", manifest);
         Assert.Contains("namespace: rosenvall-devops", manifest);
         Assert.Contains("serviceAccountName: rosenvall-devops-runtime", manifest);
@@ -6543,6 +6547,64 @@ public sealed class DevOpsStoreTests
         Assert.Contains("ALL", runner.SecurityContext.Capabilities.Drop);
     }
 
+    private static void AssertCodexRepositoryJobYamlContract(string manifest, string expectedImage, string secretEnvName)
+    {
+        var job = KubernetesYaml.SingleDocument(manifest, "Job");
+        var pod = job.Spec.Template.Spec;
+        var init = Assert.Single(pod.InitContainers, container => container.Name == "prepare-codex-home");
+        var runner = Assert.Single(pod.Containers, container => container.Name == "runner");
+
+        Assert.False(pod.AutomountServiceAccountToken);
+        Assert.Equal(expectedImage, init.Image);
+        Assert.Equal(expectedImage, runner.Image);
+        Assert.Equal("codex-home", Assert.Single(pod.Volumes, volume => volume.Name == "codex-home").Name);
+        Assert.NotNull(pod.Volumes.Single(volume => volume.Name == "codex-home").EmptyDir);
+        Assert.Equal("rosenvall-devops-codex-home", pod.Volumes.Single(volume => volume.Name == "codex-home-source").PersistentVolumeClaim.ClaimName);
+        Assert.True(init.VolumeMounts.Single(mount => mount.Name == "codex-home-source").ReadOnly);
+        Assert.Equal("/app/codex-home", init.VolumeMounts.Single(mount => mount.Name == "codex-home").MountPath);
+        Assert.Equal("/app/codex-home", runner.VolumeMounts.Single(mount => mount.Name == "codex-home").MountPath);
+        Assert.DoesNotContain(runner.VolumeMounts, mount => mount.Name == "codex-home-source");
+        Assert.Equal("/app/codex-home", runner.Env.Single(env => env.Name == "CODEX_HOME").Value);
+        var secretEnv = runner.Env.Single(env => env.Name == secretEnvName);
+        Assert.Null(secretEnv.Value);
+        Assert.NotNull(secretEnv.ValueFrom.SecretKeyRef);
+        Assert.Equal("token", secretEnv.ValueFrom.SecretKeyRef.Key);
+
+        var command = string.Join('\n', runner.Command ?? []);
+        Assert.Contains("codex_pid=$!", command);
+        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", command);
+        Assert.Contains("wait \"$codex_pid\"", command);
+        Assert.True(command.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < command.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
+    }
+
+    private static void AssertPreviewSourceJobYamlContract(string manifest, string expectedImage)
+    {
+        var job = KubernetesYaml.SingleDocument(manifest, "Job");
+        var pod = job.Spec.Template.Spec;
+        var init = Assert.Single(pod.InitContainers, container => container.Name == "prepare-codex-home");
+        var source = Assert.Single(pod.InitContainers, container => container.Name == "generate-preview-source");
+        var publisher = Assert.Single(pod.Containers, container => container.Name == "publish-result");
+
+        Assert.False(pod.AutomountServiceAccountToken);
+        Assert.Equal("rosenvall-devops-runtime", pod.ServiceAccountName);
+        Assert.Equal(expectedImage, init.Image);
+        Assert.Equal(expectedImage, source.Image);
+        Assert.Equal(expectedImage, publisher.Image);
+        Assert.NotNull(pod.Volumes.Single(volume => volume.Name == "codex-home").EmptyDir);
+        Assert.Equal("rosenvall-devops-codex-home", pod.Volumes.Single(volume => volume.Name == "codex-home-source").PersistentVolumeClaim.ClaimName);
+        Assert.True(init.VolumeMounts.Single(mount => mount.Name == "codex-home-source").ReadOnly);
+        Assert.Equal("/app/codex-home", source.VolumeMounts.Single(mount => mount.Name == "codex-home").MountPath);
+        Assert.DoesNotContain(source.VolumeMounts, mount => mount.Name == "kube-api-access");
+        Assert.Equal("/var/run/secrets/kubernetes.io/serviceaccount", publisher.VolumeMounts.Single(mount => mount.Name == "kube-api-access").MountPath);
+        Assert.Equal("/app/codex-home", source.Env.Single(env => env.Name == "CODEX_HOME").Value);
+
+        var command = string.Join('\n', source.Command ?? []);
+        Assert.Contains("codex_pid=$!", command);
+        Assert.Contains("rm -f \"$CODEX_HOME/auth.json\"", command);
+        Assert.Contains("wait \"$codex_pid\"", command);
+        Assert.True(command.IndexOf("rm -f \"$CODEX_HOME/auth.json\"", StringComparison.Ordinal) < command.IndexOf("wait \"$codex_pid\"", StringComparison.Ordinal));
+    }
+
     private static int LeadingSpaces(string value)
     {
         var count = 0;
@@ -6643,7 +6705,10 @@ public sealed class DevOpsStoreTests
     private sealed class KubernetesPodSpec
     {
         public bool AutomountServiceAccountToken { get; set; }
+        public string ServiceAccountName { get; set; } = "";
+        public List<KubernetesContainer> InitContainers { get; set; } = [];
         public List<KubernetesContainer> Containers { get; set; } = [];
+        public List<KubernetesVolume> Volumes { get; set; } = [];
     }
 
     private sealed class KubernetesContainer
@@ -6651,6 +6716,46 @@ public sealed class DevOpsStoreTests
         public string Name { get; set; } = "";
         public string Image { get; set; } = "";
         public KubernetesSecurityContext SecurityContext { get; set; } = new();
+        public List<KubernetesEnvVar> Env { get; set; } = [];
+        public List<KubernetesVolumeMount> VolumeMounts { get; set; } = [];
+        public List<string> Command { get; set; } = [];
+    }
+
+    private sealed class KubernetesEnvVar
+    {
+        public string Name { get; set; } = "";
+        public string? Value { get; set; }
+        public KubernetesEnvVarSource ValueFrom { get; set; } = new();
+    }
+
+    private sealed class KubernetesEnvVarSource
+    {
+        public KubernetesSecretKeyRef? SecretKeyRef { get; set; }
+    }
+
+    private sealed class KubernetesSecretKeyRef
+    {
+        public string Name { get; set; } = "";
+        public string Key { get; set; } = "";
+    }
+
+    private sealed class KubernetesVolumeMount
+    {
+        public string Name { get; set; } = "";
+        public string MountPath { get; set; } = "";
+        public bool ReadOnly { get; set; }
+    }
+
+    private sealed class KubernetesVolume
+    {
+        public string Name { get; set; } = "";
+        public Dictionary<string, object>? EmptyDir { get; set; }
+        public KubernetesPersistentVolumeClaim PersistentVolumeClaim { get; set; } = new();
+    }
+
+    private sealed class KubernetesPersistentVolumeClaim
+    {
+        public string ClaimName { get; set; } = "";
     }
 
     private sealed class KubernetesSecurityContext
