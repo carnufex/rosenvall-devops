@@ -6072,6 +6072,8 @@ namespace Rosenvall.DevOps.Api
         private const int MaxFiles = 64;
         private const int MaxFileBytes = 128 * 1024;
         private const int MaxTotalBytes = 512 * 1024;
+        private static readonly Regex SafeDeployablePath = new("^[A-Za-z0-9._/-]+$", RegexOptions.Compiled);
+        private static readonly Regex SafeManifestKey = new("^[A-Za-z0-9._-]+$", RegexOptions.Compiled);
         private static readonly HashSet<string> AllowedRootFiles = new(StringComparer.OrdinalIgnoreCase)
         {
             "package.json",
@@ -6105,12 +6107,34 @@ namespace Rosenvall.DevOps.Api
             }
 
             var totalBytes = 0;
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var keys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var file in files)
             {
                 var normalizedPath = NormalizePath(file.Path);
                 if (!IsAllowedPath(normalizedPath))
                 {
                     throw new ArgumentException($"Preview source file '{file.Path}' is outside the allowed React preview paths.", nameof(files));
+                }
+
+                if (!SafeDeployablePath.IsMatch(normalizedPath))
+                {
+                    throw new ArgumentException($"Preview source file '{file.Path}' contains unsupported characters for preview manifests.", nameof(files));
+                }
+
+                if (!paths.Add(normalizedPath))
+                {
+                    throw new ArgumentException($"Preview source file '{file.Path}' duplicates preview source path '{normalizedPath}'.", nameof(files));
+                }
+
+                if (string.IsNullOrWhiteSpace(file.Key) || !SafeManifestKey.IsMatch(file.Key))
+                {
+                    throw new ArgumentException($"Preview source file '{file.Path}' has unsupported manifest key '{file.Key}'.", nameof(files));
+                }
+
+                if (!keys.Add(file.Key))
+                {
+                    throw new ArgumentException($"Preview source file '{file.Path}' duplicates preview source manifest key '{file.Key}'.", nameof(files));
                 }
 
                 var bytes = Encoding.UTF8.GetByteCount(file.Content);

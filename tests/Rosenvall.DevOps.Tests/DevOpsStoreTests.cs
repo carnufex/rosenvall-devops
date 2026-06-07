@@ -6631,6 +6631,31 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_source_policy_rejects_manifest_unsafe_paths_and_duplicate_keys()
+    {
+        var files = LocalReactPreviewProject.ForWorkItem("TASK-4825", "rita app", "skapa en app dar jag kan rita").ToList();
+        files.Add(new PreviewSourceFile("unsafe", "src/foo: bar.tsx", "export const bad = true;"));
+
+        var unsafePath = Assert.Throws<ArgumentException>(() => PreviewSourcePolicy.Validate(files));
+
+        Assert.Contains("contains unsupported characters", unsafePath.Message);
+
+        var duplicatePath = LocalReactPreviewProject.ForWorkItem("TASK-4825", "rita app", "skapa en app dar jag kan rita").ToList();
+        duplicatePath.Add(new PreviewSourceFile("src-app-tsx-copy", "src\\App.tsx", "export default function Other() { return null; }"));
+
+        var duplicatePathError = Assert.Throws<ArgumentException>(() => PreviewSourcePolicy.Validate(duplicatePath));
+
+        Assert.Contains("duplicates preview source path 'src/App.tsx'", duplicatePathError.Message);
+
+        var duplicateKey = LocalReactPreviewProject.ForWorkItem("TASK-4825", "rita app", "skapa en app dar jag kan rita").ToList();
+        duplicateKey.Add(new PreviewSourceFile("src-app-tsx", "src/Other.tsx", "export default function Other() { return null; }"));
+
+        var duplicateKeyError = Assert.Throws<ArgumentException>(() => PreviewSourcePolicy.Validate(duplicateKey));
+
+        Assert.Contains("duplicates preview source manifest key 'src-app-tsx'", duplicateKeyError.Message);
+    }
+
+    [Fact]
     public void Preview_source_policy_allows_src_and_public_assets_with_size_limits()
     {
         var files = LocalReactPreviewProject.ForWorkItem("TASK-4825", "rita app", "skapa en app dar jag kan rita").ToList();
