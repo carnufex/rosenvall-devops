@@ -1394,11 +1394,16 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Realtime_publishers_use_scoped_notifier_instead_of_global_broadcasts()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var realtime = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Realtime", "RealtimeNotifications.cs"));
 
-        Assert.Contains("interface IRealtimeNotifier", program);
-        Assert.Contains("Clients.Group(RealtimeNotifier.BoardGroup(boardId))", program);
+        Assert.DoesNotContain("class DevOpsHub", program);
+        Assert.DoesNotContain("interface IRealtimeNotifier", program);
+        Assert.Contains("interface IRealtimeNotifier", realtime);
+        Assert.Contains("Clients.Group(RealtimeNotifier.BoardGroup(boardId))", realtime);
         Assert.DoesNotContain("Clients.All.SendAsync", program);
+        Assert.DoesNotContain("Clients.All.SendAsync", realtime);
     }
 
     [Fact]
