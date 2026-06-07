@@ -5505,6 +5505,15 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Api_dockerfile_pins_codex_cli_version()
+    {
+        var dockerfile = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Dockerfile"));
+
+        Assert.Matches(@"npm install -g @openai/codex@\d+\.\d+\.\d+", dockerfile);
+        Assert.DoesNotContain("npm install -g @openai/codex \\", dockerfile);
+    }
+
+    [Fact]
     public void Ci_runs_frontend_tests_before_frontend_build()
     {
         var ci = File.ReadAllText(Path.Combine(FindRepositoryRoot(), ".github", "workflows", "ci.yml"));
