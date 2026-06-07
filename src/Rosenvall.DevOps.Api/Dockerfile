@@ -23,5 +23,7 @@ RUN apt-get update \
 RUN mkdir -p /app/data /app/codex-home /tmp \
     && chown -R 1000:1000 /app/data /app/codex-home /tmp
 COPY --from=build /app/publish .
+COPY src/Rosenvall.DevOps.Api/Runtime/runner-lib.sh /opt/rdo-runner/lib.sh
+RUN chmod 0755 /opt/rdo-runner/lib.sh
 USER 1000:1000
 ENTRYPOINT ["dotnet", "Rosenvall.DevOps.Api.dll"]

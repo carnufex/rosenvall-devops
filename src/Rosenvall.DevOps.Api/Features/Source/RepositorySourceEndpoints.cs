@@ -288,7 +288,14 @@ public static class RepositorySourceEndpoints
                 return Results.Problem(failed?.Message ?? secretWrite.Message, statusCode: StatusCodes.Status502BadGateway);
             }
 
-            var manifest = RepositoryProviderSyncJobManifestRenderer.Render(run, source, target, secretName, ForgejoRepositoryClient.RunnerApiBaseUrl(configuration), configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo");
+            var manifest = RepositoryProviderSyncJobManifestRenderer.Render(
+                run,
+                source,
+                target,
+                secretName,
+                ForgejoRepositoryClient.RunnerApiBaseUrl(configuration),
+                configuration["LocalGit:Username"] ?? configuration["Repositories:Forgejo:Username"] ?? "rdo",
+                configuration["Ai:Codex:KubernetesRunnerImage"]);
             var apply = await jobs.ApplyAsync(manifest, cancellationToken);
             if (!apply.Succeeded)
             {

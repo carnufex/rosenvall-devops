@@ -88,6 +88,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Closed the LocalGit runner PR API failure-handling slice. Implementation and preview-promotion runners now capture Forgejo pull-request creation HTTP status, explicitly reject non-2xx responses, parse sanitized Forgejo JSON errors with `jq`, and avoid sed-based Forgejo PR response parsing in manifest tests.
 - 2026-06-07: Closed the preview source manifest-safety slice. `PreviewSourcePolicy` now rejects manifest-unsafe deployable paths, duplicate normalized source paths and duplicate ConfigMap keys while preserving allowed `src/` and `public/` preview assets.
 - 2026-06-07: Closed the credential-bearing git remote slice. Implementation, preview-promotion, PR review-fix and repository cleanup runner scripts now use an in-workspace `GIT_ASKPASS` helper for git clone/push instead of constructing `https://user:token@...` remotes, with manifest tests rejecting the old `auth_remote` patterns.
+- 2026-06-07: Continued the runner manifest hardening with a versioned shared shell library. Repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync Jobs now source `/opt/rdo-runner/lib.sh` from the API runner image for git credential handling, JSON escaping and changed-file collection; provider-sync also moved onto the configured digest-pinned runner image so it can use the same shared helpers.
 - 2026-06-07: Continued the runtime monitor split by moving `ProviderSyncRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ProviderSyncRunMonitor.cs`, keeping provider-sync Job adoption and completion/failure polling out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `ImplementationRunMonitor` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/ImplementationRunMonitor.cs`, keeping repository implementation and cleanup Job status polling, stuck-run diagnostics and realtime run updates out of `Program.cs`.
 - 2026-06-07: Continued the runtime monitor split by moving `BoardPublicAppDeploymentReconciler` into `src/Rosenvall.DevOps.Api/Runtime/Monitors/BoardPublicAppDeploymentReconciler.cs`, keeping public app deployment/readiness reconciliation, LocalGit merge gating and merged-PR source adoption out of `Program.cs`.
@@ -2500,6 +2501,8 @@ Recommended fix:
 - Add tests for selectors, kubeconfig paths with spaces and in-cluster auth.
 
 ### P1: Runner Scripts Need A Shared Shell Library
+
+Status 2026-06-07: Mostly closed for repository runner families. The API image now packages `src/Rosenvall.DevOps.Api/Runtime/runner-lib.sh` as `/opt/rdo-runner/lib.sh`; repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync scripts source it for `GIT_ASKPASS` credentialed git operations, JSON escaping and changed-file collection. Manifest regressions cover those runners. Remaining follow-up: add shell-focused tests for the library itself and continue moving API response helpers/redaction into the shared runner layer where useful.
 
 Evidence:
 

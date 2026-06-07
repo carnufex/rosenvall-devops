@@ -357,10 +357,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RDO_PULL_REQUEST_URL", manifest);
         Assert.Contains("RDO_STEP=WritingPreviewSource", manifest);
         AssertGitCredentialsUseAskPass(manifest, "$ROSENVALL_REPOSITORY_PROVIDER", "$ROSENVALL_GIT_TOKEN");
-        Assert.Contains("git_with_repository_credentials \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
-        Assert.Contains("git status --porcelain", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
+        Assert.Contains("rdo_collect_uncommitted_files \"$workspace\"", manifest);
         Assert.Contains("git commit -m", manifest);
-        Assert.Contains("git_with_repository_credentials \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git push --set-upstream origin", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git push --set-upstream origin", manifest);
         Assert.Contains("ROSENVALL_PUBLIC_HOSTNAME", manifest);
         Assert.Contains("Production hostname:", manifest);
         Assert.Contains("image: ghcr.io/carnufex/rosenvall-devops-api@sha256:promotiondigest", manifest);
@@ -437,7 +437,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("-H \"Authorization: Basic $forgejo_auth\"", manifest);
         Assert.Contains("base64 -d > 'src/App.tsx'", manifest);
         AssertGitCredentialsUseAskPass(manifest, "$ROSENVALL_REPOSITORY_PROVIDER", "$ROSENVALL_GIT_TOKEN");
-        Assert.Contains("git_with_repository_credentials \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
         AssertPreviewPromotionRunnerSecurityContextIsWellFormed(manifest);
         Assert.DoesNotContain("name: GITHUB_TOKEN", manifest);
         Assert.DoesNotContain("codex exec", manifest);
@@ -976,9 +976,9 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("value: \"http://localhost:3001/api/v1\"", manifest);
         Assert.Contains("ROSENVALL_GIT_TOKEN", manifest);
         AssertGitCredentialsUseAskPass(manifest, "$ROSENVALL_REPOSITORY_PROVIDER", "$ROSENVALL_GIT_TOKEN");
-        Assert.Contains("git_with_repository_credentials \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_DEFAULT_BRANCH\"", manifest);
         Assert.Contains("codex exec", manifest);
-        Assert.Contains("git_with_repository_credentials \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git push --set-upstream origin", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"$ROSENVALL_REPOSITORY_PROVIDER\" \"$ROSENVALL_GIT_TOKEN\" git push --set-upstream origin", manifest);
         Assert.Contains("forgejo_auth=\"$(printf '%s:%s' \"$ROSENVALL_LOCAL_GIT_USERNAME\" \"$ROSENVALL_GIT_TOKEN\" | base64 | tr -d '\\n')\"", manifest);
         Assert.Contains("\"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
         Assert.Contains("pr_http_code=\"$(curl -sS -o \"$pr_response_file\" -w \"%{http_code}\" -X POST \"$ROSENVALL_FORGEJO_API_BASE_URL/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
@@ -1275,8 +1275,8 @@ public sealed class DevOpsStoreTests
         Assert.DoesNotContain("image: ghcr.io/carnufex/rosenvall-devops-api:main", manifest);
         Assert.Contains("Add dark mode handling.", prompt);
         AssertGitCredentialsUseAskPass(manifest, "LocalGit", "$ROSENVALL_GIT_TOKEN");
-        Assert.Contains("git_with_repository_credentials \"LocalGit\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_BRANCH\"", manifest);
-        Assert.Contains("git_with_repository_credentials \"LocalGit\" \"$ROSENVALL_GIT_TOKEN\" git push origin \"$ROSENVALL_BRANCH\"", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"LocalGit\" \"$ROSENVALL_GIT_TOKEN\" git clone --depth 1 --branch \"$ROSENVALL_BRANCH\"", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"LocalGit\" \"$ROSENVALL_GIT_TOKEN\" git push origin \"$ROSENVALL_BRANCH\"", manifest);
         Assert.Contains("name: ROSENVALL_PULL_REQUEST_NUMBER", manifest);
         Assert.Contains("value: \"7\"", manifest);
         Assert.Contains("RDO_PULL_REQUEST_NUMBER=$ROSENVALL_PULL_REQUEST_NUMBER", manifest);
@@ -3727,12 +3727,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RDO_STEP=Validating", manifest);
         Assert.Contains("activeDeadlineSeconds: 3600", manifest);
         Assert.Contains("RDO_FAILURE=Changed files outside allowed GitOps paths", manifest);
-        Assert.Contains("git status --porcelain | sed 's/^...//' | sed 's#.* -> ##' > \"$workspace/uncommitted-files.txt\"", manifest);
-        Assert.Contains("git diff --name-only \"$ROSENVALL_DEFAULT_BRANCH\"...HEAD > \"$workspace/committed-files.txt\"", manifest);
-        Assert.Contains("sort -u > \"$workspace/changed-files.txt\"", manifest);
+        Assert.Contains("rdo_collect_changed_files \"$workspace\"", manifest);
         Assert.Contains("if [ ! -s \"$workspace/changed-files.txt\" ]; then echo \"RDO_FAILURE=No changes produced\"; exit 20; fi", manifest);
         Assert.Contains("if [ -s \"$workspace/uncommitted-files.txt\" ]; then", manifest);
-        Assert.Contains("json_escape() {", manifest);
+        Assert.Contains(". /opt/rdo-runner/lib.sh", manifest);
+        Assert.Contains("json_escape() { rdo_json_escape \"$1\"; }", manifest);
         Assert.Contains("ROSENVALL_WORK_ITEM_TITLE", manifest);
         Assert.Contains("git commit -m \"$commit_title\"", manifest);
         Assert.Contains("pr_payload=\"{\\\"title\\\":\\\"$pr_title\\\"", manifest);
@@ -3862,7 +3861,8 @@ public sealed class DevOpsStoreTests
         Assert.Contains("curl -fsS -G \"https://api.github.com/repos/$ROSENVALL_REPOSITORY/pulls\"", manifest);
         Assert.Contains("--data-urlencode \"head=$repo_owner:$ROSENVALL_BRANCH\"", manifest);
         Assert.Contains("if [ -n \"$existing_pr_url\" ]; then", manifest);
-        Assert.Contains("json_escape() {", manifest);
+        Assert.Contains(". /opt/rdo-runner/lib.sh", manifest);
+        Assert.Contains("json_escape() { rdo_json_escape \"$1\"; }", manifest);
         Assert.Contains("ROSENVALL_WORK_ITEM_TITLE", manifest);
         Assert.Contains("git commit -m \"$cleanup_title\"", manifest);
         Assert.Contains("pr_payload=\"{\\\"title\\\":\\\"$pr_title\\\"", manifest);
@@ -4597,7 +4597,7 @@ public sealed class DevOpsStoreTests
         var source = new RepositoryDto(Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), "LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", null, "main", DateTimeOffset.UtcNow, "rdo");
         var target = new RepositoryDto(Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"), "LocalGit", "demo-copy", "http://forgejo/rdo/demo-copy.git", null, "main", DateTimeOffset.UtcNow, "rdo");
 
-        var manifest = RepositoryProviderSyncJobManifestRenderer.Render(run, source, target, "provider-sync-token", "http://forgejo.local/api/v1", "rdo");
+        var manifest = RepositoryProviderSyncJobManifestRenderer.Render(run, source, target, "provider-sync-token", "http://forgejo.local/api/v1", "rdo", "ghcr.io/carnufex/rosenvall-devops-api@sha256:providersyncdigest");
         var job = KubernetesYaml.SingleDocument(manifest, "Job");
         var runner = Assert.Single(job.Spec.Template.Spec.Containers, container => container.Name == "runner");
 
@@ -4606,13 +4606,14 @@ public sealed class DevOpsStoreTests
         Assert.Equal("rosenvall-devops-provider-sync", job.Metadata.Labels["app.kubernetes.io/part-of"]);
         Assert.Equal(run.Id.ToString(), job.Metadata.Labels["rosenvall.devops/pipeline-run"]);
         Assert.False(job.Spec.Template.Spec.AutomountServiceAccountToken);
-        Assert.Equal("alpine/git:2.47.2", runner.Image);
+        Assert.Equal("ghcr.io/carnufex/rosenvall-devops-api@sha256:providersyncdigest", runner.Image);
         Assert.Contains("ALL", runner.SecurityContext.Capabilities.Drop);
         Assert.Contains("refs/heads/*:refs/heads/*", manifest);
         Assert.Contains("refs/tags/*:refs/tags/*", manifest);
-        Assert.Contains("GIT_ASKPASS=\"$workspace/git-askpass.sh\"", manifest);
-        Assert.Contains("git_with_credentials \"$ROSENVALL_SOURCE_PROVIDER\" \"$ROSENVALL_SOURCE_GIT_TOKEN\" git clone --mirror \"$ROSENVALL_SOURCE_REPOSITORY_URL\"", manifest);
-        Assert.Contains("git_with_credentials \"$ROSENVALL_TARGET_PROVIDER\" \"$ROSENVALL_TARGET_GIT_TOKEN\" git -C \"$workspace/repo.git\" push \"$ROSENVALL_TARGET_REPOSITORY_URL\"", manifest);
+        Assert.Contains(". /opt/rdo-runner/lib.sh", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"$ROSENVALL_SOURCE_PROVIDER\" \"$ROSENVALL_SOURCE_GIT_TOKEN\" git clone --mirror \"$ROSENVALL_SOURCE_REPOSITORY_URL\"", manifest);
+        Assert.Contains("rdo_git_with_repository_credentials \"$workspace\" \"$ROSENVALL_TARGET_PROVIDER\" \"$ROSENVALL_TARGET_GIT_TOKEN\" git -C \"$workspace/repo.git\" push \"$ROSENVALL_TARGET_REPOSITORY_URL\"", manifest);
+        Assert.DoesNotContain("git_with_credentials() {", manifest);
         Assert.Contains("provider-sync-token", manifest);
         Assert.Contains("ROSENVALL_SOURCE_REPOSITORY_URL", manifest);
         Assert.Contains("ROSENVALL_TARGET_REPOSITORY_URL", manifest);
@@ -5903,6 +5904,29 @@ public sealed class DevOpsStoreTests
         Assert.Contains("mountPath: /tmp", deployment);
         Assert.Contains("name: tmp", deployment);
         Assert.Contains("USER 1000:1000", dockerfile);
+    }
+
+    [Fact]
+    public void Api_image_packages_versioned_runner_shell_library()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var dockerfile = File.ReadAllText(Path.Combine(root.FullName, "src", "Rosenvall.DevOps.Api", "Dockerfile"));
+        var libraryPath = Path.Combine(root.FullName, "src", "Rosenvall.DevOps.Api", "Runtime", "runner-lib.sh");
+        var gitAttributes = File.Exists(Path.Combine(root.FullName, ".gitattributes"))
+            ? File.ReadAllText(Path.Combine(root.FullName, ".gitattributes"))
+            : "";
+
+        Assert.True(File.Exists(libraryPath), "The repository runner shell library should be versioned in source.");
+        var library = File.ReadAllText(libraryPath);
+
+        Assert.Contains("*.sh text eol=lf", gitAttributes);
+        Assert.Contains("COPY src/Rosenvall.DevOps.Api/Runtime/runner-lib.sh /opt/rdo-runner/lib.sh", dockerfile);
+        Assert.Contains("chmod 0755 /opt/rdo-runner/lib.sh", dockerfile);
+        Assert.Contains("rdo_git_with_repository_credentials()", library);
+        Assert.Contains("GIT_ASKPASS=\"$workspace/git-askpass.sh\"", library);
+        Assert.Contains("rdo_json_escape()", library);
+        Assert.Contains("rdo_collect_changed_files()", library);
+        Assert.Contains("rdo_collect_uncommitted_files()", library);
     }
 
     [Fact]
@@ -7456,10 +7480,10 @@ public sealed class DevOpsStoreTests
 
     private static void AssertGitCredentialsUseAskPass(string manifest, string providerArgument, string tokenArgument)
     {
-        Assert.Contains("cat > \"$workspace/git-askpass.sh\" <<'EOF'", manifest);
-        Assert.Contains("GIT_ASKPASS=\"$workspace/git-askpass.sh\"", manifest);
-        Assert.Contains("GIT_TERMINAL_PROMPT=0", manifest);
-        Assert.Contains($"git_with_repository_credentials \"{providerArgument}\" \"{tokenArgument}\"", manifest);
+        Assert.Contains(". /opt/rdo-runner/lib.sh", manifest);
+        Assert.DoesNotContain("git_with_repository_credentials() {", manifest);
+        Assert.DoesNotContain("case \"$1\" in", manifest);
+        Assert.Contains($"rdo_git_with_repository_credentials \"$workspace\" \"{providerArgument}\" \"{tokenArgument}\"", manifest);
         Assert.DoesNotContain("auth_remote", manifest);
         Assert.DoesNotContain("x-access-token:${ROSENVALL_GIT_TOKEN}", manifest);
         Assert.DoesNotContain("${ROSENVALL_LOCAL_GIT_USERNAME}:${ROSENVALL_GIT_TOKEN}@", manifest);
