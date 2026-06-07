@@ -2119,6 +2119,26 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Operator_documentation_matches_current_localgit_repository_flow()
+    {
+        var root = FindRepositoryRoot();
+        var readme = File.ReadAllText(Path.Combine(root, "README.md"));
+        var homelabReadme = File.ReadAllText(Path.Combine(root, "deploy", "homelab", "README.md"));
+        var frontendInventory = File.ReadAllText(Path.Combine(root, "docs", "frontend-control-inventory.md"));
+        var implementationPlan = File.ReadAllText(Path.Combine(root, "docs", "implementation-plan.md"));
+
+        Assert.Contains("LocalGit/Forgejo is internal-only", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("LinkExistingFirst", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("https://git.rosenvall.se/api/v1", homelabReadme, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Contains("Local pull request", frontendInventory, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("No PR for local preview", frontendInventory, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("GitHub-style development state", frontendInventory, StringComparison.OrdinalIgnoreCase);
+
+        Assert.DoesNotContain("Forgejo configuration-only repository creation", implementationPlan, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Pipeline_run_execution_marks_run_running_and_records_metrics()
     {
         using var fixture = DevOpsStoreFixture.Create();

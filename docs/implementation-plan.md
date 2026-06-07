@@ -79,7 +79,7 @@ Use this file as the durable checklist for the active product slice. Keep items 
 ## Follow-Up Production Hardening
 
 - [ ] Replace configured Authentik users with live Authentik API calls using a Kubernetes secret token.
-- [ ] Replace Forgejo configuration-only repository creation with authenticated Forgejo API creation.
+- [x] Add authenticated internal LocalGit/Forgejo repository creation through RDO.
 - [ ] Move Codex implementation from API-process execution into an isolated Kubernetes Job or runner with streamed logs.
 - [ ] Pin homelab manifests to immutable image tags after the first production promotion.
 - [ ] Move runtime persistence from SQLite PVC to CloudNativePG once the bootstrap secret exists.

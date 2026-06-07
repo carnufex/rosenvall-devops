@@ -27,10 +27,12 @@ This inventory keeps the v1 UI honest: every visible control must either perform
 | Work item modal | Open demo environment | Implemented | Opens the preview URL only after Kubernetes health checks mark the preview `Running`. |
 | Work item modal | Start preview | Implemented | Restarts a stopped preview from saved runtime data via `/api/work-items/{id}/preview/start`. |
 | Work item modal | Stop preview | Implemented | Tears down preview runtime resources while keeping the card via `/api/work-items/{id}/preview/stop`. |
-| Work item modal | Approve PR | Implemented | Visible when development state includes a PR URL; marks the PR as human-approved, moves the card to `Done`, and stops the preview. |
-| Work item modal | No PR for local preview | Read-only | Disabled state for local preview runs that do not produce a GitHub PR. |
+| Work item modal | Local pull request | Implemented | Opens the RDO-native LocalGit diff/review modal for internal pull requests. |
+| Work item modal | Approve PR | Implemented | For LocalGit, merges the local pull request through RDO, deploys the board app, moves the card to `Done`, and stops the preview after delivery succeeds. GitHub pull requests remain external links. |
 | Work item modal | Development tools / Simulate GitHub callback | Removed from v1 | Removed from the user flow because implementation now produces a Kubernetes-gated preview. |
 | Work item modal | Preview environment | Implemented | Rendered only when API returns an actual preview and includes lifecycle status/actions. |
+| Source | Clone | Implemented | Shows clone guidance for linked repositories, including internal-only guidance for LocalGit. |
+| Source | Copy repository to provider | Implemented | Copies branches and tags to a new supported target provider and links the copied repository as secondary board source after sync succeeds. |
 | Dashboard | Demo environments | Implemented | Lists real preview environments with status, URL, namespace, and start/stop actions. |
 | Dashboard | Runtime history | Read-only | Lists preview/cleanup/PR lifecycle events from `/api/preview-events`. |
 | Dashboard | Pipeline status | Read-only | Lists internal AI, preview, and PR pipeline state from `/api/pipelines`. |

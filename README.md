@@ -8,9 +8,9 @@ This is the first vertical slice of the DevOps SaaS plan.
 - `src/Rosenvall.DevOps.Api`: ASP.NET Core 10 Minimal API with SignalR update hub and v1 endpoint contracts.
 - `frontend`: React + TypeScript UI matching the supplied Rosenvall DevOps design direction.
 - `workflows`: GitHub Actions templates for target repositories that will run implementation agents.
-- Boards are repository-bound. RDO can model Forgejo/Gitea, GitHub, Azure DevOps, and generic Git remotes.
+- Boards are repository-bound. RDO can model LocalGit/Forgejo, GitHub, Azure DevOps, and generic Git remotes.
 - Timeline events combine card lifecycle, preview events, PR callbacks, commits, and pipeline runs.
-- Forgejo/Gitea is the first self-hosted Git target. The current policy is `LinkExistingFirst`, with repository creation exposed as configuration before wiring credentials.
+- LocalGit/Forgejo is internal-only in v1. RDO creates private Forgejo repositories for demo/local boards, shows local pull requests inside the app, and handles merge/deploy/cleanup without exposing Forgejo as a public Git hosting UI.
 - Pipeline runs can render and submit Kubernetes Jobs, then expose token and code-delta metrics to the dashboard.
 - Assignee options can come from Authentik configuration plus the current board's existing assignees.
 
@@ -46,6 +46,8 @@ AI planning is provider-based. The `ollama` provider calls an Ollama HTTP endpoi
 For the detailed Codex execution model, runner modes, and security boundaries, see [Codex integration](docs/codex-integration.md).
 
 Preview apps are generated as per-ticket React/Tailwind source files, stored in a Kubernetes ConfigMap, and mounted into the prewarmed `rosenvall-devops-preview-base` image. The preview lifecycle is tracked separately from `kubectl apply`: the UI only exposes the public demo URL after the backend health checker sees an available Deployment and a ready pod.
+
+Previewable LocalGit boards follow a preview-first flow: build a preview, review the generated LocalGit pull request and diff in RDO, merge through RDO, then deploy the public board app from the merged source. GitHub boards keep GitHub-native pull request links, while the Source page can browse linked repositories, show clone guidance, and copy a repository to another supported provider without changing the primary repository.
 
 Tech stack:
 
@@ -122,7 +124,7 @@ Product-side manifests live in `deploy/homelab`:
 kubectl apply -k .\deploy\homelab
 ```
 
-The manifests publish `https://devops.rosenvall.se`, configure Authentik OIDC for the frontend/API, point Ollama at `http://ollama.ollama.svc.cluster.local:11434/api`, install Codex CLI in the API pod with a mounted `/app/codex-home`, and give the API service account RBAC to create preview and pipeline Kubernetes resources.
+The manifests publish `https://devops.rosenvall.se`, configure Authentik OIDC for the frontend/API, point Ollama at `http://ollama.ollama.svc.cluster.local:11434/api`, install Codex CLI in the API pod with a mounted `/app/codex-home`, deploy internal-only Forgejo for LocalGit repositories, and give the API service account RBAC to create preview, production app and pipeline Kubernetes resources.
 
 To enable the `codex` AI provider in homelab, log in once inside the API pod:
 
@@ -165,5 +167,5 @@ The login state is stored in the `rosenvall-devops-codex-home` PVC. Homelab defa
 ## Next Production Steps
 
 - Provide the PostgreSQL bootstrap secret and `ConnectionStrings__DevOps` before enabling CloudNativePG runtime in ArgoCD.
-- Add real Forgejo and Authentik API tokens as Kubernetes secrets, then replace configured/static user and repository data with live API calls.
+- Replace configured Authentik users with live Authentik API calls using a Kubernetes secret token.
 - Publish immutable image tags from CI and pin `deploy/homelab` to those tags instead of `:main`.
