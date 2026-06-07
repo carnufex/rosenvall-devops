@@ -5486,6 +5486,46 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Cors_configuration_fails_closed_in_production_without_explicit_origins()
+    {
+        var configuration = new ConfigurationBuilder().Build();
+
+        var failure = Assert.Throws<InvalidOperationException>(() => CorsConfiguration.Resolve(configuration, isDevelopment: false));
+
+        Assert.Contains("Frontend:AllowedOrigins", failure.Message);
+    }
+
+    [Fact]
+    public void Cors_configuration_allows_localhost_fallback_only_in_development()
+    {
+        var development = CorsConfiguration.Resolve(new ConfigurationBuilder().Build(), isDevelopment: true);
+        var production = CorsConfiguration.Resolve(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Frontend:AllowedOrigins:0"] = "https://devops.rosenvall.se"
+            })
+            .Build(), isDevelopment: false);
+
+        Assert.Equal(["http://localhost:5173"], development.AllowedOrigins);
+        Assert.Equal(["https://devops.rosenvall.se"], production.AllowedOrigins);
+        Assert.True(development.Diagnostics.AllowCredentials);
+        Assert.Equal("Configured", production.Diagnostics.Status);
+        Assert.Equal("https://devops.rosenvall.se", Assert.Single(production.Diagnostics.AllowedOrigins));
+    }
+
+    [Fact]
+    public void Api_status_contract_exposes_cors_diagnostics()
+    {
+        var root = FindRepositoryRoot();
+        var contracts = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Contracts", "ApiContracts.cs"));
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("CorsDiagnosticsDto", contracts);
+        Assert.Contains("CorsDiagnosticsDto Cors", contracts);
+        Assert.Contains("cors.Diagnostics", program);
+    }
+
+    [Fact]
     public void Authentication_mode_resolution_lives_in_auth_module()
     {
         var root = FindRepositoryRoot();

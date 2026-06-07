@@ -70,10 +70,11 @@ builder.Services.AddHostedService<ImplementationRunMonitor>();
 builder.Services.AddHostedService<BoardPublicAppDeploymentReconciler>();
 builder.Services.AddHostedService<ProviderSyncRunMonitor>();
 builder.Services.AddHostedService<GitHubCallbackStateCleanupService>();
+var cors = CorsConfiguration.Resolve(builder.Configuration, builder.Environment.IsDevelopment());
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("frontend", policy =>
-        policy.WithOrigins(builder.Configuration.GetSection("Frontend:AllowedOrigins").Get<string[]>() ?? ["http://localhost:5173"])
+        policy.WithOrigins(cors.AllowedOrigins.ToArray())
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials());
@@ -95,6 +96,7 @@ if (authentication.Enabled)
 }
 
 var app = builder.Build();
+app.Logger.LogInformation("CORS allowed origins: {AllowedOrigins}", string.Join(", ", cors.AllowedOrigins));
 
 using (var scope = app.Services.CreateScope())
 {
@@ -323,6 +325,7 @@ api.MapGet("/status", async (IConfiguration configuration, DevOpsStore store, Fo
     Results.Ok(new ApiStatusDto(
         authentication.Mode,
         ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics),
+        cors.Diagnostics,
         await localGit.CheckReadinessAsync(cancellationToken),
         store.GetDemoSandboxPolicyStatus())));
 
