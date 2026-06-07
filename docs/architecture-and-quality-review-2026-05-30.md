@@ -165,6 +165,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 - 2026-06-07: Continued the runtime correlation scope slice by adding `aiRunId` to the shared runtime log scope. Repository implementation monitor logs now carry the AI run id together with board/work-item/run/job fields.
 - 2026-06-07: Closed the shared .NET build-policy slice. Root `Directory.Build.props` now centralizes nullable reference types, implicit usings, latest analyzer level, deterministic builds and a narrow warnings-as-errors ratchet for unawaited tasks plus unreachable code, while root `.editorconfig` defines shared C# plus frontend formatting/style conventions.
 - 2026-06-07: Closed the frontend lint quality-gate slice. Frontend now has ESLint 9 flat config with TypeScript, React hooks and JSX accessibility plugins, `npm run lint -- --max-warnings=0` behavior through the package script, and CI runs lint after frontend tests and before build. The initial App.tsx hook/a11y/unused-symbol warning baseline has been cleaned up, so lint warnings now fail the gate.
+- 2026-06-07: Continued the demo sandbox policy slice by adding a central `UserAccessProfileDto` for actor capabilities. Demo users now get one policy surface for allowed workspaces, allowed repository providers, team/workspace creation, external repository linking, GitHub integration access and GitHub provider-copy permissions; board creation, provider sync, GitHub visibility and team creation checks consume that policy. Remaining follow-up: move the policy out of `DevOpsStore` into a dedicated authorization module as the backend split continues.
 
 ## Priority Findings
 
@@ -1722,6 +1723,8 @@ Recommended fix:
 - Add tests for event target selection, or at minimum unit tests for board id resolution from each event type.
 
 ### P1: Demo Restrictions Should Be Modeled As Policy, Not Email Specials
+
+Status 2026-06-07: Mostly closed. Demo access is now exposed through `UserAccessProfileDto` and used for workspace/board/provider/GitHub/team creation decisions; tests cover LocalGit-only sandbox behavior, GitHub invisibility, GitHub provider-copy blocking and team creation blocking. Remaining follow-up: extract the policy from `DevOpsStore` into a dedicated authorization service/module so future endpoint work consumes the same capability model without adding more store-local rules.
 
 Evidence:
 

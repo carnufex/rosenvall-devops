@@ -6,6 +6,16 @@ namespace Rosenvall.DevOps.Api;
 
 public sealed record WorkspaceDto(Guid Id, string Name, string EnvironmentName, string Region, int ActiveProjects, int OpenPullRequests, int SuccessfulAiImplementations, int ComputeUsagePercent);
 public sealed record UserDto(Guid Id, string DisplayName, string Email, string Subject, string? AvatarUrl = null);
+public sealed record UserAccessProfileDto(
+    string ActorSubject,
+    bool IsDemoRestricted,
+    IReadOnlyList<Guid> BoardCreationWorkspaceIds,
+    IReadOnlyList<string> AllowedRepositoryProviders,
+    bool CanCreateTeams,
+    bool CanCreateWorkspaces,
+    bool CanLinkExternalRepositories,
+    bool CanUseGitHubIntegrations,
+    bool CanSyncToGitHub);
 public sealed record TeamMemberDto(Guid UserId, string Role, string? DisplayName = null, string? Email = null, string? Status = null);
 public sealed record TeamDto(Guid Id, string Name, IReadOnlyList<TeamMemberDto> Members, DateTimeOffset CreatedAt);
 public sealed record RepositoryDto(Guid Id, string Provider, string Name, string RemoteUrl, string? WebUrl, string DefaultBranch, DateTimeOffset CreatedAt, string? Owner = null, string ImplementationProfile = "react-preview", string ImplementationWorkflow = "preview-then-pr");

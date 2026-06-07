@@ -3058,6 +3058,27 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Demo_user_access_profile_centralizes_sandbox_policy()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var demo = store.GetOrCreateUserWithDemoSandbox(new UserIdentityRequest("authentik|demo", "Demo", "demo@rosenvall.local"));
+        var demoWorkspace = store.GetWorkspaces(demo.Subject).Single(workspace => workspace.Name == "Demo Sandbox");
+
+        var profile = store.GetUserAccessProfile(demo.Subject);
+
+        Assert.True(profile.IsDemoRestricted);
+        Assert.Contains(demoWorkspace.Id, profile.BoardCreationWorkspaceIds);
+        Assert.Equal(new[] { "NoRepository", "LocalGit" }, profile.AllowedRepositoryProviders);
+        Assert.False(profile.CanCreateTeams);
+        Assert.False(profile.CanCreateWorkspaces);
+        Assert.False(profile.CanLinkExternalRepositories);
+        Assert.False(profile.CanUseGitHubIntegrations);
+        Assert.False(profile.CanSyncToGitHub);
+        Assert.False(store.CanCreateTeam(demo.Subject));
+    }
+
+    [Fact]
     public void Demo_sandbox_policy_status_reports_restricted_demo_isolation()
     {
         using var fixture = DevOpsStoreFixture.Create();

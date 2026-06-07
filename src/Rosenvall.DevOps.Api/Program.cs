@@ -712,6 +712,11 @@ api.MapPost("/teams", (CreateTeamRequest request, ClaimsPrincipal user, DevOpsSt
 {
     var actor = UserIdentityFromClaims(user);
     store.GetOrCreateUser(actor);
+    if (!store.CanCreateTeam(actor.Subject))
+    {
+        return TeamMutationForbidden();
+    }
+
     var team = store.CreateTeam(request, actor.Subject);
     return Results.Created($"/api/teams/{team.Id}", team);
 });
@@ -10663,6 +10668,14 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public UserAccessProfileDto GetUserAccessProfile(string actorSubject)
+        {
+            lock (_lock)
+            {
+                return UserAccessProfileWithoutLock(actorSubject);
+            }
+        }
+
         private bool EnsureDemoSandboxWithoutLock(UserDto user)
         {
             var changed = false;
@@ -10753,12 +10766,25 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
+                if (!CanCreateTeamWithoutLock(actorSubject))
+                {
+                    throw new InvalidOperationException("The actor cannot create teams.");
+                }
+
                 var actor = _users.FirstOrDefault(user => user.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase)) ??
                     GetOrCreateUser(new UserIdentityRequest(actorSubject, actorSubject, $"{actorSubject}@local"));
                 var team = new TeamDto(Guid.NewGuid(), NormalizeText(request.Name, "Team"), [new TeamMemberDto(actor.Id, "Owner")], DateTimeOffset.UtcNow);
                 _teams.Add(team);
                 Persist();
                 return EnrichTeam(team);
+            }
+        }
+
+        public bool CanCreateTeam(string actorSubject)
+        {
+            lock (_lock)
+            {
+                return CanCreateTeamWithoutLock(actorSubject);
             }
         }
 
@@ -10912,12 +10938,13 @@ namespace Rosenvall.DevOps.Api
                     return false;
                 }
 
-                if (IsRestrictedDemoSubjectWithoutLock(actorSubject))
+                var profile = UserAccessProfileWithoutLock(actorSubject);
+                if (targetProvider.Equals("GitHub", StringComparison.OrdinalIgnoreCase))
                 {
-                    return targetProvider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase);
+                    return profile.CanSyncToGitHub;
                 }
 
-                return true;
+                return profile.AllowedRepositoryProviders.Any(provider => provider.Equals(targetProvider, StringComparison.OrdinalIgnoreCase));
             }
         }
 
@@ -10994,12 +11021,7 @@ namespace Rosenvall.DevOps.Api
         {
             lock (_lock)
             {
-                if (IsRestrictedDemoSubjectWithoutLock(actorSubject))
-                {
-                    return false;
-                }
-
-                return CanCreateBoardScopedResourceWithoutLock(actorSubject);
+                return UserAccessProfileWithoutLock(actorSubject).CanCreateWorkspaces;
             }
         }
 
@@ -11111,8 +11133,7 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 if (!string.IsNullOrWhiteSpace(actorSubject) &&
-                    IsRestrictedDemoSubjectWithoutLock(actorSubject) &&
-                    !IsDemoBoardRepositoryRequestAllowedWithoutLock(request))
+                    !CanUseBoardRepositoryRequestWithoutLock(UserAccessProfileWithoutLock(actorSubject), request))
                 {
                     return null;
                 }
@@ -16303,6 +16324,43 @@ namespace Rosenvall.DevOps.Api
                 user.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase) &&
                 IsDemoEmail(user.Email));
 
+        private UserAccessProfileDto UserAccessProfileWithoutLock(string actorSubject)
+        {
+            var isDemoRestricted = IsRestrictedDemoSubjectWithoutLock(actorSubject);
+            if (isDemoRestricted)
+            {
+                var demoWorkspaceIds = _workspaces
+                    .Where(workspace => workspace.Name.Equals(DemoWorkspaceName, StringComparison.OrdinalIgnoreCase))
+                    .Select(workspace => workspace.Id)
+                    .ToArray();
+                return new UserAccessProfileDto(
+                    actorSubject,
+                    true,
+                    demoWorkspaceIds,
+                    ["NoRepository", "LocalGit"],
+                    CanCreateTeams: false,
+                    CanCreateWorkspaces: false,
+                    CanLinkExternalRepositories: false,
+                    CanUseGitHubIntegrations: false,
+                    CanSyncToGitHub: false);
+            }
+
+            var canCreateBoardScopedResource = CanCreateBoardScopedResourceWithoutLock(actorSubject);
+            Guid[] workspaceIds = canCreateBoardScopedResource
+                ? _workspaces.Select(workspace => workspace.Id).ToArray()
+                : [];
+            return new UserAccessProfileDto(
+                actorSubject,
+                false,
+                workspaceIds,
+                ["NoRepository", "LocalGit", "GitHub", "GenericGit", "CustomUrl"],
+                CanCreateTeams: true,
+                CanCreateWorkspaces: canCreateBoardScopedResource,
+                CanLinkExternalRepositories: canCreateBoardScopedResource,
+                CanUseGitHubIntegrations: true,
+                CanSyncToGitHub: canCreateBoardScopedResource);
+        }
+
         private bool CanCreateBoardInWorkspaceWithoutLock(Guid workspaceId, string actorSubject)
         {
             if (_workspaces.All(workspace => workspace.Id != workspaceId))
@@ -16310,18 +16368,14 @@ namespace Rosenvall.DevOps.Api
                 return false;
             }
 
-            if (IsRestrictedDemoSubjectWithoutLock(actorSubject))
-            {
-                return _workspaces.Any(workspace =>
-                    workspace.Id == workspaceId &&
-                    workspace.Name.Equals(DemoWorkspaceName, StringComparison.OrdinalIgnoreCase));
-            }
-
-            return CanCreateBoardScopedResourceWithoutLock(actorSubject);
+            return UserAccessProfileWithoutLock(actorSubject).BoardCreationWorkspaceIds.Contains(workspaceId);
         }
 
         private bool CanCreateBoardScopedResourceWithoutLock(string actorSubject) =>
             !HasAnyTeamOrAccess() || _boards.Any(board => CanMutateBoardWithoutLock(board.Id, actorSubject));
+
+        private bool CanCreateTeamWithoutLock(string actorSubject) =>
+            UserAccessProfileWithoutLock(actorSubject).CanCreateTeams;
 
         private bool CanMutateBoardWithoutLock(Guid boardId, string actorSubject)
         {
@@ -16466,23 +16520,34 @@ namespace Rosenvall.DevOps.Api
                 repository.Id == repositoryId &&
                 repository.Name.Equals("local/vite-react-tailwind", StringComparison.OrdinalIgnoreCase));
 
-        private bool IsDemoBoardRepositoryRequestAllowedWithoutLock(CreateBoardRequest request)
+        private bool CanUseBoardRepositoryRequestWithoutLock(UserAccessProfileDto profile, CreateBoardRequest request)
         {
             if (request.RepositoryId is { } repositoryId)
             {
-                return _repositories.Any(repository =>
-                    repository.Id == repositoryId &&
-                    repository.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase));
+                var repository = _repositories.SingleOrDefault(entry => entry.Id == repositoryId);
+                return repository is not null &&
+                    profile.AllowedRepositoryProviders.Contains(repository.Provider, StringComparer.OrdinalIgnoreCase);
             }
 
             if (string.IsNullOrWhiteSpace(request.ProviderMode) ||
                 request.ProviderMode.Equals("NoRepository", StringComparison.OrdinalIgnoreCase))
             {
-                return true;
+                return profile.AllowedRepositoryProviders.Contains("NoRepository", StringComparer.OrdinalIgnoreCase);
             }
 
-            return request.ProviderMode.Equals("LocalGitNew", StringComparison.OrdinalIgnoreCase) ||
-                request.RepositoryProvider?.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) == true;
+            if (request.ProviderMode.Equals("LocalGitNew", StringComparison.OrdinalIgnoreCase) ||
+                request.RepositoryProvider?.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return profile.AllowedRepositoryProviders.Contains("LocalGit", StringComparer.OrdinalIgnoreCase);
+            }
+
+            if (request.ProviderMode.Equals("GitHubNew", StringComparison.OrdinalIgnoreCase) ||
+                request.RepositoryProvider?.Equals("GitHub", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return profile.AllowedRepositoryProviders.Contains("GitHub", StringComparer.OrdinalIgnoreCase);
+            }
+
+            return profile.CanLinkExternalRepositories;
         }
 
         private bool CanMutateRepositoryOnlyPipelineWithoutLock(Guid repositoryId, string actorSubject) =>
@@ -16495,7 +16560,7 @@ namespace Rosenvall.DevOps.Api
                 return true;
             }
 
-            if (IsRestrictedDemoSubjectWithoutLock(actorSubject))
+            if (!UserAccessProfileWithoutLock(actorSubject).CanUseGitHubIntegrations)
             {
                 return false;
             }
