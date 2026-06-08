@@ -2844,6 +2844,8 @@ Recommended fix:
 
 ### P1: Add Browser Security Headers For The RDO UI/API
 
+Status 2026-06-08: Closed. API responses now pass through `BrowserSecurityHeaders.Apply`, which sets CSP, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy` and production HSTS. Frontend `nginx.conf` emits matching browser headers for the static UI. Regression coverage lives in `Browser_security_headers_are_declared_for_api_and_frontend`, including CSP checks for `default-src 'self'`, no script `unsafe-inline`, Authentik/GitHub connect sources and `frame-ancestors 'none'`.
+
 Evidence:
 
 - The API configures CORS, auth and exception handling, but there is no visible middleware for:
