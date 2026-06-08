@@ -2958,22 +2958,24 @@ Recommended fix:
 
 ### P1: OIDC Tokens Stored In `localStorage` Increase XSS Blast Radius
 
+Status 2026-06-08: Closed. The OIDC client now stores `oidc-client-ts` user state in `window.sessionStorage`; only non-sensitive UI preferences remain in `localStorage`. Markdown comment and AI-plan inline rendering now goes through the shared `renderInlineMarkdown` helper, which renders React text/elements instead of raw HTML and rejects unsafe link schemes. Frontend regression coverage verifies both the session-storage OIDC contract and that markdown comments escape raw `<script>`/event-attribute HTML while blocking `javascript:` links.
+
 Evidence:
 
-- `oidc-client-ts` is configured with `new WebStorageStateStore({ store: window.localStorage })`.
-- The requested scope includes `offline_access`.
+- `frontend/src/App.tsx` configures `new WebStorageStateStore({ store: window.sessionStorage })` for the OIDC user store.
+- `frontend/src/boardChrome.test.ts` covers both auth-token storage and markdown comment rendering against raw HTML/script/link injection.
 
 Impact:
 
-- Any XSS in the app can read long-lived auth state.
+- Persistent browser storage no longer holds OIDC user tokens, reducing the blast radius of an XSS issue.
 - RDO displays user-generated markdown, code and diffs, so the rendering surface is broader than a simple CRUD app.
 
 Recommended fix:
 
-- Prefer `sessionStorage` for the browser client unless persistent login is a hard requirement.
+- Keep using `sessionStorage` for the browser client unless persistent login becomes an explicit requirement.
 - Consider a BFF/session-cookie model later if RDO becomes multi-user production software.
-- Review all markdown/source rendering to ensure it never injects raw HTML.
-- Add a test that markdown comments cannot render script/event attributes.
+- Keep markdown/source rendering on React element/text paths; do not introduce raw HTML injection.
+- Keep regression tests for script/event-attribute escaping and unsafe link blocking.
 
 ### P2: OAuth Callback State Is Process-Local
 

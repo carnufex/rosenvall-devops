@@ -4,6 +4,7 @@ import { createApiClient, isApiError, type AuthSession } from './apiClient';
 import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildShellBoardSelection, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { buildCodeLineRenderModel, codeHighlightLimitMessage, highlightCodeLines, plainHighlightedLines, splitCodeLines, type CodeLineKind, type CodeLineRenderModel, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
+import { renderInlineMarkdown } from './markdownInline';
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
 import { createBoardRealtimeClient, realtimeRefreshPlan, removeRealtimeWorkItem, upsertRealtimeWorkItem, type RealtimeEvent } from './realtimeClient';
@@ -6730,36 +6731,6 @@ function MarkdownReviewBlockText({ block }: { block: AiPlanReviewBlock }) {
   }
 
   return <p>{renderInlineMarkdown(block.text)}</p>;
-}
-
-function renderInlineMarkdown(text: string): React.ReactNode[] {
-  const nodes: React.ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
-  let last = 0;
-  for (const match of text.matchAll(pattern)) {
-    if (match.index > last) {
-      nodes.push(text.slice(last, match.index));
-    }
-
-    const token = match[0];
-    if (token.startsWith('**')) {
-      nodes.push(<strong key={nodes.length}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith('`')) {
-      nodes.push(<code key={nodes.length}>{token.slice(1, -1)}</code>);
-    } else {
-      const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      const href = link ? safeMarkdownHref(link[2]) : null;
-      nodes.push(link && href ? <a key={nodes.length} href={href} target="_blank" rel="noreferrer">{link[1]}</a> : token);
-    }
-
-    last = match.index + token.length;
-  }
-
-  if (last < text.length) {
-    nodes.push(text.slice(last));
-  }
-
-  return nodes;
 }
 
 function PanelHeader({ icon, title }: { icon: React.ReactNode; title: string }) {

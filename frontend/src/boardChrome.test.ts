@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import * as React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildShellBoardSelection, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
+import { renderInlineMarkdown } from './markdownInline.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -648,6 +651,21 @@ test('markdown links only allow safe schemes', () => {
   assert.equal(safeMarkdownHref('javascript:alert(1)'), null);
   assert.equal(safeMarkdownHref('data:text/html,<script>alert(1)</script>'), null);
   assert.equal(safeMarkdownHref('//evil.example/path'), null);
+});
+
+test('markdown comments render raw html as escaped text and block unsafe links', () => {
+  const html = renderToStaticMarkup(React.createElement(
+    React.Fragment,
+    null,
+    ...renderInlineMarkdown('<img src=x onerror=alert(1)> <script>alert(1)</script> [unsafe](javascript:alert(1)) [safe](https://example.test/path)')
+  ));
+
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /href="https:\/\/example\.test\/path"/);
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /<[^>]+onerror=/i);
+  assert.doesNotMatch(html, /href="javascript:/i);
 });
 
 test('gitops app urls keep only unique http links and produce compact labels', () => {
