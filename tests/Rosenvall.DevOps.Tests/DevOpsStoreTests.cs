@@ -2110,6 +2110,53 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void LocalGit_service_credential_audit_events_are_recorded_in_timeline()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("demo", repository.Id, null, null, null, null, null))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Audit LocalGit", "Track privileged LocalGit actions.", "Todo", "Medium", null))!;
+
+        store.RecordLocalGitServiceCredentialAudit(
+            board.Id,
+            repository.Id,
+            item.Id,
+            "LocalGit pull request merged",
+            "Merged LocalGit pull request #7 with the RDO service credential.",
+            "public-app-reconcile",
+            "http://forgejo/rdo/demo-app/pulls/7");
+
+        var audit = Assert.Single(store.GetTimeline(board.Id), entry => entry.Kind == "LocalGitServiceCredential");
+        Assert.Equal(repository.Id, audit.RepositoryId);
+        Assert.Equal(item.Id, audit.WorkItemId);
+        Assert.Equal("LocalGit pull request merged", audit.Title);
+        Assert.Contains("service credential", audit.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("public-app-reconcile", audit.Actor);
+        Assert.Equal("http://forgejo/rdo/demo-app/pulls/7", audit.Url);
+    }
+
+    [Fact]
+    public void LocalGit_service_credential_mutations_have_explicit_audit_hooks()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var sourceEndpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Source", "RepositorySourceEndpoints.cs"));
+        var publicAppReconciler = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "BoardPublicAppDeploymentReconciler.cs"));
+
+        Assert.Contains("LocalGit repository created", program);
+        Assert.Contains("LocalGit repository deleted", program);
+        Assert.Contains("LocalGit pull request closed", program);
+        Assert.Contains("Provider sync target repository created", sourceEndpoints);
+        Assert.Contains("Provider sync push queued", sourceEndpoints);
+        Assert.Contains("LocalGit pull request merged", publicAppReconciler);
+        Assert.Contains("RecordLocalGitServiceCredentialAudit", program);
+        Assert.Contains("RecordLocalGitServiceCredentialAudit", sourceEndpoints);
+        Assert.Contains("RecordLocalGitServiceCredentialAudit", publicAppReconciler);
+    }
+
+    [Fact]
     public void Pipeline_run_can_render_kubernetes_job_manifest()
     {
         using var fixture = DevOpsStoreFixture.Create();

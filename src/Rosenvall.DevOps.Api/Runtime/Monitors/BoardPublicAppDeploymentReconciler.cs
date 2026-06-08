@@ -142,6 +142,14 @@ public sealed class BoardPublicAppDeploymentReconciler(
             return false;
         }
 
+        store.RecordLocalGitServiceCredentialAudit(
+            app.BoardId,
+            repository.Id,
+            workItemId,
+            "LocalGit pull request merged",
+            $"Merged LocalGit pull request #{pullRequest.Number} with the RDO service credential after production app readiness passed.",
+            "public-app-reconcile",
+            pullRequest.HtmlUrl);
         store.MarkPullRequestMergeState(workItemId, "merged", true);
         return true;
     }

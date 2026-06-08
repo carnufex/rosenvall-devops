@@ -467,6 +467,14 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, D
             return Results.Problem($"Local Git repository {repository.Owner}/{repository.Name} could not be deleted. The board was kept so cleanup can be retried. Any Local Git repositories already deleted in this cleanup were removed from RDO metadata.", statusCode: StatusCodes.Status502BadGateway);
         }
 
+        store.RecordLocalGitServiceCredentialAudit(
+            boardId,
+            repository.Id,
+            null,
+            "LocalGit repository deleted",
+            $"Deleted board-owned LocalGit repository {repository.Owner}/{repository.Name} with the RDO service credential.",
+            actor,
+            repository.WebUrl);
         store.DeleteRepositoryMetadata([repository.Id]);
     }
 
@@ -594,6 +602,14 @@ api.MapPost("/repositories/local", async (CreateLocalGitRepositoryRequest reques
         request.ImplementationProfile ?? creation.Repository.ImplementationProfile,
         request.ImplementationWorkflow ?? creation.Repository.ImplementationWorkflow));
     store.MarkActionRun(actionStart.Action!.Id, repository.Id, "Completed");
+    store.RecordLocalGitServiceCredentialAudit(
+        null,
+        repository.Id,
+        null,
+        "LocalGit repository created",
+        $"Created LocalGit repository {repository.Owner}/{repository.Name} with the RDO service credential.",
+        AuditActorFromClaims(user),
+        repository.WebUrl);
 
     return Results.Created($"/api/repositories/{repository.Id}", new GitHubRepositoryCreateResponse(repository, request.RepositoryProfile, request.AiContext));
 });
@@ -1285,6 +1301,15 @@ api.MapPost("/work-items/{workItemId:guid}/delete-and-clean-up", async (Guid wor
                 store.MarkActionFailed(actionStart.Action!.Id, "Could not close the open local pull request.");
                 return Results.Problem("Could not close the open local pull request. The card was kept so cleanup can be retried.", statusCode: StatusCodes.Status502BadGateway);
             }
+
+            store.RecordLocalGitServiceCredentialAudit(
+                workItemBoardId,
+                repository.Id,
+                workItemId,
+                "LocalGit pull request closed",
+                $"Closed LocalGit pull request #{localPullRequest.Number} with the RDO service credential during work item cleanup.",
+                actor,
+                localPullRequest.HtmlUrl);
         }
 
         var manifest = store.RenderWorkItemCleanupManifest(workItemId);
@@ -12467,6 +12492,23 @@ namespace Rosenvall.DevOps.Api
                     .OrderByDescending(entry => entry.CreatedAt)
                     .Take(100)
                     .ToArray();
+            }
+        }
+
+        public void RecordLocalGitServiceCredentialAudit(Guid? boardId, Guid? repositoryId, Guid? workItemId, string action, string message, string actor, string? url = null)
+        {
+            lock (_lock)
+            {
+                AddTimelineEvent(
+                    boardId,
+                    repositoryId,
+                    workItemId,
+                    "LocalGitServiceCredential",
+                    action,
+                    message,
+                    actor,
+                    url);
+                Persist();
             }
         }
 

@@ -132,6 +132,8 @@ public sealed class RepositorySourceFeatureTests
         Assert.Contains("RepositorySourceFeature.BuildBoardSourceRepositories", endpoints);
         Assert.Contains("RepositorySourceFeature.BuildCloneInfoDto", endpoints);
         Assert.Contains("RepositorySourceFeature.ReadResultAsync", endpoints);
+        Assert.Contains("if (!CanViewBoardRequest(store, boardId, user))", endpoints);
+        Assert.Contains("if (!CanViewRepositoryRequest(store, repositoryId, user))", endpoints);
         Assert.Contains("api.MapPost(\"/boards/{boardId:guid}/repositories/sync-to-provider\"", endpoints);
         Assert.Contains("RepositorySourceFeature.NormalizeTargetProvider", endpoints);
         Assert.Contains("RepositorySourceFeature.ProviderSyncActionIdempotencyKey", endpoints);

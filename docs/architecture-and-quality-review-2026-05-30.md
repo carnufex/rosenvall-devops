@@ -573,6 +573,8 @@ Recommended fix:
 
 ### P1: LocalGit Service Credential Is A Platform-Admin Capability
 
+Status 2026-06-08: Closed for the internal-only v1 credential model. LocalGit service-credential mutations now record explicit `LocalGitServiceCredential` timeline/audit events for LocalGit repository creation, board-owned LocalGit repository deletion, LocalGit pull-request close during work-item cleanup, LocalGit pull-request merge after production readiness, and LocalGit-involved provider-sync target creation plus push queueing. Regression coverage verifies the audit event shape and guards the concrete mutation paths. Capability-specific Forgejo tokens remain a future hardening option if the deployed Forgejo version supports narrower service credentials.
+
 Evidence:
 
 - LocalGit/Forgejo calls use a configured RDO service credential for create, read, merge, close, delete and source browsing.

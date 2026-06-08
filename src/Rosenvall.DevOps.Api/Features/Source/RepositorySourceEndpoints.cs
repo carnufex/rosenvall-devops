@@ -264,6 +264,19 @@ public static class RepositorySourceEndpoints
 
             var target = store.CreateRepository(RepositorySourceFeature.BuildProviderSyncTargetRepositoryCreateRequest(targetTemplate, source));
             _ = store.LinkRepositoryToBoard(boardId, RepositorySourceFeature.BuildProviderSyncBoardLinkRequest(target, source));
+            var auditActor = UserIdentityFromClaims(user).DisplayName;
+            if (source.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) ||
+                target.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
+            {
+                store.RecordLocalGitServiceCredentialAudit(
+                    boardId,
+                    target.Id,
+                    null,
+                    "Provider sync target repository created",
+                    $"Prepared provider sync from {source.Provider} repository {source.Owner}/{source.Name} to {target.Provider} repository {target.Owner}/{target.Name}; LocalGit access uses the RDO service credential.",
+                    auditActor,
+                    target.WebUrl);
+            }
 
             var run = store.RecordPipelineRun(RepositorySourceFeature.BuildProviderSyncPipelineRunRequest(boardId, source, target));
             if (run is null)
@@ -273,6 +286,18 @@ public static class RepositorySourceEndpoints
                 return Results.NotFound();
             }
             store.MarkActionRun(actionStart.Action!.Id, run.Id, "Queued");
+            if (source.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase) ||
+                target.Provider.Equals("LocalGit", StringComparison.OrdinalIgnoreCase))
+            {
+                store.RecordLocalGitServiceCredentialAudit(
+                    boardId,
+                    target.Id,
+                    null,
+                    "Provider sync push queued",
+                    $"Queued provider sync run {run.Id} for LocalGit-involved repository copy with RDO-managed runtime credentials.",
+                    auditActor,
+                    target.WebUrl);
+            }
 
             store.RegisterRuntimeArtifacts(RuntimeArtifactCatalog.ProviderSyncArtifacts(run));
             var secretName = RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run);
