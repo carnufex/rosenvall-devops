@@ -337,6 +337,37 @@ public sealed class RepositorySourceFeatureTests
     }
 
     [Fact]
+    public void Repository_endpoints_use_repositories_feature_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Repositories", "RepositoryEndpoints.cs");
+        var endpoints = File.ReadAllText(endpointPath);
+
+        Assert.Contains("RepositoryEndpoints.Map(api);", program);
+        Assert.True(File.Exists(endpointPath), "Repository metadata and board repository link endpoints should live in Features/Repositories/RepositoryEndpoints.cs.");
+        Assert.Contains("api.MapGet(\"/repositories\"", endpoints);
+        Assert.Contains("api.MapPost(\"/repositories\"", endpoints);
+        Assert.Contains("api.MapPost(\"/repositories/github/onboarding-draft\"", endpoints);
+        Assert.Contains("api.MapPost(\"/boards/{boardId:guid}/repositories\"", endpoints);
+        Assert.Contains("api.MapPost(\"/boards/{boardId:guid}/repositories/github\"", endpoints);
+        Assert.Contains("api.MapPut(\"/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile\"", endpoints);
+        Assert.Contains("api.MapDelete(\"/boards/{boardId:guid}/repositories/{repositoryId:guid}\"", endpoints);
+        Assert.Contains("store.GetRepositories(AuthenticatedSubjectOrNull(user))", endpoints);
+        Assert.Contains("store.LinkRepositoryToBoard(boardId, request)", endpoints);
+        Assert.Contains("store.UpsertBoardRepositoryProfile(boardId, repositoryId, request)", endpoints);
+        Assert.Contains("store.UnlinkRepositoryFromBoard(boardId, repositoryId)", endpoints);
+        Assert.DoesNotContain("api.MapGet(\"/repositories\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/repositories\",", program);
+        Assert.DoesNotContain("api.MapPost(\"/repositories/github/onboarding-draft\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/boards/{boardId:guid}/repositories\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/boards/{boardId:guid}/repositories/github\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile\"", program);
+        Assert.DoesNotContain("api.MapDelete(\"/boards/{boardId:guid}/repositories/{repositoryId:guid}\"", program);
+        Assert.DoesNotContain("CanCreateRepositoryRequest", program);
+    }
+
+    [Fact]
     public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
     {
         var root = FindRepositoryRoot();

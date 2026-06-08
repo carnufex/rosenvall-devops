@@ -430,23 +430,7 @@ api.MapGet("/boards/{boardId:guid}/gitops/applications", async (Guid boardId, Cl
     return Results.Ok(await reader.ReadApplicationsAsync(store.GetBoardGitOpsSettings(boardId), configuration, cancellationToken));
 });
 
-api.MapGet("/repositories", (ClaimsPrincipal user, DevOpsStore store) => store.GetRepositories(AuthenticatedSubjectOrNull(user)));
-
-api.MapPost("/repositories", (CreateRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store) =>
-{
-    if (!CanCreateRepositoryRequest(store, user))
-    {
-        return RepositoryMutationForbidden();
-    }
-
-    var repository = store.CreateRepository(request);
-    return Results.Created($"/api/repositories/{repository.Id}", repository);
-});
-
-api.MapPost("/repositories/github/onboarding-draft", async (GitHubRepositoryOnboardingDraftRequest request, RepositoryOnboardingDraftProvider onboarding, CancellationToken cancellationToken) =>
-{
-    return Results.Ok(await onboarding.CreateDraftAsync(request, cancellationToken));
-});
+RepositoryEndpoints.Map(api);
 
 api.MapPost("/repositories/local", async (CreateLocalGitRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, IConfiguration configuration, CancellationToken cancellationToken) =>
 {
@@ -836,69 +820,6 @@ api.MapGet("/integrations/github/repository-profile", async (string owner, strin
         : Results.Ok(result);
 });
 
-api.MapPost("/boards/{boardId:guid}/repositories", (Guid boardId, LinkBoardRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store) =>
-{
-    if (!CanMutateBoardRequest(store, boardId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    return store.LinkRepositoryToBoard(boardId, request) is { } board ? Results.Ok(board) : Results.NotFound();
-});
-api.MapPost("/boards/{boardId:guid}/repositories/github", (Guid boardId, SyncGitHubRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store) =>
-{
-    if (!CanMutateBoardRequest(store, boardId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    if (request.RepositoryId is { } repositoryId)
-    {
-        return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(repositoryId, true, request.ImplementationProfile)) is { } linked
-            ? Results.Ok(linked)
-            : Results.NotFound();
-    }
-
-    if (!request.CreateNew)
-    {
-        if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.RemoteUrl))
-        {
-            return Results.Problem("Linking an existing GitHub repository requires a repository name and clone URL.", statusCode: StatusCodes.Status400BadRequest);
-        }
-
-        var linkedRepository = store.CreateRepository(new CreateRepositoryRequest(
-            "GitHub",
-            request.Name,
-            request.RemoteUrl,
-            string.IsNullOrWhiteSpace(request.DefaultBranch) ? "main" : request.DefaultBranch,
-            request.WebUrl,
-            request.Owner,
-            request.ImplementationProfile));
-        return store.LinkRepositoryToBoard(boardId, new LinkBoardRepositoryRequest(linkedRepository.Id, true, request.ImplementationProfile ?? linkedRepository.ImplementationProfile)) is { } syncedBoard
-            ? Results.Created($"/api/repositories/{linkedRepository.Id}", syncedBoard)
-            : Results.NotFound();
-    }
-
-    return Results.Problem(GitHubOrganizationRepositoryCreationDisabledMessage, statusCode: StatusCodes.Status403Forbidden);
-});
-api.MapPut("/boards/{boardId:guid}/repositories/{repositoryId:guid}/profile", (Guid boardId, Guid repositoryId, RepositoryProfileDto request, ClaimsPrincipal user, DevOpsStore store) =>
-{
-    if (!CanMutateBoardRequest(store, boardId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    return store.UpsertBoardRepositoryProfile(boardId, repositoryId, request) is { } board ? Results.Ok(board) : Results.NotFound();
-});
-api.MapDelete("/boards/{boardId:guid}/repositories/{repositoryId:guid}", (Guid boardId, Guid repositoryId, ClaimsPrincipal user, DevOpsStore store) =>
-{
-    if (!CanMutateBoardRequest(store, boardId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    return store.UnlinkRepositoryFromBoard(boardId, repositoryId) ? Results.NoContent() : Results.NotFound();
-});
 RepositorySourceEndpoints.Map(api);
 BoardSecretEndpoints.Map(api);
 
@@ -2212,9 +2133,6 @@ static bool CanRecordPipelineRunRequest(DevOpsStore store, RecordPipelineRunRequ
 
 static bool CanMutatePipelineRunRequest(DevOpsStore store, Guid pipelineRunId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutatePipelineRun(pipelineRunId, UserIdentityFromClaims(user).Subject);
-
-static bool CanCreateRepositoryRequest(DevOpsStore store, ClaimsPrincipal user) =>
-    user.Identity?.IsAuthenticated != true || store.CanCreateRepository(UserIdentityFromClaims(user).Subject);
 
 static IResult BoardMutationForbidden() =>
     Results.Problem("You do not have permission to modify this board.", statusCode: StatusCodes.Status403Forbidden);
