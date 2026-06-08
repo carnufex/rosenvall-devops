@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
+using Rosenvall.DevOps.Core;
 
 namespace Rosenvall.DevOps.Api;
 
@@ -287,6 +288,119 @@ public static class AiPlanningEndpoints
             await realtime.PublishAsync("aiRunChanged", run);
             return Results.Accepted($"/api/ai-runs/{run.Id}", run);
         });
+
+        api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IRealtimeNotifier realtime, IConfiguration configuration) =>
+        {
+            if (!CanMutateAiRunRequest(store, aiRunId, user))
+            {
+                return BoardMutationForbidden();
+            }
+
+            var resourceDiagnostics = ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics);
+            var minHeadroomBytes = configuration.GetValue("Ai:Codex:PreviewSourceApiMemoryMinHeadroomBytes", configuration.GetValue("RepositoryRuns:ApiMemoryMinHeadroomBytes", 128L * 1024 * 1024));
+            var preflight = ImplementationCapacityPreflight.Evaluate(resourceDiagnostics, minHeadroomBytes);
+            if (!preflight.Succeeded)
+            {
+                return Results.Problem("Preview source generation cannot start because Rosenvall DevOps API is memory pressured. Try again after cleanup or restart.", statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var actor = AuditActorFromClaims(user);
+            var runContext = store.GetAiRun(aiRunId);
+            if (runContext is null)
+            {
+                return Results.NotFound();
+            }
+
+            var boardId = store.GetWorkItemBoardId(runContext.WorkItemId);
+            if (boardId is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (IsPreviewBuildInProgress(store.GetWorkItemDetail(runContext.WorkItemId)?.Preview))
+            {
+                return Results.Problem(
+                    "Preview build is already queued or running for this work item.",
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
+            var actionKey = PreviewBuildActionIdempotencyKey(actorSubject, runContext.WorkItemId);
+            var quota = ReadPreviewBuildActionQuota(configuration);
+            var actionStart = store.StartAction(
+                actorSubject,
+                boardId,
+                runContext.WorkItemId,
+                "preview-build",
+                actionKey,
+                blockAfterRunCreation: false,
+                maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
+                quotaWindow: quota.Window,
+                quotaOperationKinds: ActionLedgerBlockReasons.PreviewBuildActionKinds);
+            if (!actionStart.Started)
+            {
+                if (IsQuotaExceeded(actionStart))
+                {
+                    return ActionQuotaExceededResult(actionStart);
+                }
+
+                return Results.Conflict(new
+                {
+                    message = "Preview build is already queued or running for this request.",
+                    operationId = actionStart.Action?.Id,
+                    runId = actionStart.Action?.RunId
+                });
+            }
+
+            AiRun? result;
+            try
+            {
+                result = store.ApproveAiRun(aiRunId, actor);
+            }
+            catch (InvalidOperationException ex)
+            {
+                store.MarkActionFailed(actionStart.Action!.Id, ex.Message);
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            if (result is null)
+            {
+                store.MarkActionFailed(actionStart.Action!.Id, "AI run was not found.");
+                return Results.NotFound();
+            }
+
+            await realtime.PublishAsync("aiRunChanged", result);
+            var preview = store.BeginPreviewImplementation(result.WorkItemId, "codex");
+            if (preview is null)
+            {
+                store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
+                return Results.NotFound();
+            }
+            store.MarkActionRun(actionStart.Action!.Id, result.Id, "Running");
+
+            await realtime.PublishAsync("previewChanged", preview);
+            _ = Task.Run(() => previewImplementationRunner.RunAsync(result, actor, CancellationToken.None), CancellationToken.None);
+
+            var detail = store.GetWorkItemDetail(result.WorkItemId);
+            return Results.Accepted($"/api/ai-runs/{aiRunId}", detail ?? (object)result);
+        });
+
+        api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
+        {
+            if (!CanMutateAiRunRequest(store, aiRunId, user))
+            {
+                return BoardMutationForbidden();
+            }
+
+            var result = store.DiscardAiRun(aiRunId, AuditActorFromClaims(user));
+            if (result is null)
+            {
+                return Results.NotFound();
+            }
+
+            await realtime.PublishAsync("aiRunChanged", result);
+            return Results.Ok(result);
+        });
     }
 
     private static bool CanViewWorkItemRequest(DevOpsStore store, Guid workItemId, ClaimsPrincipal user) =>
@@ -310,11 +424,17 @@ public static class AiPlanningEndpoints
     private static string EffectiveActorSubject(string? actorSubject) =>
         string.IsNullOrWhiteSpace(actorSubject) ? "local-dev" : actorSubject;
 
+    private static string AuditActorFromClaims(ClaimsPrincipal user) =>
+        user.Identity?.IsAuthenticated == true ? UserIdentityFromClaims(user).DisplayName : "system";
+
     private static string AiPlanActionIdempotencyKey(string actor, Guid workItemId, string provider, string model, string? reasoningEffort) =>
         $"ai-plan:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}";
 
     private static string AiPlanRevisionActionIdempotencyKey(string actor, Guid workItemId, Guid? aiRunId, string message, string provider, string model, string? reasoningEffort) =>
         $"ai-plan-revise:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{aiRunId?.ToString("N") ?? "latest"}:{NormalizeActionKeyPart(provider)}:{NormalizeActionKeyPart(model)}:{NormalizeActionKeyPart(reasoningEffort)}:{ShortActionHash(message)}";
+
+    private static string PreviewBuildActionIdempotencyKey(string actor, Guid workItemId) =>
+        $"preview-build:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}";
 
     private static string NormalizeActionKeyPart(string? value)
     {
@@ -332,6 +452,20 @@ public static class AiPlanningEndpoints
         var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:AiPlanning:WindowSeconds", 600));
         return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
     }
+
+    private static ExpensiveActionQuotaOptions ReadPreviewBuildActionQuota(IConfiguration configuration)
+    {
+        var enabled = configuration.GetValue("Actions:Quotas:PreviewBuild:Enabled", true);
+        var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:PreviewBuild:MaxStartedPerActor", 6));
+        var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:PreviewBuild:WindowSeconds", 900));
+        return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
+    }
+
+    private static bool IsPreviewBuildInProgress(PreviewDto? preview) =>
+        preview is not null &&
+        (string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsQuotaExceeded(ActionStartResultDto startResult) =>
         string.Equals(startResult.BlockReason, ActionLedgerBlockReasons.QuotaExceeded, StringComparison.OrdinalIgnoreCase);

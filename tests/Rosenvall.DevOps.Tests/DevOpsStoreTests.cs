@@ -811,8 +811,10 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Preview_build_endpoint_uses_action_quota_before_approving_ai_run()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
-        var endpoint = EndpointSnippet(program, "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"");
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "AiPlanning", "AiPlanningEndpoints.cs"));
+        var endpoint = EndpointSnippet(endpoints, "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"");
 
         Assert.Contains("ReadPreviewBuildActionQuota(configuration)", endpoint);
         Assert.Contains("\"preview-build\"", endpoint);
@@ -823,13 +825,15 @@ public sealed class DevOpsStoreTests
         Assert.Contains("blockAfterRunCreation: false", endpoint);
         Assert.True(endpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < endpoint.IndexOf("store.ApproveAiRun", StringComparison.Ordinal));
         Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, result.Id, \"Running\")", endpoint);
+        Assert.DoesNotContain("api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"", program);
     }
 
     [Fact]
     public void Preview_build_endpoint_treats_applying_preview_as_in_progress()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
-        var helper = EndpointSnippet(program, "static bool IsPreviewBuildInProgress(PreviewDto? preview)", "static bool IsQuotaExceeded(ActionStartResultDto startResult)");
+        var endpoints = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Features", "AiPlanning", "AiPlanningEndpoints.cs"));
+        var helper = EndpointSnippet(endpoints, "private static bool IsPreviewBuildInProgress(PreviewDto? preview)", "private static bool IsQuotaExceeded(ActionStartResultDto startResult)");
 
         Assert.Contains("\"Implementing\"", helper);
         Assert.Contains("\"Applying\"", helper);
@@ -1472,18 +1476,20 @@ public sealed class DevOpsStoreTests
         var root = FindRepositoryRoot();
         var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
         var localPullRequestEndpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "LocalPullRequests", "LocalPullRequestEndpoints.cs"));
+        var aiPlanningEndpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "AiPlanning", "AiPlanningEndpoints.cs"));
 
         Assert.Contains("static string AuditActorFromClaims(ClaimsPrincipal user)", program);
         Assert.Contains("private static string AuditActorFromClaims(ClaimsPrincipal user)", localPullRequestEndpoints);
+        Assert.Contains("private static string AuditActorFromClaims(ClaimsPrincipal user)", aiPlanningEndpoints);
         Assert.Contains("store.StartImplementationRun(workItemId, request, actor)", program);
         Assert.Contains("store.StartPullRequestReviewFixRun(workItemId, request, actor)", localPullRequestEndpoints);
-        Assert.Contains("store.ApproveAiRun(aiRunId, actor)", program);
-        Assert.Contains("previewImplementationRunner.RunAsync(result, actor, CancellationToken.None)", program);
+        Assert.Contains("store.ApproveAiRun(aiRunId, actor)", aiPlanningEndpoints);
+        Assert.Contains("previewImplementationRunner.RunAsync(result, actor, CancellationToken.None)", aiPlanningEndpoints);
         Assert.Contains("store.ApprovePullRequest(workItemId, actor)", program);
         Assert.Contains("store.StartPreviewPromotionRun(workItemId, actor)", program);
         Assert.Contains("store.MarkPipelineRunExecuting(pipelineRunId, actor)", program);
 
-        var approvePlanEndpoint = EndpointSnippet(program, "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"");
+        var approvePlanEndpoint = EndpointSnippet(aiPlanningEndpoints, "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"");
         Assert.Contains("var actor = AuditActorFromClaims(user);", approvePlanEndpoint);
         Assert.DoesNotContain("request.ApprovedBy", approvePlanEndpoint);
 

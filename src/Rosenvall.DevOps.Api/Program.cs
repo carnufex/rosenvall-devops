@@ -1751,119 +1751,6 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, ClaimsPrincip
     }
 });
 
-api.MapPost("/ai-runs/{aiRunId:guid}/approve", async (Guid aiRunId, ApproveAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewImplementationRunner previewImplementationRunner, IRealtimeNotifier realtime, IConfiguration configuration) =>
-{
-    if (!CanMutateAiRunRequest(store, aiRunId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    var resourceDiagnostics = ApiResourceDiagnosticsReader.Read(configuration, store.SnapshotDiagnostics);
-    var minHeadroomBytes = configuration.GetValue("Ai:Codex:PreviewSourceApiMemoryMinHeadroomBytes", configuration.GetValue("RepositoryRuns:ApiMemoryMinHeadroomBytes", 128L * 1024 * 1024));
-    var preflight = ImplementationCapacityPreflight.Evaluate(resourceDiagnostics, minHeadroomBytes);
-    if (!preflight.Succeeded)
-    {
-        return Results.Problem("Preview source generation cannot start because Rosenvall DevOps API is memory pressured. Try again after cleanup or restart.", statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-
-    var actor = AuditActorFromClaims(user);
-    var runContext = store.GetAiRun(aiRunId);
-    if (runContext is null)
-    {
-        return Results.NotFound();
-    }
-
-    var boardId = store.GetWorkItemBoardId(runContext.WorkItemId);
-    if (boardId is null)
-    {
-        return Results.NotFound();
-    }
-
-    if (IsPreviewBuildInProgress(store.GetWorkItemDetail(runContext.WorkItemId)?.Preview))
-    {
-        return Results.Problem(
-            "Preview build is already queued or running for this work item.",
-            statusCode: StatusCodes.Status409Conflict);
-    }
-
-    var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
-    var actionKey = PreviewBuildActionIdempotencyKey(actorSubject, runContext.WorkItemId);
-    var quota = ReadPreviewBuildActionQuota(configuration);
-    var actionStart = store.StartAction(
-        actorSubject,
-        boardId,
-        runContext.WorkItemId,
-        "preview-build",
-        actionKey,
-        blockAfterRunCreation: false,
-        maxStartsPerActor: quota.Enabled ? quota.MaxStartedPerActor : null,
-        quotaWindow: quota.Window,
-        quotaOperationKinds: ActionLedgerBlockReasons.PreviewBuildActionKinds);
-    if (!actionStart.Started)
-    {
-        if (IsQuotaExceeded(actionStart))
-        {
-            return ActionQuotaExceededResult(actionStart);
-        }
-
-        return Results.Conflict(new
-        {
-            message = "Preview build is already queued or running for this request.",
-            operationId = actionStart.Action?.Id,
-            runId = actionStart.Action?.RunId
-        });
-    }
-
-    AiRun? result;
-    try
-    {
-        result = store.ApproveAiRun(aiRunId, actor);
-    }
-    catch (InvalidOperationException ex)
-    {
-        store.MarkActionFailed(actionStart.Action!.Id, ex.Message);
-        return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
-    }
-
-    if (result is null)
-    {
-        store.MarkActionFailed(actionStart.Action!.Id, "AI run was not found.");
-        return Results.NotFound();
-    }
-
-    await realtime.PublishAsync("aiRunChanged", result);
-    var preview = store.BeginPreviewImplementation(result.WorkItemId, "codex");
-    if (preview is null)
-    {
-        store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");
-        return Results.NotFound();
-    }
-    store.MarkActionRun(actionStart.Action!.Id, result.Id, "Running");
-
-    await realtime.PublishAsync("previewChanged", preview);
-    _ = Task.Run(() => previewImplementationRunner.RunAsync(result, actor, CancellationToken.None), CancellationToken.None);
-
-    var detail = store.GetWorkItemDetail(result.WorkItemId);
-    return Results.Accepted($"/api/ai-runs/{aiRunId}", detail ?? (object)result);
-});
-
-api.MapPost("/ai-runs/{aiRunId:guid}/discard", async (Guid aiRunId, DiscardAiRunRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
-{
-    if (!CanMutateAiRunRequest(store, aiRunId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    var result = store.DiscardAiRun(aiRunId, AuditActorFromClaims(user));
-    if (result is null)
-    {
-        return Results.NotFound();
-    }
-
-    await realtime.PublishAsync("aiRunChanged", result);
-    return Results.Ok(result);
-});
-
 api.MapPost("/integrations/github/callback", async (GitHubCallbackRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
     if (!CanMutateWorkItemRequest(store, request.WorkItemId, user))
@@ -2480,9 +2367,6 @@ static string EffectiveActorSubject(string? actorSubject) =>
 static string RepositoryImplementationActionIdempotencyKey(string actor, Guid workItemId, Guid aiRunId, Guid? repositoryId) =>
     $"repository-implementation:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}:{aiRunId:N}:{repositoryId?.ToString("N") ?? "default"}";
 
-static string PreviewBuildActionIdempotencyKey(string actor, Guid workItemId) =>
-    $"preview-build:{EffectiveActorSubject(actor).Trim()}:{workItemId:N}";
-
 static string BoardCleanupActionIdempotencyKey(string actor, Guid boardId) =>
     $"board-cleanup:{EffectiveActorSubject(actor).Trim()}:{boardId:N}";
 
@@ -2506,14 +2390,6 @@ static ExpensiveActionQuotaOptions ReadRepositoryImplementationActionQuota(IConf
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
 
-static ExpensiveActionQuotaOptions ReadPreviewBuildActionQuota(IConfiguration configuration)
-{
-    var enabled = configuration.GetValue("Actions:Quotas:PreviewBuild:Enabled", true);
-    var maxStartedPerActor = Math.Max(1, configuration.GetValue("Actions:Quotas:PreviewBuild:MaxStartedPerActor", 6));
-    var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:PreviewBuild:WindowSeconds", 900));
-    return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
-}
-
 static ExpensiveActionQuotaOptions ReadCleanupActionQuota(IConfiguration configuration)
 {
     var enabled = configuration.GetValue("Actions:Quotas:Cleanup:Enabled", true);
@@ -2529,12 +2405,6 @@ static ExpensiveActionQuotaOptions ReadRepositoryCreationActionQuota(IConfigurat
     var windowSeconds = Math.Max(60, configuration.GetValue("Actions:Quotas:RepositoryCreation:WindowSeconds", 900));
     return new ExpensiveActionQuotaOptions(enabled, maxStartedPerActor, TimeSpan.FromSeconds(windowSeconds));
 }
-
-static bool IsPreviewBuildInProgress(PreviewDto? preview) =>
-    preview is not null &&
-    (string.Equals(preview.Status, "Implementing", StringComparison.OrdinalIgnoreCase) ||
-     string.Equals(preview.Status, "Applying", StringComparison.OrdinalIgnoreCase) ||
-     string.Equals(preview.Status, "Provisioning", StringComparison.OrdinalIgnoreCase));
 
 static bool IsQuotaExceeded(ActionStartResultDto startResult) =>
     string.Equals(startResult.BlockReason, ActionLedgerBlockReasons.QuotaExceeded, StringComparison.OrdinalIgnoreCase);
@@ -2643,9 +2513,6 @@ static bool CanMutateBoardRequest(DevOpsStore store, Guid boardId, ClaimsPrincip
 
 static bool CanMutateWorkItemRequest(DevOpsStore store, Guid workItemId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutateWorkItem(workItemId, UserIdentityFromClaims(user).Subject);
-
-static bool CanMutateAiRunRequest(DevOpsStore store, Guid aiRunId, ClaimsPrincipal user) =>
-    user.Identity?.IsAuthenticated != true || store.CanMutateAiRun(aiRunId, UserIdentityFromClaims(user).Subject);
 
 static bool CanMutateCommentRequest(DevOpsStore store, Guid commentId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanMutateComment(commentId, UserIdentityFromClaims(user).Subject);

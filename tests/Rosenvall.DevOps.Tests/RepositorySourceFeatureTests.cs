@@ -194,11 +194,14 @@ public sealed class RepositorySourceFeatureTests
         Assert.Contains("api.MapDelete(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", endpoints);
         Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", endpoints);
         Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", endpoints);
+        Assert.Contains("api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", endpoints);
+        Assert.Contains("api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"", endpoints);
         Assert.Contains("store.GetAiRun(aiRunId)?.WorkItemId != workItemId", endpoints);
         Assert.Contains("await realtime.PublishAsync(\"aiPlanReviewCommentChanged\", comment)", endpoints);
         Assert.Contains("await realtime.PublishBoardAsync(boardId, \"aiPlanReviewCommentDeleted\", commentId)", endpoints);
         Assert.Contains("ActionLedgerBlockReasons.AiPlanningActionKinds", endpoints);
         Assert.Contains("AiPlanRevisionActionIdempotencyKey", endpoints);
+        Assert.Contains("ActionLedgerBlockReasons.PreviewBuildActionKinds", endpoints);
         Assert.DoesNotContain("api.MapGet(\"/work-items/{workItemId:guid}/ai-session\"", program);
         Assert.DoesNotContain("api.MapPut(\"/work-items/{workItemId:guid}/ai-session/provider-session\"", program);
         Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments\"", program);
@@ -206,6 +209,8 @@ public sealed class RepositorySourceFeatureTests
         Assert.DoesNotContain("api.MapDelete(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", program);
         Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", program);
         Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/ai-runs/{aiRunId:guid}/discard\"", program);
     }
 
     [Fact]
