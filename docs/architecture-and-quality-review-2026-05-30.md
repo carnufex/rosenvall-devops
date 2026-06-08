@@ -2485,26 +2485,24 @@ Recommended fix:
 
 ### P1: Provider-Sync Token Secret Labels Are Rendered In The Wrong YAML Location
 
+Status 2026-06-08: Closed. Provider-sync token Secrets now go through `IRuntimeSecretStore` via `KubernetesRuntimeSecretStore.RenderSecretPayload` instead of an applyable YAML Secret renderer, and `RepositorySourceEndpoints` stores provider-sync source/target tokens through that runtime store before queuing the sync Job. Regression coverage parses the rendered Secret payload as JSON and asserts `metadata.name`, `metadata.namespace`, `metadata.labels["app.kubernetes.io/part-of"]`, `metadata.labels["rosenvall.devops/pipeline-run"]`, base64 `data` entries, no `stringData`, no last-applied annotation and no top-level `labels` property.
+
 Evidence:
 
-- `RepositoryProviderSyncJobManifestRenderer.RenderTokenSecret(...)` renders:
-  - `metadata:`
-  - `name: ...`
-  - `namespace: ...`
-  - then `labels:` at the same indentation as `metadata`, not inside `metadata`.
-- The intended ownership labels are therefore not metadata labels on the Secret.
-- Existing tests assert string fragments such as `provider-sync-token`, but do not parse the YAML and verify `metadata.labels`.
+- `RepositorySourceEndpoints` calls `runtimeSecrets.StoreAsync(...)` with `RepositoryProviderSyncJobManifestRenderer.TokenSecretData(...)` and `TokenSecretLabels(...)` for provider-sync runs.
+- `KubernetesRuntimeSecretStore.RenderSecretPayload(...)` renders labels under `metadata.labels`.
+- `Provider_sync_token_secret_payload_has_metadata_labels_and_data` parses the payload and verifies the Kubernetes object shape, including the absence of top-level `labels`.
 
 Impact:
 
-- Provider-sync token Secrets may be created without the labels needed for ownership, cleanup and audit.
-- A future label-based cleanup or admission rule would miss exactly the sensitive object it is meant to manage.
-- This is another example where string-based manifest tests can pass while the Kubernetes object shape is wrong.
+- Provider-sync token Secrets now carry ownership labels in the correct Kubernetes metadata location.
+- The runtime Secret path avoids `kubectl apply`, `stringData` and last-applied annotations for these credentials.
+- The regression test guards against reintroducing the previous top-level-label shape.
 
 Recommended fix:
 
-- Move provider-sync token Secret rendering to the shared runtime-secret store.
-- In the short term, fix the indentation and add a YAML parse test that asserts:
+- Keep provider-sync token rendering on the shared runtime-secret store.
+- Keep the typed payload assertion that verifies:
   - `metadata.name`,
   - `metadata.namespace`,
   - `metadata.labels["app.kubernetes.io/part-of"]`,

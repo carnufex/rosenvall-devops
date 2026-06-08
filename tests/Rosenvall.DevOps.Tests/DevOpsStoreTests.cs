@@ -236,6 +236,7 @@ public sealed class DevOpsStoreTests
 
         Assert.Equal("v1", root.GetProperty("apiVersion").GetString());
         Assert.Equal("Secret", root.GetProperty("kind").GetString());
+        Assert.False(root.TryGetProperty("labels", out _));
         Assert.Equal(RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run), metadata.GetProperty("name").GetString());
         Assert.Equal(RepositoryImplementationJobManifestRenderer.Namespace, metadata.GetProperty("namespace").GetString());
         Assert.Equal("rosenvall-devops-provider-sync", labels.GetProperty("app.kubernetes.io/part-of").GetString());
