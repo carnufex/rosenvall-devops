@@ -974,9 +974,11 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Ai_plan_endpoints_use_action_ledger_without_storing_revision_message_in_key()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
-        var planEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"");
-        var reviseEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", "api.MapPost(\"/ai-runs/{aiRunId:guid}/approve\"");
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "AiPlanning", "AiPlanningEndpoints.cs"));
+        var planEndpoint = EndpointSnippet(endpoints, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"");
+        var reviseEndpoint = EndpointSnippet(endpoints, "api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", "private static bool CanViewWorkItemRequest");
 
         Assert.Contains("\"ai-plan\"", planEndpoint);
         Assert.Contains("maxStartsPerActor", planEndpoint);
@@ -989,9 +991,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("maxStartsPerActor", reviseEndpoint);
         Assert.Contains("ActionQuotaExceededResult", reviseEndpoint);
         Assert.Contains("ActionLedgerBlockReasons.AiPlanningActionKinds", reviseEndpoint);
-        Assert.Contains("ShortActionHash(message)", program);
+        Assert.Contains("ShortActionHash(message)", endpoints);
         Assert.Contains("request.Message", reviseEndpoint);
-        Assert.DoesNotContain(":{message}", program);
+        Assert.DoesNotContain(":{message}", endpoints);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", program);
     }
 
     [Fact]

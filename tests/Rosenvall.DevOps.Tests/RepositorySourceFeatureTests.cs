@@ -192,14 +192,20 @@ public sealed class RepositorySourceFeatureTests
         Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments\"", endpoints);
         Assert.Contains("api.MapPatch(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", endpoints);
         Assert.Contains("api.MapDelete(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", endpoints);
+        Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", endpoints);
+        Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", endpoints);
         Assert.Contains("store.GetAiRun(aiRunId)?.WorkItemId != workItemId", endpoints);
         Assert.Contains("await realtime.PublishAsync(\"aiPlanReviewCommentChanged\", comment)", endpoints);
         Assert.Contains("await realtime.PublishBoardAsync(boardId, \"aiPlanReviewCommentDeleted\", commentId)", endpoints);
+        Assert.Contains("ActionLedgerBlockReasons.AiPlanningActionKinds", endpoints);
+        Assert.Contains("AiPlanRevisionActionIdempotencyKey", endpoints);
         Assert.DoesNotContain("api.MapGet(\"/work-items/{workItemId:guid}/ai-session\"", program);
         Assert.DoesNotContain("api.MapPut(\"/work-items/{workItemId:guid}/ai-session/provider-session\"", program);
         Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments\"", program);
         Assert.DoesNotContain("api.MapPatch(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", program);
         Assert.DoesNotContain("api.MapDelete(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plan/revise\"", program);
     }
 
     [Fact]
