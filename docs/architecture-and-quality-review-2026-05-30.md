@@ -2122,6 +2122,8 @@ Recommended fix:
 
 ### P1: Terminal Redaction Does Not Cover LocalGit Basic Credentials
 
+Status 2026-06-08: Closed. `RedactTerminalMessage` now redacts `Authorization: Basic ...`, literal `Basic $forgejo_auth`, generic credentialed URLs such as `http://rdo:token@forgejo/...`, GitHub token URLs, Forgejo/Gitea token prefixes, Bearer headers and token/secret/password/private-key environment assignments before runner and preview terminal lines are persisted. Regression coverage lives in `Runner_and_preview_terminal_lines_redact_common_secret_values`.
+
 Evidence:
 
 - `RedactTerminalMessage` redacts:
