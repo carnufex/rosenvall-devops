@@ -6300,6 +6300,14 @@ public sealed class DevOpsStoreTests
         Assert.Contains("ROSENVALL_CODEX_LAUNCHER_HOME", library);
         Assert.Contains("codex-runtime-home", library);
         Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", library);
+        Assert.Contains("env -i", library);
+        Assert.Contains("CODEX_HOME=\"$CODEX_HOME\"", library);
+        Assert.Contains("CODEX_MODEL=\"${CODEX_MODEL:-}\"", library);
+        Assert.Contains("CODEX_REASONING_EFFORT=\"${CODEX_REASONING_EFFORT:-}\"", library);
+        Assert.Contains("ROSENVALL_CODEX_SESSION_ID=\"${ROSENVALL_CODEX_SESSION_ID:-}\"", library);
+        Assert.Contains("workspace=\"$workspace\"", library);
+        Assert.DoesNotContain("ROSENVALL_GIT_TOKEN=\"${ROSENVALL_GIT_TOKEN", library);
+        Assert.DoesNotContain("GITHUB_TOKEN=\"${GITHUB_TOKEN", library);
         Assert.Contains("\"$codex_home/auth.json\"", library);
         Assert.Contains("\"$codex_home/installation_id\"", library);
         Assert.Contains("\"$codex_home/config.toml\"", library);

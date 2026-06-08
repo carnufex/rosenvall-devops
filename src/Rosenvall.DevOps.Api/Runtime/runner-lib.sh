@@ -73,7 +73,22 @@ rdo_run_codex_without_repository_credentials() {
   unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN
   rdo_prepare_codex_runtime_home "$workspace"
   set +e
-  ( . "$codex_command_file" ) > "$codex_log" 2>&1 &
+  (
+    env -i \
+      PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" \
+      HOME="${HOME:-/home/ubuntu}" \
+      USER="${USER:-ubuntu}" \
+      LOGNAME="${LOGNAME:-${USER:-ubuntu}}" \
+      SHELL="${SHELL:-/bin/sh}" \
+      LANG="${LANG:-C.UTF-8}" \
+      TMPDIR="$CODEX_HOME/tmp" \
+      CODEX_HOME="$CODEX_HOME" \
+      CODEX_MODEL="${CODEX_MODEL:-}" \
+      CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-}" \
+      ROSENVALL_CODEX_SESSION_ID="${ROSENVALL_CODEX_SESSION_ID:-}" \
+      workspace="$workspace" \
+      sh -c '. "$1"' sh "$codex_command_file"
+  ) > "$codex_log" 2>&1 &
   codex_pid=$!
   sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
   rdo_remove_codex_reusable_auth_files "$CODEX_HOME"
