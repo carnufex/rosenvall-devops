@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { buildCodeLineRenderModel, highlightCodeLines, plainHighlightedLines, splitCodeLines, type CodeLineKind, type CodeLineRenderModel, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
@@ -6187,6 +6187,7 @@ function PullRequestDiffReview({ state, busy, busyLabel, onSelectFile, onRetry, 
   const loadedState = state.status === 'loaded' ? state : null;
   const diff = loadedState?.diff ?? emptyPullRequestDiff();
   const parsed = React.useMemo(() => parseUnifiedDiffForContinuousReview(diff.diff, diff.files), [diff.diff, diff.files]);
+  const limitMessage = React.useMemo(() => pullRequestDiffLimitMessage(diff), [diff]);
   const comments = React.useMemo(() => diff.reviewComments ?? [], [diff.reviewComments]);
   const countsByFile = React.useMemo(() => reviewCommentCountsByFile(comments), [comments]);
   const unresolvedCount = unresolvedReviewCommentCount(comments);
@@ -6314,7 +6315,7 @@ function PullRequestDiffReview({ state, busy, busyLabel, onSelectFile, onRetry, 
           {showSlowApproval ? ' Merge accepted, deploying app and cleaning preview...' : ''}
         </p>
         {approvalError && <p className="failure-reason">{approvalError}</p>}
-        {diff.message && <p className="provider-status">{diff.message}</p>}
+        {limitMessage && <p className={diff.truncated ? 'diff-limit-warning' : 'provider-status'}>{limitMessage}</p>}
         <div className="diff-layout">
           <nav className="diff-files" aria-label="Changed files">
             {diff.files.length === 0 && <p>No changed files were returned.</p>}

@@ -3647,6 +3647,8 @@ Recommended fix:
 
 ### P2: Local PR Diff Rendering Needs A Large-Diff Strategy
 
+Status 2026-06-08: Started. Local PR diff responses that are truncated now render a dedicated review-limit banner with loaded line count, byte count, file count and explicit copy that review comments can only be placed on loaded lines. Full virtualization/chunked rendering for very large loaded diffs remains open.
+
 Evidence:
 
 - The diff API truncates unified diff text above 320,000 characters.

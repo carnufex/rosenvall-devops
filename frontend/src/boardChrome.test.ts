@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
   const board = {
@@ -368,6 +368,19 @@ new file mode 100644
   assert.equal(parsed.sections[0].lines.find((line) => line.text.includes("mode = 'dark'"))?.newLine, 2);
   assert.equal(parsed.sections[0].lines.find((line) => line.text.includes("mode = 'light'"))?.oldLine, 2);
   assert.equal(parsed.sections[1].lines.find((line) => line.text.includes('ready'))?.side, 'new');
+});
+
+test('pull request diff truncation message explains loaded review limits', () => {
+  const message = pullRequestDiffLimitMessage({
+    truncated: true,
+    message: 'Diff was truncated for display.',
+    diff: 'line 1\nline 2\nline 3',
+    files: [{ path: 'src/App.tsx', additions: 2, deletions: 1 }]
+  });
+
+  assert.equal(message, 'Diff was truncated for display. Loaded 3 lines / 20 bytes across 1 file. Review comments can only be placed on loaded lines.');
+  assert.equal(pullRequestDiffLimitMessage({ truncated: false, message: 'Provider warning', diff: '', files: [] }), 'Provider warning');
+  assert.equal(pullRequestDiffLimitMessage({ truncated: false, message: null, diff: '', files: [] }), null);
 });
 
 test('review comment helpers count unresolved comments by file and gate approval', () => {

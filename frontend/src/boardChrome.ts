@@ -263,6 +263,13 @@ export type PullRequestDiffFileChrome = {
   deletions?: number | null;
 };
 
+export type PullRequestDiffLimitChrome = {
+  truncated: boolean;
+  message?: string | null;
+  diff: string;
+  files: readonly PullRequestDiffFileChrome[];
+};
+
 export type PullRequestReviewCommentChrome = {
   id: string;
   filePath: string;
@@ -665,6 +672,19 @@ export function parseUnifiedDiffForContinuousReview(diff: string, files: readonl
   }
 
   return { sections };
+}
+
+export function pullRequestDiffLimitMessage(diff: PullRequestDiffLimitChrome): string | null {
+  const providerMessage = diff.message?.trim() || null;
+  if (!diff.truncated) return providerMessage;
+
+  const lineCount = diff.diff.length === 0 ? 0 : diff.diff.replace(/\r\n/g, '\n').split('\n').length;
+  const bytes = new TextEncoder().encode(diff.diff).length;
+  const fileCount = diff.files.length;
+  const fileLabel = fileCount === 1 ? 'file' : 'files';
+  const loaded = `Loaded ${lineCount} lines / ${bytes} bytes across ${fileCount} ${fileLabel}.`;
+  const limit = 'Review comments can only be placed on loaded lines.';
+  return [providerMessage, loaded, limit].filter(Boolean).join(' ');
 }
 
 export function boardDeleteCleanupMessage(boardName: string): string {
