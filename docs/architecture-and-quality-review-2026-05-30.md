@@ -2580,7 +2580,7 @@ Recommended fix:
 
 ### P1: Runner Scripts Need A Shared Shell Library
 
-Status 2026-06-07: Mostly closed for repository runner families. The API image now packages `src/Rosenvall.DevOps.Api/Runtime/runner-lib.sh` as `/opt/rdo-runner/lib.sh`; repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync scripts source it for `GIT_ASKPASS` credentialed git operations, JSON escaping and changed-file collection. Implementation and PR review-fix also use the library for the tokenless Codex phase, Codex auth-file cleanup and sandbox failure classification. Manifest regressions cover those runners and the library packaging. Remaining follow-up: add shell-focused behavior tests for the library itself and continue moving API response helpers/redaction into the shared runner layer where useful.
+Status 2026-06-08: Mostly closed for repository runner families. The API image now packages `src/Rosenvall.DevOps.Api/Runtime/runner-lib.sh` as `/opt/rdo-runner/lib.sh`; repository implementation, preview-promotion, PR review-fix, repository cleanup and provider-sync scripts source it for `GIT_ASKPASS` credentialed git operations, JSON escaping and changed-file collection. Implementation and PR review-fix also use the library for the tokenless Codex phase, Codex auth-file cleanup and sandbox failure classification. Manifest regressions cover those runners and the library packaging, and `Runner_shell_library_behaves_for_git_credentials_json_and_codex_environment` now executes the shell library directly to verify LocalGit/GitHub askpass behavior, JSON escaping, Codex env allowlisting and auth-file cleanup. Remaining follow-up: continue moving API response helpers/redaction into the shared runner layer where useful.
 
 Evidence:
 

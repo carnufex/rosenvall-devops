@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -6320,6 +6321,82 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Runner_shell_library_behaves_for_git_credentials_json_and_codex_environment()
+    {
+        var root = new DirectoryInfo(FindRepositoryRoot());
+        var libraryPath = Path.Combine(root.FullName, "src", "Rosenvall.DevOps.Api", "Runtime", "runner-lib.sh");
+        var shellLibrary = ToPosixShellPath(libraryPath);
+        var script = $$"""
+            #!/bin/sh
+            set -eu
+            . {{ShellQuote(shellLibrary)}}
+
+            workspace="$(mktemp -d)"
+            trap 'rm -rf "$workspace"' EXIT
+
+            printf 'json=%s\n' "$(rdo_json_escape 'a"b\c')"
+
+            ROSENVALL_LOCAL_GIT_USERNAME=forgejo rdo_git_with_repository_credentials "$workspace" LocalGit "local-token" sh -c 'printf "local_user=%s\n" "$("$GIT_ASKPASS" Username)"; printf "local_pass=%s\n" "$("$GIT_ASKPASS" Password)"; printf "local_prompt=%s\n" "$GIT_TERMINAL_PROMPT"'
+            rdo_git_with_repository_credentials "$workspace" GitHub "github-token" sh -c 'printf "github_user=%s\n" "$("$GIT_ASKPASS" Username)"; printf "github_pass=%s\n" "$("$GIT_ASKPASS" Password)"'
+
+            launcher="$workspace/launcher-home"
+            mkdir -p "$launcher"
+            for file in auth.json config.toml installation_id models_cache.json; do
+              printf 'secret' > "$launcher/$file"
+            done
+
+            command_file="$workspace/codex-command.sh"
+            cat > "$command_file" <<'EOS'
+            #!/bin/sh
+            set -eu
+            env | sort
+            printf 'runtime_home=%s\n' "$CODEX_HOME"
+            if [ -n "${ROSENVALL_GIT_TOKEN:-}" ]; then echo BAD_REPO_TOKEN; fi
+            if [ -n "${GITHUB_TOKEN:-}" ]; then echo BAD_GITHUB_TOKEN; fi
+            if [ -n "${OUTSIDE_SECRET:-}" ]; then echo BAD_OUTSIDE_SECRET; fi
+            EOS
+            chmod 700 "$command_file"
+
+            export CODEX_HOME="$launcher"
+            export ROSENVALL_CODEX_LAUNCHER_HOME="$launcher"
+            export ROSENVALL_GIT_TOKEN="repo-secret"
+            export GITHUB_TOKEN="github-secret"
+            export OUTSIDE_SECRET="outside-secret"
+            export CODEX_MODEL="gpt-test"
+            export CODEX_REASONING_EFFORT="high"
+            export ROSENVALL_CODEX_SESSION_ID="session-123"
+            export ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS=0
+            rdo_run_codex_without_repository_credentials "$workspace" "$command_file"
+
+            for file in auth.json config.toml installation_id models_cache.json; do
+              [ ! -e "$launcher/$file" ] || echo "BAD_LAUNCHER_$file"
+              [ ! -e "$workspace/codex-runtime-home/$file" ] || echo "BAD_RUNTIME_$file"
+            done
+            echo cleanup_ok
+            """;
+
+        var result = RunShellScript(script);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains(@"json=a\""b\\c", result.Output);
+        Assert.Contains("local_user=forgejo", result.Output);
+        Assert.Contains("local_pass=local-token", result.Output);
+        Assert.Contains("local_prompt=0", result.Output);
+        Assert.Contains("github_user=x-access-token", result.Output);
+        Assert.Contains("github_pass=github-token", result.Output);
+        Assert.Contains("CODEX_MODEL=gpt-test", result.Output);
+        Assert.Contains("CODEX_REASONING_EFFORT=high", result.Output);
+        Assert.Contains("ROSENVALL_CODEX_SESSION_ID=session-123", result.Output);
+        Assert.Contains("runtime_home=", result.Output);
+        Assert.Contains("codex-runtime-home", result.Output);
+        Assert.Contains("cleanup_ok", result.Output);
+        Assert.DoesNotContain("BAD_", result.Output);
+        Assert.DoesNotContain("repo-secret", result.Output);
+        Assert.DoesNotContain("github-secret", result.Output);
+        Assert.DoesNotContain("outside-secret", result.Output);
+    }
+
+    [Fact]
     public void Homelab_frontend_deployment_and_image_run_unprivileged_without_extra_capabilities_when_available()
     {
         var root = new DirectoryInfo(FindRepositoryRoot());
@@ -8367,6 +8444,59 @@ exit /b 0
     }
 
     private sealed record FakeKubectl(DirectoryInfo Directory, string Path, string ArgumentsPath);
+
+    private static ShellResult RunShellScript(string script)
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), $"rdo-runner-lib-test-{Guid.NewGuid():N}.sh");
+        File.WriteAllText(tempPath, script.Replace("\r\n", "\n", StringComparison.Ordinal), new UTF8Encoding(false));
+        try
+        {
+            var scriptPath = ToPosixShellPath(tempPath);
+            var shell = OperatingSystem.IsWindows() ? "bash" : "sh";
+            var start = new ProcessStartInfo(shell)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            start.ArgumentList.Add(scriptPath);
+            using var process = Process.Start(start) ?? throw new InvalidOperationException($"Could not start {shell}.");
+            var output = process.StandardOutput.ReadToEnd();
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit(30_000);
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                throw new TimeoutException("Shell test did not finish within 30 seconds.");
+            }
+
+            return new ShellResult(process.ExitCode, output + error);
+        }
+        finally
+        {
+            File.Delete(tempPath);
+        }
+    }
+
+    private static string ToPosixShellPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (OperatingSystem.IsWindows() &&
+            fullPath.Length >= 3 &&
+            fullPath[1] == ':' &&
+            (fullPath[2] == '\\' || fullPath[2] == '/'))
+        {
+            var drive = char.ToLowerInvariant(fullPath[0]);
+            return $"/mnt/{drive}/{fullPath[3..].Replace('\\', '/')}";
+        }
+
+        return fullPath.Replace('\\', '/');
+    }
+
+    private static string ShellQuote(string value) =>
+        $"'{value.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
+
+    private sealed record ShellResult(int ExitCode, string Output);
 
     private static string EndpointSnippet(string program, string startMarker, string endMarker)
     {
