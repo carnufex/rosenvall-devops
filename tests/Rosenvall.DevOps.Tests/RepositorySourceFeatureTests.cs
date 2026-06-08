@@ -239,6 +239,34 @@ public sealed class RepositorySourceFeatureTests
     }
 
     [Fact]
+    public void Board_secret_endpoints_use_environment_feature_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Environment", "BoardSecretEndpoints.cs");
+        var endpoints = File.ReadAllText(endpointPath);
+
+        Assert.Contains("BoardSecretEndpoints.Map(api);", program);
+        Assert.True(File.Exists(endpointPath), "Board secret endpoints should live in Features/Environment/BoardSecretEndpoints.cs.");
+        Assert.Contains("api.MapGet(\"/boards/{boardId:guid}/secrets\"", endpoints);
+        Assert.Contains("api.MapPost(\"/boards/{boardId:guid}/secrets\"", endpoints);
+        Assert.Contains("api.MapPut(\"/boards/{boardId:guid}/secrets/{secretId:guid}\"", endpoints);
+        Assert.Contains("api.MapDelete(\"/boards/{boardId:guid}/secrets/{secretId:guid}\"", endpoints);
+        Assert.Contains("store.PrepareBoardSecretCreate(boardId, request)", endpoints);
+        Assert.Contains("store.CommitBoardSecretCreate(secret)", endpoints);
+        Assert.Contains("store.PrepareBoardSecretUpdate(boardId, secretId)", endpoints);
+        Assert.Contains("store.CommitBoardSecretUpdate(secret)", endpoints);
+        Assert.Contains("runtimeSecrets.StoreAsync", endpoints);
+        Assert.Contains("runtimeSecrets.DeleteAsync", endpoints);
+        Assert.Contains("BoardSecretManifestRenderer.SecretData(secret, request.Value)", endpoints);
+        Assert.Contains("BoardSecretManifestRenderer.SecretName(secret)", endpoints);
+        Assert.DoesNotContain("api.MapGet(\"/boards/{boardId:guid}/secrets\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/boards/{boardId:guid}/secrets\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/boards/{boardId:guid}/secrets/{secretId:guid}\"", program);
+        Assert.DoesNotContain("api.MapDelete(\"/boards/{boardId:guid}/secrets/{secretId:guid}\"", program);
+    }
+
+    [Fact]
     public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
     {
         var root = FindRepositoryRoot();
