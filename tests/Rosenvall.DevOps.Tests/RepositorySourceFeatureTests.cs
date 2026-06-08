@@ -214,6 +214,31 @@ public sealed class RepositorySourceFeatureTests
     }
 
     [Fact]
+    public void Work_item_comment_endpoints_use_work_items_feature_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "WorkItems", "WorkItemCommentEndpoints.cs");
+        var endpoints = File.ReadAllText(endpointPath);
+
+        Assert.Contains("WorkItemCommentEndpoints.Map(api);", program);
+        Assert.True(File.Exists(endpointPath), "Work item comment endpoints should live in Features/WorkItems/WorkItemCommentEndpoints.cs.");
+        Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/comments\"", endpoints);
+        Assert.Contains("api.MapPatch(\"/comments/{commentId:guid}\"", endpoints);
+        Assert.Contains("api.MapDelete(\"/comments/{commentId:guid}\"", endpoints);
+        Assert.Contains("store.AddComment(workItemId, actor.DisplayName, \"Comment\", request.Body, actor.Subject)", endpoints);
+        Assert.Contains("store.UpdateComment(commentId, actor.Subject, actor.DisplayName, request.Body)", endpoints);
+        Assert.Contains("store.DeleteComment(commentId, actor.Subject, actor.DisplayName)", endpoints);
+        Assert.Contains("await realtime.PublishAsync(\"commentAdded\", comment)", endpoints);
+        Assert.Contains("await realtime.PublishAsync(\"commentChanged\", comment)", endpoints);
+        Assert.Contains("await realtime.PublishBoardAsync(scopedBoardId, \"commentDeleted\", commentId)", endpoints);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/comments\"", program);
+        Assert.DoesNotContain("api.MapPatch(\"/comments/{commentId:guid}\"", program);
+        Assert.DoesNotContain("api.MapDelete(\"/comments/{commentId:guid}\"", program);
+        Assert.DoesNotContain("CanMutateCommentRequest", program);
+    }
+
+    [Fact]
     public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
     {
         var root = FindRepositoryRoot();
