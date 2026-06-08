@@ -1371,21 +1371,23 @@ Recommended fix:
 
 ### P1: CI Does Not Run Frontend Tests
 
+Status 2026-06-08: Closed. `.github/workflows/ci.yml` now has a dedicated frontend job that installs dependencies, audits production dependencies, runs `npm test -- --runInBand`, runs `npm run lint`, and only then runs `npm run build`. Regression coverage lives in `Ci_runs_frontend_tests_before_frontend_build`, with additional CI-order assertions in the vulnerability/lint tests.
+
 Evidence:
 
-- `.github/workflows/ci.yml` runs backend restore/test.
-- The frontend job runs `npm ci` and `npm run build`.
-- The frontend test command exists and was run manually in this review, but CI does not run `npm test`.
+- `.github/workflows/ci.yml` runs backend restore/audit/test.
+- The frontend job runs `npm ci`, `npm audit --omit=dev --audit-level=high`, `npm test -- --runInBand`, `npm run lint` and `npm run build`.
+- `Ci_runs_frontend_tests_before_frontend_build` asserts frontend tests run before the production build.
 
 Impact:
 
-- Helper regressions in `boardChrome.ts`, `apiClient.ts`, `codeHighlight.ts`, plan questions and retry logic can merge if the build still passes.
-- The current test suite is fast and does not require a browser, so skipping it saves little but removes useful coverage.
+- Helper regressions in `boardChrome.ts`, `apiClient.ts`, `codeHighlight.ts`, plan questions and retry logic are now covered by CI before frontend build.
+- Frontend build remains the final production-bundle gate after tests and lint.
 
 Recommended fix:
 
-- Add `npm test` before `npm run build` in the frontend CI job.
-- Keep `npm run build` after tests so TypeScript and Vite production bundling remain covered.
+- Keep `npm test -- --runInBand` before `npm run build` in the frontend CI job.
+- Keep `npm run build` after tests and lint so TypeScript and Vite production bundling remain covered.
 - Consider adding a small Playwright smoke job later, but do not block on that before adding the existing test command.
 
 ### P2: Image Publishing And Homelab Digest Rollout Are Separate Manual Steps
@@ -3492,20 +3494,22 @@ Recommended fix:
 
 ### P2: Frontend Tests Are Not Run In CI
 
+Status 2026-06-08: Closed as part of the CI frontend-test gate. `.github/workflows/ci.yml` now runs `npm test -- --runInBand` before lint and build, and `Ci_runs_frontend_tests_before_frontend_build` guards that ordering.
+
 Evidence:
 
-- Local `npm test -- --runInBand` passed with 54 tests.
-- `.github/workflows/ci.yml` installs frontend dependencies and runs only `npm run build`.
+- `.github/workflows/ci.yml` installs frontend dependencies, audits production dependencies, runs `npm test -- --runInBand`, runs lint and then runs `npm run build`.
+- The workflow is statically covered by backend regression tests.
 
 Impact:
 
-- The most valuable frontend regression tests for `boardChrome`, syntax highlighting, diff parsing and UI state helpers are not enforced on PRs.
-- A PR can break Source/diff behavior while still passing TypeScript/Vite build.
+- Frontend regression tests for `boardChrome`, syntax highlighting, diff parsing and UI state helpers are enforced on PRs.
+- TypeScript/Vite build is still run after tests.
 
 Recommended fix:
 
-- Add `npm test -- --runInBand` or the project's preferred non-watch test command to the frontend CI job before build.
-- Add a future `npm run lint` gate once ESLint is introduced.
+- Keep `npm test -- --runInBand` before build.
+- Keep `npm run lint` between tests and build.
 
 ### P1: Image Publishing Is Not Gated By The CI Test Workflow
 
