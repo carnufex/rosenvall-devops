@@ -739,8 +739,7 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Pull_request_review_fix_endpoint_uses_action_quota_before_starting_run()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
-        var endpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/pull-request/ai-fix-comments\"", "api.MapGet(\"/work-items/{workItemId:guid}/ai-session\"");
+        var endpoint = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Features", "LocalPullRequests", "LocalPullRequestEndpoints.cs"));
 
         Assert.Contains("ReadPullRequestReviewFixActionQuota(configuration)", endpoint);
         Assert.Contains("\"pr-review-fix\"", endpoint);
@@ -1465,11 +1464,14 @@ public sealed class DevOpsStoreTests
     [Fact]
     public void Delivery_mutation_endpoints_derive_audit_actor_from_claims()
     {
-        var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var localPullRequestEndpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "LocalPullRequests", "LocalPullRequestEndpoints.cs"));
 
         Assert.Contains("static string AuditActorFromClaims(ClaimsPrincipal user)", program);
+        Assert.Contains("private static string AuditActorFromClaims(ClaimsPrincipal user)", localPullRequestEndpoints);
         Assert.Contains("store.StartImplementationRun(workItemId, request, actor)", program);
-        Assert.Contains("store.StartPullRequestReviewFixRun(workItemId, request, actor)", program);
+        Assert.Contains("store.StartPullRequestReviewFixRun(workItemId, request, actor)", localPullRequestEndpoints);
         Assert.Contains("store.ApproveAiRun(aiRunId, actor)", program);
         Assert.Contains("previewImplementationRunner.RunAsync(result, actor, CancellationToken.None)", program);
         Assert.Contains("store.ApprovePullRequest(workItemId, actor)", program);

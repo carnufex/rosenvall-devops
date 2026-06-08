@@ -158,14 +158,23 @@ public sealed class RepositorySourceFeatureTests
     {
         var root = FindRepositoryRoot();
         var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "LocalPullRequests", "LocalPullRequestEndpoints.cs");
+        var endpoints = File.ReadAllText(endpointPath);
 
-        Assert.Contains("api.MapGet(\"/work-items/{workItemId:guid}/pull-request/diff\"", program);
-        Assert.Contains("catch (RepositorySourceProviderException ex)", program);
-        Assert.Contains("RepositorySourceFeature.ProviderRejectedRequest(ex.Provider", program);
-        Assert.Contains("catch (JsonException ex)", program);
-        Assert.Contains("RepositorySourceFeature.ProviderBadResponse(\"LocalGit\", ex.Message)", program);
-        Assert.Contains("catch (HttpRequestException ex)", program);
-        Assert.Contains("RepositorySourceFeature.ProviderUnavailable(\"LocalGit\", ex.Message)", program);
+        Assert.Contains("LocalPullRequestEndpoints.Map(api);", program);
+        Assert.True(File.Exists(endpointPath), "Local pull request endpoints should live in Features/LocalPullRequests/LocalPullRequestEndpoints.cs.");
+        Assert.Contains("api.MapGet(\"/work-items/{workItemId:guid}/pull-request/diff\"", endpoints);
+        Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/pull-request/comments\"", endpoints);
+        Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/pull-request/ai-fix-comments\"", endpoints);
+        Assert.Contains("catch (RepositorySourceProviderException ex)", endpoints);
+        Assert.Contains("RepositorySourceFeature.ProviderRejectedRequest(ex.Provider", endpoints);
+        Assert.Contains("catch (JsonException ex)", endpoints);
+        Assert.Contains("RepositorySourceFeature.ProviderBadResponse(\"LocalGit\", ex.Message)", endpoints);
+        Assert.Contains("catch (HttpRequestException ex)", endpoints);
+        Assert.Contains("RepositorySourceFeature.ProviderUnavailable(\"LocalGit\", ex.Message)", endpoints);
+        Assert.DoesNotContain("api.MapGet(\"/work-items/{workItemId:guid}/pull-request/diff\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/pull-request/comments\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/pull-request/ai-fix-comments\"", program);
     }
 
     [Fact]
