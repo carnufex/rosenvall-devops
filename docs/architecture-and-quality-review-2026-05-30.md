@@ -775,6 +775,8 @@ Recommended fix:
 
 ### P2: Source And Diff Highlighting Should Share A Rendering Contract
 
+Status 2026-06-08: Closed. `frontend/src/codeHighlight.ts` now exposes a shared `CodeLineRenderModel` contract for source lines and diff lines, and both `LineNumberedCode` and `PullRequestDiffSectionView` render through the same `CodeLineRenderer` path while keeping diff-specific anchors and comment controls outside that shared line model. Frontend tests cover the normalized source/diff line contract.
+
 Evidence:
 
 - Syntax highlighting was added for Source and Local PR diff.

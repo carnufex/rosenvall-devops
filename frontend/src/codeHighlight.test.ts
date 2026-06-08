@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { highlightCodeLines, languageForPath, languagesForHighlightPath, plainHighlightedLines, splitCodeLines, splitDiffLineForHighlight } from './codeHighlight.ts';
+import { buildCodeLineRenderModel, highlightCodeLines, languageForPath, languagesForHighlightPath, plainHighlightedLines, splitCodeLines, splitDiffLineForHighlight } from './codeHighlight.ts';
 
 function tokenText(line: Array<{ content: string }>): string {
   return line.map((token) => token.content).join('');
@@ -77,5 +77,58 @@ test('splitDiffLineForHighlight isolates code content without changing diff anch
     prefix: '',
     code: '@@ -1 +1 @@',
     highlightable: false
+  });
+});
+
+test('buildCodeLineRenderModel normalizes source and diff lines through one contract', () => {
+  assert.deepEqual(buildCodeLineRenderModel({
+    kind: 'source',
+    path: 'src/App.tsx',
+    rawLineText: '  const value = 1;',
+    lineNumber: 12
+  }), {
+    kind: 'source',
+    path: 'src/App.tsx',
+    rawLineText: '  const value = 1;',
+    codeText: '  const value = 1;',
+    prefix: '',
+    highlightable: true,
+    lineNumber: 12,
+    oldLineNumber: null,
+    newLineNumber: null
+  });
+
+  assert.deepEqual(buildCodeLineRenderModel({
+    kind: 'diff-add',
+    path: 'src/App.tsx',
+    rawLineText: '+  const value = 1;',
+    oldLineNumber: null,
+    newLineNumber: 7
+  }), {
+    kind: 'diff-add',
+    path: 'src/App.tsx',
+    rawLineText: '+  const value = 1;',
+    codeText: '  const value = 1;',
+    prefix: '+',
+    highlightable: true,
+    lineNumber: null,
+    oldLineNumber: null,
+    newLineNumber: 7
+  });
+
+  assert.deepEqual(buildCodeLineRenderModel({
+    kind: 'diff-meta',
+    path: 'src/App.tsx',
+    rawLineText: '@@ -1 +1 @@'
+  }), {
+    kind: 'diff-meta',
+    path: 'src/App.tsx',
+    rawLineText: '@@ -1 +1 @@',
+    codeText: '@@ -1 +1 @@',
+    prefix: '',
+    highlightable: false,
+    lineNumber: null,
+    oldLineNumber: null,
+    newLineNumber: null
   });
 });

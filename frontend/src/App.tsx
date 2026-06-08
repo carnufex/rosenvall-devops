@@ -2,7 +2,7 @@ import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, type AuthSession } from './apiClient';
 import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
-import { highlightCodeLines, plainHighlightedLines, splitDiffLineForHighlight, type HighlightedLine } from './codeHighlight';
+import { buildCodeLineRenderModel, highlightCodeLines, plainHighlightedLines, splitCodeLines, type CodeLineKind, type CodeLineRenderModel, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
 import { extractPlanQuestions, formatPlanQuestionAnswers, type PlanQuestion } from './planQuestions';
@@ -2685,12 +2685,21 @@ function SourceBreadcrumb({ path, onChange }: { path: string; onChange: (path: s
 
 function LineNumberedCode({ content, path }: { content: string; path: string }) {
   const lines = useHighlightedCode(content, path);
+  const rawLines = React.useMemo(() => splitCodeLines(content), [content]);
   return (
     <pre className="source-code">
-      {lines.map((line, index) => (
+      {rawLines.map((rawLine, index) => (
         <span className="source-code-line" key={index}>
           <span className="source-line-number">{index + 1}</span>
-          <code><HighlightedTokens tokens={line} /></code>
+          <CodeLineRenderer
+            line={buildCodeLineRenderModel({
+              kind: 'source',
+              path,
+              rawLineText: rawLine,
+              lineNumber: index + 1
+            })}
+            tokens={lines[index]}
+          />
         </span>
       ))}
     </pre>
@@ -2719,6 +2728,17 @@ function HighlightedTokens({ tokens }: { tokens: HighlightedLine }) {
         <span key={`${index}-${token.content}`} style={token.color ? { color: token.color } : undefined}>{token.content}</span>
       ))}
     </>
+  );
+}
+
+function CodeLineRenderer({ line, tokens }: { line: CodeLineRenderModel; tokens?: HighlightedLine }) {
+  return (
+    <code>
+      {line.prefix && <span className="diff-prefix">{line.prefix}</span>}
+      {line.highlightable
+        ? <HighlightedTokens tokens={tokens ?? [{ content: line.codeText || ' ' }]} />
+        : line.codeText || ' '}
+    </code>
   );
 }
 
@@ -6345,10 +6365,14 @@ function PullRequestDiffSectionView({ section, sectionRef, commentsByLine, compo
   onUpdateComment: (commentId: string, request: { body?: string | null; status?: string | null }) => Promise<void>;
   onDeleteComment: (commentId: string) => Promise<void>;
 }) {
-  const highlightContent = React.useMemo(() => section.lines.map((line) => {
-    const part = splitDiffLineForHighlight(line.text, line.kind);
-    return part.highlightable ? part.code : '';
-  }).join('\n'), [section.lines]);
+  const renderLines = React.useMemo(() => section.lines.map((line) => buildCodeLineRenderModel({
+    kind: diffCodeLineKind(line.kind),
+    path: section.path,
+    rawLineText: line.text,
+    oldLineNumber: line.oldLine,
+    newLineNumber: line.newLine
+  })), [section.lines, section.path]);
+  const highlightContent = React.useMemo(() => renderLines.map((line) => line.highlightable ? line.codeText : '').join('\n'), [renderLines]);
   const highlightedLines = useHighlightedCode(highlightContent, section.path);
 
   return (
@@ -6363,17 +6387,13 @@ function PullRequestDiffSectionView({ section, sectionRef, commentsByLine, compo
           const side = line.side === 'old' ? 'old' : 'new';
           const lineComments = lineNumber ? commentsByLine.get(reviewLineKey(section.path, side, lineNumber)) ?? [] : [];
           const isComposerLine = composer?.filePath === section.path && composer.side === side && composer.lineNumber === lineNumber;
-          const diffCode = splitDiffLineForHighlight(line.text, line.kind);
+          const diffCode = renderLines[index];
           return (
             <React.Fragment key={line.id}>
               <button className={`diff-line ${line.kind}${line.commentable ? ' commentable' : ''}`} disabled={!line.commentable} onClick={() => onOpenComposer(section.path, line)} type="button">
                 <span className="diff-line-number">{line.oldLine ?? ''}</span>
                 <span className="diff-line-number">{line.newLine ?? ''}</span>
-                <code>
-                  {diffCode.highlightable
-                    ? <><span className="diff-prefix">{diffCode.prefix}</span><HighlightedTokens tokens={highlightedLines[index] ?? [{ content: diffCode.code || ' ' }]} /></>
-                    : diffCode.code || ' '}
-                </code>
+                <CodeLineRenderer line={diffCode} tokens={highlightedLines[index]} />
               </button>
               {isComposerLine && (
                 <div className="diff-comment-composer">
@@ -6404,6 +6424,13 @@ function PullRequestDiffSectionView({ section, sectionRef, commentsByLine, compo
       </div>
     </section>
   );
+}
+
+function diffCodeLineKind(kind: string): CodeLineKind {
+  if (kind === 'add') return 'diff-add';
+  if (kind === 'delete') return 'diff-delete';
+  if (kind === 'context') return 'diff-context';
+  return 'diff-meta';
 }
 
 function reviewLineKey(filePath: string, side: string, lineNumber: number): string {

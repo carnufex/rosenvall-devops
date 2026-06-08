@@ -5,6 +5,20 @@ export type HighlightToken = {
 
 export type HighlightedLine = HighlightToken[];
 
+export type CodeLineKind = 'source' | 'diff-add' | 'diff-delete' | 'diff-context' | 'diff-meta';
+
+export type CodeLineRenderModel = {
+  kind: CodeLineKind;
+  path: string | null;
+  rawLineText: string;
+  codeText: string;
+  prefix: string;
+  highlightable: boolean;
+  lineNumber: number | null;
+  oldLineNumber: number | null;
+  newLineNumber: number | null;
+};
+
 const theme = 'github-dark';
 const languageLoaders: Record<string, () => Promise<{ default: unknown }>> = {
   typescript: () => import('@shikijs/langs/typescript'),
@@ -79,6 +93,38 @@ export function splitDiffLineForHighlight(text: string, kind: string): { prefix:
   }
 
   return { prefix: '', code: text, highlightable: false };
+}
+
+export function buildCodeLineRenderModel(input: {
+  kind: CodeLineKind;
+  path?: string | null;
+  rawLineText: string;
+  lineNumber?: number | null;
+  oldLineNumber?: number | null;
+  newLineNumber?: number | null;
+}): CodeLineRenderModel {
+  const diffKind = input.kind === 'diff-add'
+    ? 'add'
+    : input.kind === 'diff-delete'
+      ? 'delete'
+      : input.kind === 'diff-context'
+        ? 'context'
+        : 'meta';
+  const diffParts = input.kind === 'source'
+    ? { prefix: '', code: input.rawLineText, highlightable: true }
+    : splitDiffLineForHighlight(input.rawLineText, diffKind);
+
+  return {
+    kind: input.kind,
+    path: input.path ?? null,
+    rawLineText: input.rawLineText,
+    codeText: diffParts.code,
+    prefix: diffParts.prefix,
+    highlightable: diffParts.highlightable,
+    lineNumber: input.lineNumber ?? null,
+    oldLineNumber: input.oldLineNumber ?? null,
+    newLineNumber: input.newLineNumber ?? null
+  };
 }
 
 export function plainHighlightedLines(content: string): HighlightedLine[] {
