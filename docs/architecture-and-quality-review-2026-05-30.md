@@ -2808,6 +2808,8 @@ Recommended fix:
 
 ### P0: GitHub Webhook Is Not Signature-Verified Before Triggering Deploy
 
+Status 2026-06-08: Closed. GitHub webhook handling now verifies `X-Hub-Signature-256` with `GitHubWebhookSignatureVerifier` before triggering deployment or preview cleanup, GitHub App manifest conversion persists the returned webhook secret, local/deployed configuration wires `GitHub__WebhookSecret`, and endpoint/security regression tests cover valid and invalid signatures.
+
 Evidence:
 
 - `POST /integrations/github/webhook` parses the request body and trusts `action`, `pull_request.merged`, and `pull_request.html_url`.
@@ -3138,6 +3140,8 @@ Recommended fix:
 - If early linking is needed for UX, expose it as `Syncing` and block primary use until completion.
 
 ### P0: Production App Deploys Stored Preview Source, Not Necessarily The Merged PR Contents
+
+Status 2026-06-08: Closed. Public app deployment now captures deployable source from the merged PR branch/head through repository source reads and stores that source snapshot with commit metadata before rendering production manifests. LocalGit approval reads deployable source from the PR branch before merge/apply, and GitHub webhook/reconcile paths avoid deploying stale preview source when merged repository source cannot be read.
 
 Evidence:
 
