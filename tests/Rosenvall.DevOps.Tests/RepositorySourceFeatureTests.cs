@@ -267,6 +267,40 @@ public sealed class RepositorySourceFeatureTests
     }
 
     [Fact]
+    public void Team_endpoints_use_teams_feature_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Teams", "TeamEndpoints.cs");
+        var endpoints = File.ReadAllText(endpointPath);
+
+        Assert.Contains("TeamEndpoints.Map(api);", program);
+        Assert.True(File.Exists(endpointPath), "Team and board-team access endpoints should live in Features/Teams/TeamEndpoints.cs.");
+        Assert.Contains("api.MapGet(\"/teams\"", endpoints);
+        Assert.Contains("api.MapPost(\"/teams\"", endpoints);
+        Assert.Contains("api.MapGet(\"/teams/{teamId:guid}/members\"", endpoints);
+        Assert.Contains("api.MapPut(\"/teams/{teamId:guid}/members/{userId:guid}\"", endpoints);
+        Assert.Contains("api.MapPost(\"/teams/{teamId:guid}/members\"", endpoints);
+        Assert.Contains("api.MapGet(\"/boards/{boardId:guid}/teams\"", endpoints);
+        Assert.Contains("api.MapPut(\"/boards/{boardId:guid}/teams/{teamId:guid}\"", endpoints);
+        Assert.Contains("api.MapDelete(\"/boards/{boardId:guid}/teams/{teamId:guid}\"", endpoints);
+        Assert.Contains("store.GetOrCreateUserWithDemoSandbox(UserIdentityFromClaims(user)).Subject", endpoints);
+        Assert.Contains("store.InviteTeamMember(teamId, request)", endpoints);
+        Assert.Contains("store.UpsertBoardTeamAccess(boardId, teamId, request.Role)", endpoints);
+        Assert.Contains("store.RemoveBoardTeamAccess(boardId, teamId)", endpoints);
+        Assert.DoesNotContain("api.MapGet(\"/teams\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/teams\"", program);
+        Assert.DoesNotContain("api.MapGet(\"/teams/{teamId:guid}/members\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/teams/{teamId:guid}/members/{userId:guid}\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/teams/{teamId:guid}/members\"", program);
+        Assert.DoesNotContain("api.MapGet(\"/boards/{boardId:guid}/teams\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/boards/{boardId:guid}/teams/{teamId:guid}\"", program);
+        Assert.DoesNotContain("api.MapDelete(\"/boards/{boardId:guid}/teams/{teamId:guid}\"", program);
+        Assert.DoesNotContain("CanViewTeamRequest", program);
+        Assert.DoesNotContain("CanMutateTeamRequest", program);
+    }
+
+    [Fact]
     public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
     {
         var root = FindRepositoryRoot();
