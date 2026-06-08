@@ -2895,6 +2895,8 @@ Recommended fix:
 
 ### P1: Work-Item Comment Identity Is Client-Supplied
 
+Status 2026-06-08: Closed for normal work-item comments. Public comment mutation contracts now accept only comment body text, while create/update/delete endpoints derive actor subject and display name from `ClaimsPrincipal`. New human comments persist `AuthorSubject`, ownership checks prefer immutable subject over display name, and legacy comments without `AuthorSubject` keep display-name ownership only as a backward-compatible fallback. Regression coverage lives in `New_human_comment_ownership_uses_actor_subject_not_client_display_name` and `Ai_and_other_user_comments_cannot_be_edited_or_deleted`.
+
 Evidence:
 
 - `POST /api/work-items/{workItemId}/comments` accepts `AddCommentRequest(string Author, string Kind, string Body)` and passes `request.Author`/`request.Kind` directly into `store.AddComment(...)`.
