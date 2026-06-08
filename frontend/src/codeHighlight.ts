@@ -20,6 +20,8 @@ export type CodeLineRenderModel = {
 };
 
 const theme = 'github-dark';
+const maxHighlightedLines = 5000;
+const maxHighlightedCharacters = 200_000;
 const languageLoaders: Record<string, () => Promise<{ default: unknown }>> = {
   typescript: () => import('@shikijs/langs/typescript'),
   tsx: () => import('@shikijs/langs/tsx'),
@@ -131,7 +133,25 @@ export function plainHighlightedLines(content: string): HighlightedLine[] {
   return splitCodeLines(content).map((line) => [{ content: line || ' ' }]);
 }
 
+export function shouldHighlightCode(content: string): boolean {
+  return content.length <= maxHighlightedCharacters && splitCodeLines(content).length <= maxHighlightedLines;
+}
+
+export function codeHighlightLimitMessage(content: string): string | null {
+  if (shouldHighlightCode(content)) return null;
+  const lineCount = splitCodeLines(content).length;
+  if (lineCount > maxHighlightedLines) {
+    return `Syntax highlighting disabled for ${lineCount} loaded lines to keep the review view responsive.`;
+  }
+
+  return `Syntax highlighting disabled for ${content.length} loaded characters to keep the review view responsive.`;
+}
+
 export async function highlightCodeLines(content: string, path: string | null | undefined): Promise<HighlightedLine[]> {
+  if (!shouldHighlightCode(content)) {
+    return plainHighlightedLines(content);
+  }
+
   const language = languageForPath(path);
   if (language === 'plaintext') {
     return plainHighlightedLines(content);

@@ -2273,6 +2273,8 @@ Recommended fix:
 
 ### P2: Code Viewers Render Full Files/Diffs Without Virtualization
 
+Status 2026-06-08: Started. Source and Local PR diff code surfaces now enforce a frontend syntax-highlighting budget: large loaded code inputs render as plain text with a visible "highlighting disabled" note instead of paying Shiki tokenization cost on the main thread. Full DOM virtualization/windowing for very large loaded files and diffs remains open.
+
 Evidence:
 
 - `LineNumberedCode` maps every source line to DOM nodes with line numbers and highlighted token spans.

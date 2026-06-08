@@ -517,6 +517,7 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
 .provider-status.ready { color: var(--secondary); }
 .provider-status.with-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .diff-limit-warning { margin: -4px 0 0; border: 1px solid rgba(245, 158, 11, 0.42); background: rgba(245, 158, 11, 0.09); color: #fcd34d; border-radius: 8px; padding: 9px 11px; font-size: 13px; line-height: 19px; }
+.code-highlight-note { margin: 0; border-bottom: 1px solid var(--line); background: rgba(45, 212, 191, 0.07); color: var(--muted-strong); padding: 8px 11px; font-size: 12px; line-height: 18px; }
 .settings-inline { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--surface-high); border: 1px solid var(--line); padding: 14px; border-radius: 8px; }
 .settings-inline p { margin-top: 4px; }
 .button-row { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }

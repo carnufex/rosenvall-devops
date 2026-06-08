@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCodeLineRenderModel, highlightCodeLines, languageForPath, languagesForHighlightPath, plainHighlightedLines, splitCodeLines, splitDiffLineForHighlight } from './codeHighlight.ts';
+import { buildCodeLineRenderModel, codeHighlightLimitMessage, highlightCodeLines, languageForPath, languagesForHighlightPath, plainHighlightedLines, shouldHighlightCode, splitCodeLines, splitDiffLineForHighlight } from './codeHighlight.ts';
 
 function tokenText(line: Array<{ content: string }>): string {
   return line.map((token) => token.content).join('');
@@ -55,6 +55,19 @@ test('highlightCodeLines preserves content and line count for known source files
   assert.equal(lines.length, 2);
   assert.equal(tokenText(lines[0]), 'const value = { ok: true };');
   assert.equal(tokenText(lines[1]), ' ');
+});
+
+test('large code inputs skip syntax highlighting and explain the budget', async () => {
+  const largeContent = `${Array.from({ length: 5001 }, (_, index) => `const value${index} = ${index};`).join('\n')}\n`;
+
+  assert.equal(shouldHighlightCode(largeContent), false);
+  assert.equal(codeHighlightLimitMessage(largeContent), 'Syntax highlighting disabled for 5002 loaded lines to keep the review view responsive.');
+
+  const lines = await highlightCodeLines(largeContent, 'src/large.ts');
+
+  assert.equal(lines.length, 5002);
+  assert.equal(tokenText(lines[0]), 'const value0 = 0;');
+  assert.equal(lines[0].some((token) => Boolean(token.color)), false);
 });
 
 test('splitDiffLineForHighlight isolates code content without changing diff anchors', () => {
