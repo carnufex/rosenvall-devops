@@ -287,7 +287,7 @@ Recommended fix:
 
 ### P1: `Program.cs` Is Now Multiple Applications In One File
 
-Status 2026-06-08: Started. `Features/Source` was already split out, and LocalGit pull-request diff/review-comment/AI-fix endpoints now live in `Features/LocalPullRequests/LocalPullRequestEndpoints.cs` with `Program.cs` reduced to `LocalPullRequestEndpoints.Map(api);`. Regression coverage verifies the Local PR routes and provider-error mapping live in that feature file instead of being reintroduced inline. The finding remains open because ProviderSync endpoints, Local PR approval/merge/deploy services, DTOs, store implementation, manifest renderers and background runtime types still share `Program.cs`.
+Status 2026-06-08: Started. `Features/Source` was already split out, LocalGit pull-request diff/review-comment/AI-fix endpoints now live in `Features/LocalPullRequests/LocalPullRequestEndpoints.cs`, and AI session plus AI plan-review comment endpoints now live in `Features/AiPlanning/AiPlanningEndpoints.cs`. `Program.cs` is reduced to feature registrations for those slices, and regression coverage verifies the moved routes stay out of the top-level file. The finding remains open because ProviderSync endpoints, AI plan start/revise/approve orchestration, Local PR approval/merge/deploy services, DTOs, store implementation, manifest renderers and background runtime types still share `Program.cs`.
 
 Evidence:
 

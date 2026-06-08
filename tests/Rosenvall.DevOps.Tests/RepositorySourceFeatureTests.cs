@@ -178,6 +178,31 @@ public sealed class RepositorySourceFeatureTests
     }
 
     [Fact]
+    public void Ai_session_and_plan_review_comment_endpoints_use_ai_planning_feature_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "AiPlanning", "AiPlanningEndpoints.cs");
+        var endpoints = File.ReadAllText(endpointPath);
+
+        Assert.Contains("AiPlanningEndpoints.Map(api);", program);
+        Assert.True(File.Exists(endpointPath), "AI planning session and plan-review comment endpoints should live in Features/AiPlanning/AiPlanningEndpoints.cs.");
+        Assert.Contains("api.MapGet(\"/work-items/{workItemId:guid}/ai-session\"", endpoints);
+        Assert.Contains("api.MapPut(\"/work-items/{workItemId:guid}/ai-session/provider-session\"", endpoints);
+        Assert.Contains("api.MapPost(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments\"", endpoints);
+        Assert.Contains("api.MapPatch(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", endpoints);
+        Assert.Contains("api.MapDelete(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", endpoints);
+        Assert.Contains("store.GetAiRun(aiRunId)?.WorkItemId != workItemId", endpoints);
+        Assert.Contains("await realtime.PublishAsync(\"aiPlanReviewCommentChanged\", comment)", endpoints);
+        Assert.Contains("await realtime.PublishBoardAsync(boardId, \"aiPlanReviewCommentDeleted\", commentId)", endpoints);
+        Assert.DoesNotContain("api.MapGet(\"/work-items/{workItemId:guid}/ai-session\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/work-items/{workItemId:guid}/ai-session/provider-session\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments\"", program);
+        Assert.DoesNotContain("api.MapPatch(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", program);
+        Assert.DoesNotContain("api.MapDelete(\"/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}\"", program);
+    }
+
+    [Fact]
     public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
     {
         var root = FindRepositoryRoot();

@@ -1672,26 +1672,7 @@ api.MapGet("/work-items/{workItemId:guid}/ai-runs", (Guid workItemId, ClaimsPrin
 });
 
 LocalPullRequestEndpoints.Map(api);
-
-api.MapGet("/work-items/{workItemId:guid}/ai-session", (Guid workItemId, ClaimsPrincipal user, DevOpsStore store) =>
-{
-    if (!CanViewWorkItemRequest(store, workItemId, user))
-    {
-        return BoardReadForbidden();
-    }
-
-    return store.GetAiSession(workItemId) is { } session ? Results.Ok(session) : Results.NotFound();
-});
-
-api.MapPut("/work-items/{workItemId:guid}/ai-session/provider-session", (Guid workItemId, UpdateAiSessionProviderRequest request, ClaimsPrincipal user, DevOpsStore store) =>
-{
-    if (!CanMutateWorkItemRequest(store, workItemId, user))
-    {
-        return BoardMutationForbidden();
-    }
-
-    return store.SetAiSessionProviderSession(workItemId, request.ProviderSessionId) is { } session ? Results.Ok(session) : Results.NotFound();
-});
+AiPlanningEndpoints.Map(api);
 
 api.MapPost("/work-items/{workItemId:guid}/comments", async (Guid workItemId, AddCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
 {
@@ -1768,60 +1749,6 @@ api.MapDelete("/comments/{commentId:guid}", async (Guid commentId, ClaimsPrincip
     {
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status403Forbidden);
     }
-});
-
-api.MapPost("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments", async (Guid workItemId, Guid aiRunId, CreateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
-{
-    if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
-    {
-        return BoardMutationForbidden();
-    }
-
-    var comment = store.AddAiPlanReviewComment(workItemId, aiRunId, request, UserIdentityFromClaims(user).DisplayName);
-    if (comment is null)
-    {
-        return Results.NotFound();
-    }
-
-    await realtime.PublishAsync("aiPlanReviewCommentChanged", comment);
-    return Results.Created($"/api/work-items/{workItemId}/ai-plans/{aiRunId}/comments/{comment.Id}", comment);
-});
-
-api.MapPatch("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, UpdateAiPlanReviewCommentRequest request, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
-{
-    if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
-    {
-        return BoardMutationForbidden();
-    }
-
-    var comment = store.UpdateAiPlanReviewComment(workItemId, aiRunId, commentId, request, UserIdentityFromClaims(user).DisplayName);
-    if (comment is null)
-    {
-        return Results.NotFound();
-    }
-
-    await realtime.PublishAsync("aiPlanReviewCommentChanged", comment);
-    return Results.Ok(comment);
-});
-
-api.MapDelete("/work-items/{workItemId:guid}/ai-plans/{aiRunId:guid}/comments/{commentId:guid}", async (Guid workItemId, Guid aiRunId, Guid commentId, ClaimsPrincipal user, DevOpsStore store, IRealtimeNotifier realtime) =>
-{
-    if (!CanMutateAiRunRequest(store, aiRunId, user) || store.GetAiRun(aiRunId)?.WorkItemId != workItemId)
-    {
-        return BoardMutationForbidden();
-    }
-
-    if (!store.DeleteAiPlanReviewComment(workItemId, aiRunId, commentId))
-    {
-        return Results.NotFound();
-    }
-
-    if (store.GetWorkItemBoardId(workItemId) is { } boardId)
-    {
-        await realtime.PublishBoardAsync(boardId, "aiPlanReviewCommentDeleted", commentId);
-    }
-
-    return Results.NoContent();
 });
 
 api.MapPost("/work-items/{workItemId:guid}/ai-plan", async (Guid workItemId, StartAiPlanRequest request, ClaimsPrincipal user, DevOpsStore store, AiPlanProviderRouter planner, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
