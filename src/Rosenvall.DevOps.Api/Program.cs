@@ -4484,19 +4484,10 @@ namespace Rosenvall.DevOps.Api
                                  echo "RDO_STEP=Implementing"
                                  github_token_for_runner="$GITHUB_TOKEN"
                                  unset GITHUB_TOKEN
-                                 codex_log="$workspace/codex-output.log"
-                                 set +e
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md" > "$codex_log" 2>&1 &
-                                 codex_pid=$!
-                                 sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
-                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                 wait "$codex_pid"
-                                 codex_status=$?
-                                 set -e
-                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                 cat "$codex_log"
-                                 if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
-                                 if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
+                                 cat > "$workspace/codex-command.sh" <<'RDO_CODEX_COMMAND'
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md"
+                                 RDO_CODEX_COMMAND
+                                 rdo_run_codex_without_repository_credentials "$workspace" "$workspace/codex-command.sh"
                                  GITHUB_TOKEN="$github_token_for_runner"
                                  export GITHUB_TOKEN
                                  echo "RDO_STEP=Validating"
@@ -9816,6 +9807,7 @@ namespace Rosenvall.DevOps.Api
                                  set -eu
                                  workspace="/tmp/rosenvall-preview-source"
                                  mkdir -p "$workspace"
+                                 . /opt/rdo-runner/lib.sh
                                  echo "RDO_STEP=Seeding"
                                  printf '%s' "$ROSENVALL_PREVIEW_SEED_B64" | base64 -d > "$workspace/seed.json"
                                  WORKSPACE="$workspace" node <<'NODE'
@@ -9835,19 +9827,10 @@ namespace Rosenvall.DevOps.Api
                                  NODE
                                  printf '%s' "$ROSENVALL_PREVIEW_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
                                  echo "RDO_STEP=Implementing"
-                                 codex_log="$workspace/codex-output.log"
-                                 set +e
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md" > "$codex_log" 2>&1 &
-                                 codex_pid=$!
-                                 sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
-                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                 wait "$codex_pid"
-                                 codex_status=$?
-                                 set -e
-                                 rm -f "$CODEX_HOME/auth.json" "$CODEX_HOME/installation_id"
-                                 cat "$codex_log"
-                                 if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"; exit 26; fi
-                                 if [ "$codex_status" -ne 0 ]; then echo "RDO_FAILURE=Codex CLI failed"; exit 27; fi
+                                 cat > "$workspace/codex-command.sh" <<'RDO_CODEX_COMMAND'
+                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md"
+                                 RDO_CODEX_COMMAND
+                                 rdo_run_codex_without_repository_credentials "$workspace" "$workspace/codex-command.sh"
                                  echo "RDO_STEP=Collecting"
                                  WORKSPACE="$workspace" node <<'NODE'
                                  const fs = require('fs');

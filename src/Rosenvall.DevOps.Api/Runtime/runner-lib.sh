@@ -32,6 +32,18 @@ rdo_git_with_repository_credentials() {
   GIT_ASKPASS="$workspace/git-askpass.sh" GIT_TERMINAL_PROMPT=0 GIT_USERNAME="$username" GIT_PASSWORD="$token" "$@"
 }
 
+rdo_remove_codex_reusable_auth_files() {
+  if [ -z "${CODEX_HOME:-}" ]; then
+    return 0
+  fi
+
+  rm -f \
+    "$CODEX_HOME/auth.json" \
+    "$CODEX_HOME/installation_id" \
+    "$CODEX_HOME/config.toml" \
+    "$CODEX_HOME/models_cache.json"
+}
+
 rdo_run_codex_without_repository_credentials() {
   workspace="$1"
   codex_command_file="$2"
@@ -41,11 +53,11 @@ rdo_run_codex_without_repository_credentials() {
   ( . "$codex_command_file" ) > "$codex_log" 2>&1 &
   codex_pid=$!
   sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
-  rm -f "${CODEX_HOME:-}/auth.json" "${CODEX_HOME:-}/installation_id"
+  rdo_remove_codex_reusable_auth_files
   wait "$codex_pid"
   codex_status=$?
   set -e
-  rm -f "${CODEX_HOME:-}/auth.json" "${CODEX_HOME:-}/installation_id"
+  rdo_remove_codex_reusable_auth_files
   cat "$codex_log"
   if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then
     echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"

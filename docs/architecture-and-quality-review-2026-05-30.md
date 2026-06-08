@@ -179,7 +179,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 
 ### P0: Codex Runs Can Read Runtime Credentials
 
-Status 2026-06-07: Partially mitigated, still open for the stronger architecture boundary. Implementation and PR review-fix no longer run Codex with exported repository tokens or board secret values; their Codex phase is centralized in `rdo_run_codex_without_repository_credentials` and the manifests restore repository credentials only after Codex exits. Kubernetes Codex jobs still copy reusable `CODEX_HOME` auth material into the prompt-driven container, so the recommended launcher/broker or split-container boundary remains unimplemented.
+Status 2026-06-08: Partially mitigated, still open for the stronger architecture boundary. Implementation, PR review-fix, cleanup and preview-source no longer carry their own inline Codex process wrappers; all Kubernetes Codex phases go through `rdo_run_codex_without_repository_credentials`. That helper unsets repository credentials and removes reusable Codex auth/config files (`auth.json`, `installation_id`, `config.toml`, `models_cache.json`) after Codex startup and again after exit. Kubernetes Codex jobs still copy reusable `CODEX_HOME` auth material into the prompt-driven container during startup, so the recommended launcher/broker or split-container boundary remains unimplemented.
 
 Evidence:
 
