@@ -1755,14 +1755,14 @@ Recommended fix:
 
 ### P1: Demo Restrictions Should Be Modeled As Policy, Not Email Specials
 
-Status 2026-06-07: Mostly closed. Demo access is now exposed through `UserAccessProfileDto` and used for workspace/board/provider/GitHub/team creation decisions; tests cover LocalGit-only sandbox behavior, GitHub invisibility, GitHub provider-copy blocking and team creation blocking. Remaining follow-up: extract the policy from `DevOpsStore` into a dedicated authorization service/module so future endpoint work consumes the same capability model without adding more store-local rules.
+Status 2026-06-08: Closed. Demo access is now exposed through `UserAccessProfileDto`, and the demo-specific constants/profile construction live in `DemoSandboxAccessPolicy` instead of being embedded directly in `DevOpsStore`. Store code uses that policy for demo email matching, sandbox bootstrap constants and restricted access-profile construction. Tests cover the centralized restricted profile plus existing LocalGit-only sandbox behavior, GitHub invisibility, GitHub provider-copy blocking and team creation blocking.
 
 Evidence:
 
 - The restricted demo path is keyed to `demo@rosenvall.local`.
 - `GetOrCreateUserWithDemoSandbox` ensures a `Demo Sandbox` workspace, `Demo` team and sandbox board.
 - Board creation is restricted for demo users to no repo or LocalGit requests.
-- Other endpoints, such as team creation, rely on general authorization rather than a central "demo sandbox policy".
+- Other endpoints consume the resulting access profile for team/provider/GitHub capability checks rather than duplicating demo-specific provider rules.
 
 Impact:
 

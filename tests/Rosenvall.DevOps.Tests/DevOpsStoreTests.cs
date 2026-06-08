@@ -3079,6 +3079,24 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Demo_sandbox_access_policy_builds_the_restricted_profile()
+    {
+        var workspaceId = Guid.NewGuid();
+
+        var profile = DemoSandboxAccessPolicy.BuildDemoProfile("authentik|demo", [workspaceId]);
+
+        Assert.Equal("authentik|demo", profile.ActorSubject);
+        Assert.True(profile.IsDemoRestricted);
+        Assert.Equal([workspaceId], profile.BoardCreationWorkspaceIds);
+        Assert.Equal(["NoRepository", "LocalGit"], profile.AllowedRepositoryProviders);
+        Assert.False(profile.CanCreateTeams);
+        Assert.False(profile.CanCreateWorkspaces);
+        Assert.False(profile.CanLinkExternalRepositories);
+        Assert.False(profile.CanUseGitHubIntegrations);
+        Assert.False(profile.CanSyncToGitHub);
+    }
+
+    [Fact]
     public void Demo_sandbox_policy_status_reports_restricted_demo_isolation()
     {
         using var fixture = DevOpsStoreFixture.Create();

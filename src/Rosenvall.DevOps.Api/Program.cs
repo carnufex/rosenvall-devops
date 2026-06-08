@@ -10409,10 +10409,6 @@ namespace Rosenvall.DevOps.Api
         private const string PreviewStepApply = "apply";
         private const string PreviewStepReadiness = "readiness";
         private const string PreviewStepRunning = "running";
-        private const string DemoUserEmail = "demo@rosenvall.local";
-        private const string DemoWorkspaceName = "Demo Sandbox";
-        private const string DemoBoardName = "Demo Sandbox";
-        private const string DemoTeamName = "Demo";
         private const string GitHubOrganizationRepositoryCreationDisabledMessage = "Organization repository creation is not enabled yet. Link an existing repository instead.";
         private static readonly PreviewStepDefinition[] PreviewStepDefinitions =
         [
@@ -10656,7 +10652,7 @@ namespace Rosenvall.DevOps.Api
                     .Where(user => IsDemoEmail(user.Email))
                     .ToArray();
                 var demoWorkspaceIds = _workspaces
-                    .Where(workspace => workspace.Name.Equals(DemoWorkspaceName, StringComparison.OrdinalIgnoreCase))
+                    .Where(workspace => workspace.Name.Equals(DemoSandboxAccessPolicy.DemoWorkspaceName, StringComparison.OrdinalIgnoreCase))
                     .Select(workspace => workspace.Id)
                     .ToHashSet();
                 var isolated = true;
@@ -10681,8 +10677,8 @@ namespace Rosenvall.DevOps.Api
                     true,
                     demoUsers.Length > 0,
                     isolated,
-                    DemoUserEmail,
-                    DemoWorkspaceName,
+                    DemoSandboxAccessPolicy.DemoUserEmail,
+                    DemoSandboxAccessPolicy.DemoWorkspaceName,
                     message);
             }
         }
@@ -10698,19 +10694,19 @@ namespace Rosenvall.DevOps.Api
         private bool EnsureDemoSandboxWithoutLock(UserDto user)
         {
             var changed = false;
-            var workspace = _workspaces.SingleOrDefault(entry => entry.Name.Equals(DemoWorkspaceName, StringComparison.OrdinalIgnoreCase));
+            var workspace = _workspaces.SingleOrDefault(entry => entry.Name.Equals(DemoSandboxAccessPolicy.DemoWorkspaceName, StringComparison.OrdinalIgnoreCase));
             if (workspace is null)
             {
-                workspace = new WorkspaceDto(Guid.NewGuid(), DemoWorkspaceName, "Demo", "local", 0, 0, 0, 0);
+                workspace = new WorkspaceDto(Guid.NewGuid(), DemoSandboxAccessPolicy.DemoWorkspaceName, "Demo", "local", 0, 0, 0, 0);
                 _workspaces.Add(workspace);
                 changed = true;
             }
 
-            var teamIndex = _teams.FindIndex(entry => entry.Name.Equals(DemoTeamName, StringComparison.OrdinalIgnoreCase));
+            var teamIndex = _teams.FindIndex(entry => entry.Name.Equals(DemoSandboxAccessPolicy.DemoTeamName, StringComparison.OrdinalIgnoreCase));
             TeamDto team;
             if (teamIndex < 0)
             {
-                team = new TeamDto(Guid.NewGuid(), DemoTeamName, [new TeamMemberDto(user.Id, "Owner")], DateTimeOffset.UtcNow);
+                team = new TeamDto(Guid.NewGuid(), DemoSandboxAccessPolicy.DemoTeamName, [new TeamMemberDto(user.Id, "Owner")], DateTimeOffset.UtcNow);
                 _teams.Add(team);
                 changed = true;
             }
@@ -10728,10 +10724,10 @@ namespace Rosenvall.DevOps.Api
 
             var board = _boards.SingleOrDefault(entry =>
                 entry.WorkspaceId == workspace.Id &&
-                entry.Name.Equals(DemoBoardName, StringComparison.OrdinalIgnoreCase));
+                entry.Name.Equals(DemoSandboxAccessPolicy.DemoBoardName, StringComparison.OrdinalIgnoreCase));
             if (board is null)
             {
-                board = new BoardRecord(Guid.NewGuid(), workspace.Id, DemoBoardName, ["Todo", "In Progress", "AI Planning", "Review", "Done"], null, null, "preview-only");
+                board = new BoardRecord(Guid.NewGuid(), workspace.Id, DemoSandboxAccessPolicy.DemoBoardName, ["Todo", "In Progress", "AI Planning", "Review", "Done"], null, null, "preview-only");
                 _boards.Add(board);
                 AddTimelineEvent(board.Id, null, null, "BoardCreated", board.Name, "Demo sandbox board created.", "system", null);
                 changed = true;
@@ -16349,19 +16345,10 @@ namespace Rosenvall.DevOps.Api
             if (isDemoRestricted)
             {
                 var demoWorkspaceIds = _workspaces
-                    .Where(workspace => workspace.Name.Equals(DemoWorkspaceName, StringComparison.OrdinalIgnoreCase))
+                    .Where(workspace => workspace.Name.Equals(DemoSandboxAccessPolicy.DemoWorkspaceName, StringComparison.OrdinalIgnoreCase))
                     .Select(workspace => workspace.Id)
                     .ToArray();
-                return new UserAccessProfileDto(
-                    actorSubject,
-                    true,
-                    demoWorkspaceIds,
-                    ["NoRepository", "LocalGit"],
-                    CanCreateTeams: false,
-                    CanCreateWorkspaces: false,
-                    CanLinkExternalRepositories: false,
-                    CanUseGitHubIntegrations: false,
-                    CanSyncToGitHub: false);
+                return DemoSandboxAccessPolicy.BuildDemoProfile(actorSubject, demoWorkspaceIds);
             }
 
             var canCreateBoardScopedResource = CanCreateBoardScopedResourceWithoutLock(actorSubject);
@@ -16745,7 +16732,7 @@ namespace Rosenvall.DevOps.Api
             NormalizeText(value, "").ToLowerInvariant();
 
         private static bool IsDemoEmail(string? value) =>
-            NormalizeEmail(value).Equals(DemoUserEmail, StringComparison.OrdinalIgnoreCase);
+            DemoSandboxAccessPolicy.IsDemoEmail(value);
 
         private static string NormalizeSecretKey(string? value)
         {
