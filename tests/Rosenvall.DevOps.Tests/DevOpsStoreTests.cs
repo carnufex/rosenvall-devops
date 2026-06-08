@@ -909,7 +909,7 @@ public sealed class DevOpsStoreTests
     public void Cleanup_endpoints_use_action_quota_before_external_cleanup()
     {
         var program = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Program.cs"));
-        var boardEndpoint = EndpointSnippet(program, "api.MapPost(\"/boards/{boardId:guid}/delete-and-clean-up\"", "api.MapGet(\"/boards/{boardId:guid}/timeline\"");
+        var boardEndpoint = EndpointSnippet(program, "api.MapPost(\"/boards/{boardId:guid}/delete-and-clean-up\"", "api.MapGet(\"/boards/{boardId:guid}/gitops/applications\"");
         var workItemEndpoint = EndpointSnippet(program, "api.MapPost(\"/work-items/{workItemId:guid}/delete-and-clean-up\"", "api.MapPost(\"/work-items/{workItemId:guid}/cleanup-runs/adopt\"");
 
         Assert.Contains("ReadCleanupActionQuota(configuration)", boardEndpoint);

@@ -301,6 +301,42 @@ public sealed class RepositorySourceFeatureTests
     }
 
     [Fact]
+    public void Board_endpoints_use_boards_feature_module()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+        var endpointPath = Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Boards", "BoardEndpoints.cs");
+        var endpoints = File.ReadAllText(endpointPath);
+
+        Assert.Contains("BoardEndpoints.Map(api);", program);
+        Assert.True(File.Exists(endpointPath), "Workspace and board base endpoints should live in Features/Boards/BoardEndpoints.cs.");
+        Assert.Contains("api.MapGet(\"/workspaces\"", endpoints);
+        Assert.Contains("api.MapPost(\"/workspaces\"", endpoints);
+        Assert.Contains("api.MapGet(\"/workspaces/{workspaceId:guid}/boards\"", endpoints);
+        Assert.Contains("api.MapPost(\"/workspaces/{workspaceId:guid}/boards\"", endpoints);
+        Assert.Contains("api.MapGet(\"/boards/{boardId:guid}\"", endpoints);
+        Assert.Contains("api.MapPut(\"/boards/{boardId:guid}/gitops-settings\"", endpoints);
+        Assert.Contains("api.MapPut(\"/boards/{boardId:guid}/ai-context\"", endpoints);
+        Assert.Contains("api.MapPut(\"/boards/{boardId:guid}/hosting\"", endpoints);
+        Assert.Contains("api.MapGet(\"/boards/{boardId:guid}/timeline\"", endpoints);
+        Assert.Contains("store.GetWorkspacesForUser(UserIdentityFromClaims(user))", endpoints);
+        Assert.Contains("store.GetOrCreateUserWithDemoSandbox(UserIdentityFromClaims(user)).Subject", endpoints);
+        Assert.Contains("await realtime.PublishUserAsync(actorSubject, \"workspaceCreated\", workspace)", endpoints);
+        Assert.DoesNotContain("api.MapGet(\"/workspaces\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/workspaces\"", program);
+        Assert.DoesNotContain("api.MapGet(\"/workspaces/{workspaceId:guid}/boards\"", program);
+        Assert.DoesNotContain("api.MapPost(\"/workspaces/{workspaceId:guid}/boards\"", program);
+        Assert.DoesNotContain("api.MapGet(\"/boards/{boardId:guid}\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/boards/{boardId:guid}/gitops-settings\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/boards/{boardId:guid}/ai-context\"", program);
+        Assert.DoesNotContain("api.MapPut(\"/boards/{boardId:guid}/hosting\"", program);
+        Assert.DoesNotContain("api.MapGet(\"/boards/{boardId:guid}/timeline\"", program);
+        Assert.DoesNotContain("CanCreateWorkspaceRequest", program);
+        Assert.DoesNotContain("CanCreateBoardInWorkspaceRequest", program);
+        Assert.DoesNotContain("WorkspaceMutationForbidden", program);
+    }
+
+    [Fact]
     public void Provider_sync_monitor_is_registered_and_uses_provider_sync_job_names()
     {
         var root = FindRepositoryRoot();
