@@ -1696,6 +1696,8 @@ Recommended fix:
 
 ### P1: Personal GitHub Integrations Are Visible/Usable Too Broadly
 
+Status 2026-06-08: Closed. Personal GitHub App installations are visible only to the installing actor or to an actor with a connected GitHub user authorization whose login matches the installation account; demo users still see no GitHub integrations and organization installations remain hidden unless explicitly usable. Regression coverage lives in `GitHub_integrations_show_only_actor_owned_or_matching_authorized_personal_accounts`.
+
 Evidence:
 
 - `CanUseGitHubIntegrationWithoutLock` returns true for any non-demo actor when `integration.AccountType == "User"`.
