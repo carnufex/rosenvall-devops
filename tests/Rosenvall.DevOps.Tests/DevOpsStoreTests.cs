@@ -2668,10 +2668,10 @@ public sealed class DevOpsStoreTests
         Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
         Assert.Contains("readOnly: true", manifest);
         Assert.Contains("emptyDir: {}", manifest);
-        Assert.Contains("cp -a \"/codex-home-source/$file\" \"/app/codex-home/$file\"", manifest);
-        Assert.Contains("chown -R 1000:1000 /app/codex-home", manifest);
-        Assert.Contains("chmod 600 /app/codex-home/auth.json", manifest);
-        Assert.Contains("mountPath: /app/codex-home", manifest);
+        Assert.Contains("cp -a \"/codex-home-source/$file\" \"/app/codex-launcher-home/$file\"", manifest);
+        Assert.Contains("chown -R 1000:1000 /app/codex-launcher-home", manifest);
+        Assert.Contains("chmod 600 /app/codex-launcher-home/auth.json", manifest);
+        Assert.Contains("mountPath: /app/codex-launcher-home", manifest);
         Assert.Contains("git remote set-url origin \"$ROSENVALL_REPOSITORY_URL\"", manifest);
         Assert.Contains("repository_token_for_runner=\"$ROSENVALL_GIT_TOKEN\"", manifest);
         Assert.Contains("cat > \"$workspace/codex-command.sh\"", manifest);
@@ -2682,7 +2682,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("ROSENVALL_GIT_TOKEN=\"$repository_token_for_runner\"", manifest);
         AssertGitCredentialsUseAskPass(manifest, "$ROSENVALL_REPOSITORY_PROVIDER", "$ROSENVALL_GIT_TOKEN");
         Assert.DoesNotContain("auth_remote", manifest);
-        Assert.DoesNotContain("name: codex-home\n                             persistentVolumeClaim:", manifest);
+        Assert.DoesNotContain("name: codex-launcher-home\n                             persistentVolumeClaim:", manifest);
         Assert.Contains("codex exec", manifest);
         Assert.Contains("codex exec --ephemeral", manifest);
         Assert.Contains("--sandbox danger-full-access", manifest);
@@ -6200,11 +6200,14 @@ public sealed class DevOpsStoreTests
         Assert.Contains("rdo_json_escape()", library);
         Assert.Contains("rdo_run_codex_without_repository_credentials()", library);
         Assert.Contains("rdo_remove_codex_reusable_auth_files()", library);
+        Assert.Contains("rdo_prepare_codex_runtime_home()", library);
+        Assert.Contains("ROSENVALL_CODEX_LAUNCHER_HOME", library);
+        Assert.Contains("codex-runtime-home", library);
         Assert.Contains("unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN", library);
-        Assert.Contains("\"$CODEX_HOME/auth.json\"", library);
-        Assert.Contains("\"$CODEX_HOME/installation_id\"", library);
-        Assert.Contains("\"$CODEX_HOME/config.toml\"", library);
-        Assert.Contains("\"$CODEX_HOME/models_cache.json\"", library);
+        Assert.Contains("\"$codex_home/auth.json\"", library);
+        Assert.Contains("\"$codex_home/installation_id\"", library);
+        Assert.Contains("\"$codex_home/config.toml\"", library);
+        Assert.Contains("\"$codex_home/models_cache.json\"", library);
         Assert.Contains("RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner", library);
         Assert.Contains("rdo_collect_changed_files()", library);
         Assert.Contains("rdo_collect_uncommitted_files()", library);
@@ -7242,9 +7245,11 @@ public sealed class DevOpsStoreTests
         Assert.Contains("claimName: rosenvall-devops-codex-home", manifest);
         Assert.Contains("readOnly: true", manifest);
         Assert.Contains("emptyDir: {}", manifest);
-        Assert.Contains("mountPath: /app/codex-home", manifest);
-        Assert.Contains("name: CODEX_HOME", manifest);
-        Assert.Contains("value: /app/codex-home", manifest);
+        Assert.Contains("mountPath: /app/codex-launcher-home", manifest);
+        Assert.Contains("name: ROSENVALL_CODEX_LAUNCHER_HOME", manifest);
+        Assert.Contains("value: /app/codex-launcher-home", manifest);
+        Assert.DoesNotContain("name: CODEX_HOME", manifest);
+        Assert.DoesNotContain("value: /app/codex-home", manifest);
         Assert.Contains("name: HOME", manifest);
         Assert.Contains("value: /home/ubuntu", manifest);
         Assert.Contains("codex exec --ephemeral", manifest);
@@ -7738,14 +7743,15 @@ public sealed class DevOpsStoreTests
         Assert.False(pod.AutomountServiceAccountToken);
         Assert.Equal(expectedImage, init.Image);
         Assert.Equal(expectedImage, runner.Image);
-        Assert.Equal("codex-home", Assert.Single(pod.Volumes, volume => volume.Name == "codex-home").Name);
-        Assert.NotNull(pod.Volumes.Single(volume => volume.Name == "codex-home").EmptyDir);
+        Assert.Equal("codex-launcher-home", Assert.Single(pod.Volumes, volume => volume.Name == "codex-launcher-home").Name);
+        Assert.NotNull(pod.Volumes.Single(volume => volume.Name == "codex-launcher-home").EmptyDir);
         Assert.Equal("rosenvall-devops-codex-home", pod.Volumes.Single(volume => volume.Name == "codex-home-source").PersistentVolumeClaim.ClaimName);
         Assert.True(init.VolumeMounts.Single(mount => mount.Name == "codex-home-source").ReadOnly);
-        Assert.Equal("/app/codex-home", init.VolumeMounts.Single(mount => mount.Name == "codex-home").MountPath);
-        Assert.Equal("/app/codex-home", runner.VolumeMounts.Single(mount => mount.Name == "codex-home").MountPath);
+        Assert.Equal("/app/codex-launcher-home", init.VolumeMounts.Single(mount => mount.Name == "codex-launcher-home").MountPath);
+        Assert.Equal("/app/codex-launcher-home", runner.VolumeMounts.Single(mount => mount.Name == "codex-launcher-home").MountPath);
         Assert.DoesNotContain(runner.VolumeMounts, mount => mount.Name == "codex-home-source");
-        Assert.Equal("/app/codex-home", runner.Env.Single(env => env.Name == "CODEX_HOME").Value);
+        Assert.DoesNotContain(runner.Env, env => env.Name == "CODEX_HOME");
+        Assert.Equal("/app/codex-launcher-home", runner.Env.Single(env => env.Name == "ROSENVALL_CODEX_LAUNCHER_HOME").Value);
         var secretEnv = runner.Env.Single(env => env.Name == secretEnvName);
         Assert.Null(secretEnv.Value);
         Assert.NotNull(secretEnv.ValueFrom.SecretKeyRef);
@@ -7757,6 +7763,8 @@ public sealed class DevOpsStoreTests
         {
             Assert.Contains("cat > \"$workspace/codex-command.sh\"", command);
             Assert.Contains("rdo_run_codex_without_repository_credentials \"$workspace\" \"$workspace/codex-command.sh\"", command);
+            Assert.DoesNotContain("CODEX_HOME=/app/codex-home", command);
+            Assert.Contains("codex-runtime-home", File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "Rosenvall.DevOps.Api", "Runtime", "runner-lib.sh")));
             Assert.DoesNotContain("codex_pid=$!", command);
             Assert.DoesNotContain("wait \"$codex_pid\"", command);
         }
@@ -7795,18 +7803,20 @@ public sealed class DevOpsStoreTests
         Assert.Equal(expectedImage, init.Image);
         Assert.Equal(expectedImage, source.Image);
         Assert.Equal(expectedImage, publisher.Image);
-        Assert.NotNull(pod.Volumes.Single(volume => volume.Name == "codex-home").EmptyDir);
+        Assert.NotNull(pod.Volumes.Single(volume => volume.Name == "codex-launcher-home").EmptyDir);
         Assert.Equal("rosenvall-devops-codex-home", pod.Volumes.Single(volume => volume.Name == "codex-home-source").PersistentVolumeClaim.ClaimName);
         Assert.True(init.VolumeMounts.Single(mount => mount.Name == "codex-home-source").ReadOnly);
-        Assert.Equal("/app/codex-home", source.VolumeMounts.Single(mount => mount.Name == "codex-home").MountPath);
+        Assert.Equal("/app/codex-launcher-home", source.VolumeMounts.Single(mount => mount.Name == "codex-launcher-home").MountPath);
         Assert.DoesNotContain(source.VolumeMounts, mount => mount.Name == "kube-api-access");
         Assert.Equal("/var/run/secrets/kubernetes.io/serviceaccount", publisher.VolumeMounts.Single(mount => mount.Name == "kube-api-access").MountPath);
-        Assert.Equal("/app/codex-home", source.Env.Single(env => env.Name == "CODEX_HOME").Value);
+        Assert.DoesNotContain(source.Env, env => env.Name == "CODEX_HOME");
+        Assert.Equal("/app/codex-launcher-home", source.Env.Single(env => env.Name == "ROSENVALL_CODEX_LAUNCHER_HOME").Value);
 
         var command = string.Join('\n', source.Command ?? []);
         Assert.Contains(". /opt/rdo-runner/lib.sh", command);
         Assert.Contains("cat > \"$workspace/codex-command.sh\"", command);
         Assert.Contains("rdo_run_codex_without_repository_credentials \"$workspace\" \"$workspace/codex-command.sh\"", command);
+        Assert.DoesNotContain("CODEX_HOME=/app/codex-home", command);
         Assert.DoesNotContain("codex_pid=$!", command);
         Assert.DoesNotContain("wait \"$codex_pid\"", command);
     }

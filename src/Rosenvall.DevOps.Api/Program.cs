@@ -3337,7 +3337,7 @@ namespace Rosenvall.DevOps.Api
                            seccompProfile:
                              type: RuntimeDefault
                          volumes:
-                           - name: codex-home
+                           - name: codex-launcher-home
                              emptyDir: {}
                            - name: codex-home-source
                              persistentVolumeClaim:
@@ -3351,8 +3351,8 @@ namespace Rosenvall.DevOps.Api
                                runAsGroup: 0
                                allowPrivilegeEscalation: false
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                                - name: codex-home-source
                                  mountPath: /codex-home-source
                                  readOnly: true
@@ -3361,17 +3361,17 @@ namespace Rosenvall.DevOps.Api
                                - -lc
                                - |
                                  set -eu
-                                 mkdir -p /app/codex-home
+                                 mkdir -p /app/codex-launcher-home
                                  for file in auth.json config.toml installation_id models_cache.json; do
                                    if [ -f "/codex-home-source/$file" ]; then
-                                     cp -a "/codex-home-source/$file" "/app/codex-home/$file"
+                                     cp -a "/codex-home-source/$file" "/app/codex-launcher-home/$file"
                                    fi
                                  done
-                                 mkdir -p /app/codex-home/tmp
-                                 chown -R 1000:1000 /app/codex-home
-                                 chmod 700 /app/codex-home/tmp
-                                 if [ -f /app/codex-home/auth.json ]; then chmod 600 /app/codex-home/auth.json; fi
-                                 if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
+                                 mkdir -p /app/codex-launcher-home/tmp
+                                 chown -R 1000:1000 /app/codex-launcher-home
+                                 chmod 700 /app/codex-launcher-home/tmp
+                                 if [ -f /app/codex-launcher-home/auth.json ]; then chmod 600 /app/codex-launcher-home/auth.json; fi
+                                 if [ -f /app/codex-launcher-home/config.toml ]; then chmod 600 /app/codex-launcher-home/config.toml; fi
                          containers:
                            - name: runner
                              image: {{Escape(image)}}
@@ -3385,8 +3385,8 @@ namespace Rosenvall.DevOps.Api
                                  drop:
                                    - ALL
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                              env:
                    {{githubTokenEnv}}
                                - name: ROSENVALL_GIT_TOKEN
@@ -3400,8 +3400,8 @@ namespace Rosenvall.DevOps.Api
                                  value: ubuntu
                                - name: SHELL
                                  value: /bin/bash
-                               - name: CODEX_HOME
-                                 value: /app/codex-home
+                               - name: ROSENVALL_CODEX_LAUNCHER_HOME
+                                 value: /app/codex-launcher-home
                                - name: CODEX_MODEL
                                  value: "{{Escape(model)}}"
                                - name: CODEX_REASONING_EFFORT
@@ -4088,7 +4088,7 @@ namespace Rosenvall.DevOps.Api
                            seccompProfile:
                              type: RuntimeDefault
                          volumes:
-                           - name: codex-home
+                           - name: codex-launcher-home
                              emptyDir: {}
                            - name: codex-home-source
                              persistentVolumeClaim:
@@ -4102,8 +4102,8 @@ namespace Rosenvall.DevOps.Api
                                runAsGroup: 0
                                allowPrivilegeEscalation: false
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                                - name: codex-home-source
                                  mountPath: /codex-home-source
                                  readOnly: true
@@ -4112,15 +4112,15 @@ namespace Rosenvall.DevOps.Api
                                - -lc
                                - |
                                  set -eu
-                                 mkdir -p /app/codex-home
+                                 mkdir -p /app/codex-launcher-home
                                  for file in auth.json config.toml installation_id models_cache.json; do
                                    if [ -f "/codex-home-source/$file" ]; then
-                                     cp -a "/codex-home-source/$file" "/app/codex-home/$file"
+                                     cp -a "/codex-home-source/$file" "/app/codex-launcher-home/$file"
                                    fi
                                  done
-                                 mkdir -p /app/codex-home/tmp
-                                 chown -R 1000:1000 /app/codex-home
-                                 chmod 700 /app/codex-home/tmp
+                                 mkdir -p /app/codex-launcher-home/tmp
+                                 chown -R 1000:1000 /app/codex-launcher-home
+                                 chmod 700 /app/codex-launcher-home/tmp
                          containers:
                            - name: runner
                              image: {{Escape(image)}}
@@ -4134,8 +4134,8 @@ namespace Rosenvall.DevOps.Api
                                  drop:
                                    - ALL
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                              env:
                                - name: ROSENVALL_GIT_TOKEN
                                  valueFrom:
@@ -4148,8 +4148,8 @@ namespace Rosenvall.DevOps.Api
                                  value: ubuntu
                                - name: SHELL
                                  value: /bin/bash
-                               - name: CODEX_HOME
-                                 value: /app/codex-home
+                               - name: ROSENVALL_CODEX_LAUNCHER_HOME
+                                 value: /app/codex-launcher-home
                                - name: CODEX_MODEL
                                  value: "{{Escape(model)}}"
                                - name: CODEX_REASONING_EFFORT
@@ -4374,7 +4374,7 @@ namespace Rosenvall.DevOps.Api
                            seccompProfile:
                              type: RuntimeDefault
                          volumes:
-                           - name: codex-home
+                           - name: codex-launcher-home
                              emptyDir: {}
                            - name: codex-home-source
                              persistentVolumeClaim:
@@ -4388,8 +4388,8 @@ namespace Rosenvall.DevOps.Api
                                runAsGroup: 0
                                allowPrivilegeEscalation: false
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                                - name: codex-home-source
                                  mountPath: /codex-home-source
                                  readOnly: true
@@ -4398,17 +4398,17 @@ namespace Rosenvall.DevOps.Api
                                - -lc
                                - |
                                  set -eu
-                                 mkdir -p /app/codex-home
+                                 mkdir -p /app/codex-launcher-home
                                  for file in auth.json config.toml installation_id models_cache.json; do
                                    if [ -f "/codex-home-source/$file" ]; then
-                                     cp -a "/codex-home-source/$file" "/app/codex-home/$file"
+                                     cp -a "/codex-home-source/$file" "/app/codex-launcher-home/$file"
                                    fi
                                  done
-                                 mkdir -p /app/codex-home/tmp
-                                 chown -R 1000:1000 /app/codex-home
-                                 chmod 700 /app/codex-home/tmp
-                                 if [ -f /app/codex-home/auth.json ]; then chmod 600 /app/codex-home/auth.json; fi
-                                 if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
+                                 mkdir -p /app/codex-launcher-home/tmp
+                                 chown -R 1000:1000 /app/codex-launcher-home
+                                 chmod 700 /app/codex-launcher-home/tmp
+                                 if [ -f /app/codex-launcher-home/auth.json ]; then chmod 600 /app/codex-launcher-home/auth.json; fi
+                                 if [ -f /app/codex-launcher-home/config.toml ]; then chmod 600 /app/codex-launcher-home/config.toml; fi
                          containers:
                            - name: runner
                              image: {{Escape(image)}}
@@ -4422,8 +4422,8 @@ namespace Rosenvall.DevOps.Api
                                  drop:
                                    - ALL
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                              env:
                                - name: GITHUB_TOKEN
                                  valueFrom:
@@ -4436,8 +4436,8 @@ namespace Rosenvall.DevOps.Api
                                  value: ubuntu
                                - name: SHELL
                                  value: /bin/bash
-                               - name: CODEX_HOME
-                                 value: /app/codex-home
+                               - name: ROSENVALL_CODEX_LAUNCHER_HOME
+                                 value: /app/codex-launcher-home
                                - name: CODEX_MODEL
                                  value: "{{Escape(model)}}"
                                - name: CODEX_REASONING_EFFORT
@@ -9701,7 +9701,7 @@ namespace Rosenvall.DevOps.Api
                            seccompProfile:
                              type: RuntimeDefault
                          volumes:
-                           - name: codex-home
+                           - name: codex-launcher-home
                              emptyDir: {}
                            - name: runner-home
                              emptyDir: {}
@@ -9736,8 +9736,8 @@ namespace Rosenvall.DevOps.Api
                                runAsGroup: 0
                                allowPrivilegeEscalation: false
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                                - name: runner-home
                                  mountPath: /home/ubuntu
                                - name: codex-home-source
@@ -9748,17 +9748,17 @@ namespace Rosenvall.DevOps.Api
                                - -lc
                                - |
                                  set -eu
-                                 mkdir -p /app/codex-home /home/ubuntu
+                                 mkdir -p /app/codex-launcher-home /home/ubuntu
                                  for file in auth.json config.toml installation_id models_cache.json; do
                                    if [ -f "/codex-home-source/$file" ]; then
-                                     cp -a "/codex-home-source/$file" "/app/codex-home/$file"
+                                     cp -a "/codex-home-source/$file" "/app/codex-launcher-home/$file"
                                    fi
                                  done
-                                 mkdir -p /app/codex-home/tmp
-                                 chown -R 1000:1000 /app/codex-home /home/ubuntu
-                                 chmod 700 /app/codex-home/tmp
-                                 if [ -f /app/codex-home/auth.json ]; then chmod 600 /app/codex-home/auth.json; fi
-                                 if [ -f /app/codex-home/config.toml ]; then chmod 600 /app/codex-home/config.toml; fi
+                                 mkdir -p /app/codex-launcher-home/tmp
+                                 chown -R 1000:1000 /app/codex-launcher-home /home/ubuntu
+                                 chmod 700 /app/codex-launcher-home/tmp
+                                 if [ -f /app/codex-launcher-home/auth.json ]; then chmod 600 /app/codex-launcher-home/auth.json; fi
+                                 if [ -f /app/codex-launcher-home/config.toml ]; then chmod 600 /app/codex-launcher-home/config.toml; fi
                            - name: generate-preview-source
                              image: {{Escape(image)}}
                              imagePullPolicy: Always
@@ -9771,8 +9771,8 @@ namespace Rosenvall.DevOps.Api
                                  drop:
                                    - ALL
                              volumeMounts:
-                               - name: codex-home
-                                 mountPath: /app/codex-home
+                               - name: codex-launcher-home
+                                 mountPath: /app/codex-launcher-home
                                - name: runner-home
                                  mountPath: /home/ubuntu
                                - name: result
@@ -9784,8 +9784,8 @@ namespace Rosenvall.DevOps.Api
                                  value: ubuntu
                                - name: SHELL
                                  value: /bin/bash
-                               - name: CODEX_HOME
-                                 value: /app/codex-home
+                               - name: ROSENVALL_CODEX_LAUNCHER_HOME
+                                 value: /app/codex-launcher-home
                                - name: CODEX_MODEL
                                  value: "{{Escape(model)}}"
                                - name: CODEX_REASONING_EFFORT

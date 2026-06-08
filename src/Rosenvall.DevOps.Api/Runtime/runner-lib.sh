@@ -33,15 +33,37 @@ rdo_git_with_repository_credentials() {
 }
 
 rdo_remove_codex_reusable_auth_files() {
-  if [ -z "${CODEX_HOME:-}" ]; then
+  codex_home="${1:-${CODEX_HOME:-}}"
+  if [ -z "$codex_home" ]; then
     return 0
   fi
 
   rm -f \
-    "$CODEX_HOME/auth.json" \
-    "$CODEX_HOME/installation_id" \
-    "$CODEX_HOME/config.toml" \
-    "$CODEX_HOME/models_cache.json"
+    "$codex_home/auth.json" \
+    "$codex_home/installation_id" \
+    "$codex_home/config.toml" \
+    "$codex_home/models_cache.json"
+}
+
+rdo_prepare_codex_runtime_home() {
+  workspace="$1"
+  launcher_home="${ROSENVALL_CODEX_LAUNCHER_HOME:-${CODEX_HOME:-}}"
+  runtime_home="$workspace/codex-runtime-home"
+  rm -rf "$runtime_home"
+  mkdir -p "$runtime_home/tmp"
+  if [ -n "$launcher_home" ]; then
+    for file in auth.json config.toml installation_id models_cache.json; do
+      if [ -f "$launcher_home/$file" ]; then
+        cp -a "$launcher_home/$file" "$runtime_home/$file"
+      fi
+    done
+    rdo_remove_codex_reusable_auth_files "$launcher_home"
+  fi
+  chmod 700 "$runtime_home/tmp"
+  if [ -f "$runtime_home/auth.json" ]; then chmod 600 "$runtime_home/auth.json"; fi
+  if [ -f "$runtime_home/config.toml" ]; then chmod 600 "$runtime_home/config.toml"; fi
+  CODEX_HOME="$runtime_home"
+  export CODEX_HOME
 }
 
 rdo_run_codex_without_repository_credentials() {
@@ -49,15 +71,17 @@ rdo_run_codex_without_repository_credentials() {
   codex_command_file="$2"
   codex_log="$workspace/codex-output.log"
   unset ROSENVALL_GIT_TOKEN GITHUB_TOKEN
+  rdo_prepare_codex_runtime_home "$workspace"
   set +e
   ( . "$codex_command_file" ) > "$codex_log" 2>&1 &
   codex_pid=$!
   sleep "${ROSENVALL_CODEX_AUTH_CLEANUP_DELAY_SECONDS:-2}"
-  rdo_remove_codex_reusable_auth_files
+  rdo_remove_codex_reusable_auth_files "$CODEX_HOME"
   wait "$codex_pid"
   codex_status=$?
   set -e
-  rdo_remove_codex_reusable_auth_files
+  rdo_remove_codex_reusable_auth_files "$CODEX_HOME"
+  rdo_remove_codex_reusable_auth_files "${ROSENVALL_CODEX_LAUNCHER_HOME:-}"
   cat "$codex_log"
   if grep -Eiq 'bwrap|bubblewrap|No permissions to create a new namespace|unprivileged user namespaces' "$codex_log"; then
     echo "RDO_FAILURE=Codex runner sandbox is unavailable in this Kubernetes runner"
