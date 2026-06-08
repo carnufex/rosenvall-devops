@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
-import { createApiClient, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { createApiClient, isApiError, type AuthSession } from './apiClient';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildShellBoardSelection, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { buildCodeLineRenderModel, codeHighlightLimitMessage, highlightCodeLines, plainHighlightedLines, splitCodeLines, type CodeLineKind, type CodeLineRenderModel, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { modalFocusableSelector, nextModalFocusIndex } from './modalAccessibility';
@@ -977,11 +977,23 @@ function App() {
     try {
       const me = await api.get<UserDto>('/api/me');
       const workspaces = await api.get<Workspace[]>('/api/workspaces');
-      const workspace = workspaces[0];
-      if (!workspace) throw new Error('No workspace available for this account.');
-      const boards = await api.get<Board[]>(`/api/workspaces/${workspace.id}/boards`);
-      const board = boards.find((entry) => entry.id === (preferredBoardId ?? selectedBoardIdRef.current)) ?? boards[0];
-      if (!board) throw new Error('No board returned by API');
+      if (workspaces.length === 0) throw new Error('No workspace available for this account.');
+      const boardEntries = await Promise.all(workspaces.map(async (entry) => {
+        try {
+          return [entry.id, await api.get<Board[]>(`/api/workspaces/${entry.id}/boards`)] as const;
+        } catch (error) {
+          if (isApiError(error) && error.status === 404) {
+            return [entry.id, [] as Board[]] as const;
+          }
+
+          throw error;
+        }
+      }));
+      const boardsByWorkspace = new Map<string, Board[]>(boardEntries.map(([workspaceId, entries]) => [workspaceId, entries]));
+      const selection = buildShellBoardSelection(workspaces, boardsByWorkspace, preferredBoardId ?? selectedBoardIdRef.current);
+      if (!selection) throw new Error('No board returned by API');
+      const { workspace, board } = selection;
+      const boards = boardEntries.flatMap(([, entries]) => entries);
       const [repositories, settings, apiStatus, previews, events, pipelines, timeline, metrics, assignees, teams, githubIntegrations, boardSecrets, gitOpsApplications] = await Promise.all([
         api.get<RepositoryDto[]>('/api/repositories'),
         api.get<SettingsDto>('/api/settings'),

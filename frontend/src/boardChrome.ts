@@ -10,6 +10,7 @@ export type BoardChromeRepository = {
 export type BoardChromeBoard = {
   id: string;
   name: string;
+  workspaceId?: string | null;
   repository?: BoardChromeRepository | null;
   repositorySyncState?: string | null;
   providerCapabilities?: string[] | null;
@@ -20,6 +21,11 @@ export type BoardChromeBoard = {
     hostname?: string | null;
     message?: string | null;
   } | null;
+};
+
+export type BoardChromeWorkspace = {
+  id: string;
+  name?: string | null;
 };
 
 export type GitHubRepositoryCreationIntegration = {
@@ -87,6 +93,29 @@ export function boardNavigationItems(showGitOps: boolean): BoardNavigationItem[]
     { key: 'configuration', label: 'Configuration' }
   );
   return items;
+}
+
+export function buildShellBoardSelection<TWorkspace extends BoardChromeWorkspace, TBoard extends BoardChromeBoard>(
+  workspaces: readonly TWorkspace[],
+  boardsByWorkspace: ReadonlyMap<string, readonly TBoard[]>,
+  preferredBoardId?: string | null
+) {
+  for (const workspace of workspaces) {
+    const boards = boardsByWorkspace.get(workspace.id) ?? [];
+    const board = boards.find((entry) => entry.id === preferredBoardId);
+    if (board) {
+      return { workspace, boards: boards.slice(), board };
+    }
+  }
+
+  for (const workspace of workspaces) {
+    const boards = boardsByWorkspace.get(workspace.id) ?? [];
+    if (boards.length > 0) {
+      return { workspace, boards: boards.slice(), board: boards[0] };
+    }
+  }
+
+  return null;
 }
 
 export function buildCloneCommand(remoteUrl: string) {

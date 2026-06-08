@@ -52,6 +52,7 @@ Use these as the first backlog slice set if this report is converted into RDO ca
 
 ## Implementation Progress
 
+- 2026-06-08: Fixed a multi-user board visibility gap in the frontend shell. The app now loads boards from every visible workspace and selects the workspace containing the preferred board, so users invited through a team can reach assigned boards outside the first returned workspace. Backend invite/team authorization tests still cover first-login board visibility, and a frontend helper test now covers cross-workspace board selection.
 - 2026-05-30: Started ticket 1 by removing repository tokens and board secret values from the `codex exec` process environment in implementation and PR review-fix manifests. Remaining hardening from the same finding: isolate Codex auth material instead of exposing reusable `CODEX_HOME` files in the prompt-driven container.
 - 2026-06-07: Mitigated the remaining Codex auth-file exposure window for Kubernetes Codex jobs. Implementation, PR review-fix, cleanup and preview-source manifests now run `codex exec` as a tracked child process and remove `CODEX_HOME/auth.json` plus `installation_id` while Codex is running, with manifest tests covering all four job families. A full launcher/broker boundary that never places reusable Codex auth material in the prompt-driven execution environment remains the stronger follow-up for this P0 finding.
 - 2026-06-07: Continued runner credential-boundary hardening by moving the implementation and PR review-fix Codex phase into the versioned `/opt/rdo-runner/lib.sh` helper. Those manifests now write only a per-run Codex command fragment and call `rdo_run_codex_without_repository_credentials`, which unsets repository tokens, removes Codex auth files during execution, classifies sandbox failures and centralizes Codex status handling before the runner restores repository credentials for validation/push/PR phases. Remaining follow-up: replace the shared-process helper with a launcher/broker or split-container contract so prompt-driven Codex never shares a container filesystem with reusable Codex auth material.
@@ -206,6 +207,15 @@ Recommended fix:
   - no board secret env vars unless explicitly scoped to a post-Codex test/deploy phase,
   - no repository token secret mount,
   - no broad `CODEX_HOME` copy containing reusable auth files unless the threat model explicitly accepts it.
+
+Implementation sequence:
+
+1. Keep the current short-term mitigations in place: tokenless Codex phase, board-secret unsets, auth-file cleanup after process start, no repository token mounts and no Kubernetes service-account token for Codex runners.
+2. Introduce a dedicated Codex launcher contract that is responsible only for authenticated Codex startup and owns reusable Codex auth material.
+3. Move prompt-driven workspace execution into a separate worker process/container that receives no reusable `CODEX_HOME` files and no repository write credentials.
+4. Move clone, validation, commit, push and PR operations into explicit token-bearing phases outside the prompt-driven worker.
+5. Add manifest/runner tests that fail if reusable Codex auth files are mounted or copied into the prompt-driven worker filesystem.
+6. Only then mark this P0 closed; until that split exists, the finding remains open even if the auth-file exposure window is short.
 
 ### P0: Provider-Sync Cleanup Misses Jobs And Token Secrets
 
