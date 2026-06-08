@@ -1346,27 +1346,28 @@ Recommended fix:
 
 ### P1: Local Stop Script Leaves Forgejo Port-Forward Processes Behind
 
+Status 2026-06-08: Closed. `scripts/start-local-demo.ps1` records local API, frontend and Forgejo port-forward PIDs in `.codex/devops-logs/local-demo.pids.json`, and `scripts/stop-local-demo.ps1` now stops recorded API/frontend/Forgejo processes first, falls back to command-line matching for API, Vite, API port-forward and Forgejo port-forward processes, removes the PID file, and reports remaining matching local demo processes. Regression coverage lives in `Local_stop_script_stops_recorded_and_port_forward_processes`.
+
 Evidence:
 
 - `scripts/start-local-demo.ps1` may start a `kubectl port-forward svc/rosenvall-devops-forgejo ...` process.
 - The start script proactively kills old Forgejo port-forward processes before starting.
-- `scripts/stop-local-demo.ps1` only stops `dotnet.exe` API and `node.exe` Vite processes. It does not stop `kubectl.exe` port-forward processes.
+- `scripts/stop-local-demo.ps1` now stops `dotnet.exe` API, `node.exe` Vite, API port-forward and Forgejo port-forward processes.
 
 Impact:
 
-- A stale Forgejo port-forward can keep a local port busy or point at an older/failed session.
-- The next local run may behave differently depending on whether the user used `stop-local-demo.ps1` or restarted through `start-local-demo.ps1`.
-- This contributes to "localhost says 500/404 but deployed state differs" style confusion.
+- Stale Forgejo/API port-forward processes are cleaned up by the normal local stop script.
+- If anything remains, the script prints the matching process list instead of silently leaving local runtime drift.
 
 Recommended fix:
 
-- Make stop script symmetric with start script:
+- Keep the stop script symmetric with start script:
   - stop API port-forward,
   - stop Forgejo port-forward,
   - stop Vite,
   - stop local API.
-- Store PIDs in `.codex/devops-logs/local-demo.pids.json` and stop by PID first, with command-line fallback.
-- Print remaining matching processes after stop if any remain.
+- Keep storing PIDs in `.codex/devops-logs/local-demo.pids.json` and stopping by PID first, with command-line fallback.
+- Keep printing remaining matching processes after stop if any remain.
 
 ### P1: CI Does Not Run Frontend Tests
 
