@@ -2924,6 +2924,8 @@ Recommended fix:
 
 ### P1: Delivery Audit Actor Is Client-Supplied In Many Endpoints
 
+Status 2026-06-08: Closed for public delivery endpoints. Public delivery request contracts no longer expose `Actor`, `ApprovedBy` or `DiscardedBy`, and endpoint handlers derive audit names from `ClaimsPrincipal` through `AuditActorFromClaims`. The remaining explicit actor parameters are internal store/service-runner inputs, not client JSON properties. Regression coverage lives in `Delivery_mutation_endpoints_derive_audit_actor_from_claims` and `Public_delivery_request_contracts_do_not_accept_client_supplied_audit_identity`; the former also guards the plain work-item delete path against reintroducing a hard-coded `crille` fallback.
+
 Evidence:
 
 - Several delivery endpoints accept `Actor`, `ApprovedBy` or `DiscardedBy` in request bodies:

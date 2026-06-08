@@ -1442,6 +1442,10 @@ public sealed class DevOpsStoreTests
         var pipelineEndpoint = EndpointSnippet(program, "api.MapPost(\"/pipeline-runs/{pipelineRunId:guid}/execute\"", "api.MapGet(\"/pipeline-runs/{pipelineRunId:guid}/manifest\"");
         Assert.Contains("var actor = AuditActorFromClaims(user);", pipelineEndpoint);
         Assert.DoesNotContain("request.Actor", pipelineEndpoint);
+
+        var deleteWorkItemEndpoint = EndpointSnippet(program, "api.MapDelete(\"/work-items/{workItemId:guid}\"", "api.MapPost(\"/work-items/{workItemId:guid}/delete-and-clean-up\"");
+        Assert.Contains("var actor = AuditActorFromClaims(user);", deleteWorkItemEndpoint);
+        Assert.DoesNotContain("\"crille\"", deleteWorkItemEndpoint);
     }
 
     [Fact]

@@ -1170,6 +1170,7 @@ api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, ClaimsPri
         return BoardMutationForbidden();
     }
 
+    var actor = AuditActorFromClaims(user);
     var boardId = store.GetWorkItemBoardId(workItemId);
     var manifest = store.RenderWorkItemCleanupManifest(workItemId);
     if (manifest is not null)
@@ -1177,12 +1178,12 @@ api.MapDelete("/work-items/{workItemId:guid}", async (Guid workItemId, ClaimsPri
         var cleanup = await previews.DeleteAsync(manifest, cancellationToken);
         if (!cleanup.Succeeded)
         {
-            store.RecordPreviewFailure(workItemId, "CleanupFailed", "crille", cleanup.Message);
+            store.RecordPreviewFailure(workItemId, "CleanupFailed", actor, cleanup.Message);
             return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
         }
     }
 
-    if (!store.DeleteWorkItem(workItemId, "crille"))
+    if (!store.DeleteWorkItem(workItemId, actor))
     {
         return Results.NotFound();
     }
