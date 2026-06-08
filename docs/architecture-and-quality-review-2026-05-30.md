@@ -1729,6 +1729,8 @@ Recommended fix:
 
 ### P1: SignalR Broadcasts Ignore Board Authorization
 
+Status 2026-06-08: Closed. Realtime publishing now goes through `IRealtimeNotifier` in `RealtimeNotifications.cs`, board subscriptions call `store.CanViewBoard` before joining `board:{id}` groups, user-scoped events use hashed user groups, and static regression coverage rejects `Clients.All.SendAsync` while requiring board-group publishing.
+
 Evidence:
 
 - Many endpoints and background monitors publish events with `hub.Clients.All.SendAsync(...)`.
