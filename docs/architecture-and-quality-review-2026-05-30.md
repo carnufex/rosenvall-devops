@@ -2872,6 +2872,8 @@ Recommended fix:
 
 ### P1: Authentication Configuration Fails Open
 
+Status 2026-06-08: Closed. Startup now resolves authentication through `AuthenticationMode`, which defaults to `Required` outside Development, rejects `DisabledForLocalDevelopment` outside Development, and fails startup when required authority/audience settings are missing. Development can still run unauthenticated only through the explicit local-development mode or by leaving auth unconfigured. Regression coverage lives in `Authentication_mode_fails_closed_outside_development` and `Authentication_mode_allows_local_development_only_when_explicitly_disabled_or_unconfigured`.
+
 Evidence:
 
 - Startup enables JWT bearer authentication only when `Authentication:Authority` is non-empty.
