@@ -825,6 +825,8 @@ This order improves user feedback first, then makes the codebase cheaper to cont
 
 ### P1: Repository-Only Pipeline Runs Use View Permission For Mutation
 
+Status 2026-06-08: Closed. Repository visibility and repository action permission are now separate: `CanViewRepository` uses `VisibleRepositoryIdsWithoutLock`, while `CanActOnRepository` and repository-only pipeline creation/execution use `ActionableRepositoryIdsWithoutLock` through `CanMutateRepositoryOnlyPipelineWithoutLock`. The regression `Repository_only_pipeline_runs_require_mutating_repository_access` verifies a viewer can read a repository but cannot record or execute repository-only pipeline runs, while a mutating member can.
+
 Evidence:
 
 - `CanRecordPipelineRun` and `CanMutatePipelineRun` resolve a target board when `BoardId` or `WorkItemId` is present.
