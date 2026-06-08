@@ -69,6 +69,7 @@ builder.Services.AddHostedService<PreviewHealthMonitor>();
 builder.Services.AddHostedService<ImplementationRunMonitor>();
 builder.Services.AddHostedService<BoardPublicAppDeploymentReconciler>();
 builder.Services.AddHostedService<ProviderSyncRunMonitor>();
+builder.Services.AddHostedService<RuntimeArtifactCleanupReconciler>();
 builder.Services.AddHostedService<GitHubCallbackStateCleanupService>();
 var cors = CorsConfiguration.Resolve(builder.Configuration, builder.Environment.IsDevelopment());
 builder.Services.AddCors(options =>
@@ -10442,6 +10443,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<BoardAiContextDto> _boardAiContexts = [];
         private readonly List<BoardPublicAppDto> _boardPublicApps = [];
         private readonly List<ActionLedgerDto> _actionLedger = [];
+        private readonly List<RuntimeArtifactDto> _runtimeArtifacts = [];
         private int _nextTaskNumber = 4821;
         private long? _lastSnapshotJsonBytes;
         private string? _lastSnapshotHash;
@@ -12236,6 +12238,7 @@ namespace Rosenvall.DevOps.Api
                 _epicGoalRuns.RemoveAll(run => run.RootWorkItemId == workItemId);
                 _repositoryCleanupRuns.RemoveAll(run => run.WorkItemId == workItemId);
                 _pipelineRuns.RemoveAll(run => run.WorkItemId == workItemId);
+                _runtimeArtifacts.RemoveAll(artifact => artifact.WorkItemId == workItemId);
                 _actionLedger.RemoveAll(action => action.WorkItemId == workItemId);
                 AddTimelineForItem(item, "CardDeleted", item.Key, $"Deleted {item.Title}.", actor);
                 NormalizeBoard(boardId);
@@ -12268,6 +12271,7 @@ namespace Rosenvall.DevOps.Api
                 _epicGoalRuns.RemoveAll(run => itemIds.Contains(run.RootWorkItemId));
                 _repositoryCleanupRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
                 _pipelineRuns.RemoveAll(run => run.BoardId == boardId || run.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
+                _runtimeArtifacts.RemoveAll(artifact => artifact.BoardId == boardId || artifact.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
                 _actionLedger.RemoveAll(action => action.BoardId == boardId || action.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
                 _previewEvents.RemoveAll(entry => entry.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
                 _timelineEvents.RemoveAll(entry =>
@@ -13860,6 +13864,112 @@ namespace Rosenvall.DevOps.Api
                 };
                 _pipelineRuns[index] = updated;
                 AddTimelineEvent(updated.BoardId, updated.RepositoryId, updated.WorkItemId, "Pipeline", updated.Stage, updated.Message, NormalizeText(actor, "system"), updated.Url);
+                Persist();
+                return updated;
+            }
+        }
+
+        public IReadOnlyList<RuntimeArtifactDto> RegisterRuntimeArtifacts(IEnumerable<RuntimeArtifactDto> artifacts)
+        {
+            lock (_lock)
+            {
+                var changed = false;
+                foreach (var artifact in artifacts)
+                {
+                    if (string.IsNullOrWhiteSpace(artifact.Name) ||
+                        string.IsNullOrWhiteSpace(artifact.Namespace) ||
+                        string.IsNullOrWhiteSpace(artifact.Kind) ||
+                        string.IsNullOrWhiteSpace(artifact.ApiVersion))
+                    {
+                        continue;
+                    }
+
+                    var index = _runtimeArtifacts.FindIndex(existing =>
+                        existing.ApiVersion.Equals(artifact.ApiVersion, StringComparison.OrdinalIgnoreCase) &&
+                        existing.Kind.Equals(artifact.Kind, StringComparison.OrdinalIgnoreCase) &&
+                        existing.Namespace.Equals(artifact.Namespace, StringComparison.Ordinal) &&
+                        existing.Name.Equals(artifact.Name, StringComparison.Ordinal));
+                    var normalized = artifact with
+                    {
+                        ApiVersion = NormalizeText(artifact.ApiVersion, "v1"),
+                        Kind = NormalizeText(artifact.Kind, "Secret"),
+                        Namespace = NormalizeText(artifact.Namespace, RepositoryImplementationJobManifestRenderer.Namespace),
+                        Name = NormalizeText(artifact.Name, "runtime-artifact"),
+                        RunKind = NormalizeText(artifact.RunKind, "runtime"),
+                        Status = NormalizeText(artifact.Status, "Active")
+                    };
+                    if (index < 0)
+                    {
+                        _runtimeArtifacts.Add(normalized);
+                        changed = true;
+                    }
+                    else if (!_runtimeArtifacts[index].Equals(normalized))
+                    {
+                        _runtimeArtifacts[index] = normalized with { Id = _runtimeArtifacts[index].Id };
+                        changed = true;
+                    }
+                }
+
+                if (changed)
+                {
+                    Persist();
+                }
+
+                return _runtimeArtifacts.ToArray();
+            }
+        }
+
+        public IReadOnlyList<RuntimeArtifactDto> GetSensitiveRuntimeArtifactsReadyForCleanup()
+        {
+            lock (_lock)
+            {
+                return _runtimeArtifacts
+                    .Where(artifact => artifact.Sensitive)
+                    .Where(artifact => !artifact.Status.Equals("Deleted", StringComparison.OrdinalIgnoreCase))
+                    .Where(IsRuntimeArtifactReadyForCleanupWithoutLock)
+                    .OrderBy(artifact => artifact.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public RuntimeArtifactDto? MarkRuntimeArtifactDeleted(Guid artifactId, string message)
+        {
+            lock (_lock)
+            {
+                var index = _runtimeArtifacts.FindIndex(artifact => artifact.Id == artifactId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var updated = _runtimeArtifacts[index] with
+                {
+                    Status = "Deleted",
+                    CleanedUpAt = DateTimeOffset.UtcNow,
+                    CleanupMessage = NormalizeText(message, "Runtime artifact deleted.")
+                };
+                _runtimeArtifacts[index] = updated;
+                Persist();
+                return updated;
+            }
+        }
+
+        public RuntimeArtifactDto? MarkRuntimeArtifactCleanupFailed(Guid artifactId, string message)
+        {
+            lock (_lock)
+            {
+                var index = _runtimeArtifacts.FindIndex(artifact => artifact.Id == artifactId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var updated = _runtimeArtifacts[index] with
+                {
+                    Status = "CleanupFailed",
+                    CleanupMessage = RedactTerminalMessage(NormalizeText(message, "Runtime artifact cleanup failed."))
+                };
+                _runtimeArtifacts[index] = updated;
                 Persist();
                 return updated;
             }
@@ -15498,8 +15608,21 @@ namespace Rosenvall.DevOps.Api
 
                 if (string.Equals(run.Stage, "ProviderSync", StringComparison.OrdinalIgnoreCase))
                 {
-                    documents.Add(RenderDeleteStub("batch/v1", "Job", RepositoryProviderSyncJobManifestRenderer.JobName(run), RepositoryImplementationJobManifestRenderer.Namespace));
-                    documents.Add(RenderDeleteStub("v1", "Secret", RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run), RepositoryImplementationJobManifestRenderer.Namespace));
+                    var artifacts = _runtimeArtifacts
+                        .Where(artifact => artifact.RunId == run.Id)
+                        .Where(artifact => !artifact.Status.Equals("Deleted", StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(artifact => artifact.Sensitive)
+                        .ThenBy(artifact => artifact.Kind)
+                        .ToArray();
+                    if (artifacts.Length > 0)
+                    {
+                        documents.AddRange(artifacts.Select(RuntimeArtifactCatalog.RenderDeleteManifest));
+                    }
+                    else
+                    {
+                        documents.Add(RenderDeleteStub("batch/v1", "Job", RepositoryProviderSyncJobManifestRenderer.JobName(run), RepositoryImplementationJobManifestRenderer.Namespace));
+                        documents.Add(RenderDeleteStub("v1", "Secret", RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run), RepositoryImplementationJobManifestRenderer.Namespace));
+                    }
                     continue;
                 }
 
@@ -16162,6 +16285,23 @@ namespace Rosenvall.DevOps.Api
             status.Equals("Running", StringComparison.OrdinalIgnoreCase) ||
             status.Equals("Cloning", StringComparison.OrdinalIgnoreCase) ||
             status.Equals("Pushing", StringComparison.OrdinalIgnoreCase);
+
+        private bool IsRuntimeArtifactReadyForCleanupWithoutLock(RuntimeArtifactDto artifact)
+        {
+            if (artifact.BoardId is { } boardId && _boards.All(board => board.Id != boardId))
+            {
+                return true;
+            }
+
+            if (artifact.RunId is not { } runId)
+            {
+                return false;
+            }
+
+            return _pipelineRuns
+                .Where(run => run.Id == runId)
+                .Any(run => IsTerminalPipelineStatus(run.Status));
+        }
 
         private static bool IsRepositoryCleanupPendingStatus(string status) =>
             status is "Queued" or "Cloning" or "Implementing" or "Validating" or "Pushing";
@@ -17623,8 +17763,13 @@ namespace Rosenvall.DevOps.Api
             _aiSessions.AddRange(snapshot.AiSessions ?? []);
             _boardGitOpsSettings.AddRange(snapshot.BoardGitOpsSettings ?? []);
             _boardAiContexts.AddRange(snapshot.BoardAiContexts ?? []);
+            _runtimeArtifacts.AddRange(snapshot.RuntimeArtifacts ?? []);
             _nextTaskNumber = Math.Max(snapshot.NextTaskNumber, NextTaskNumberFromItems());
             var changed = BackfillBoardHostingWithoutLock();
+            if (BackfillProviderSyncRuntimeArtifactsWithoutLock())
+            {
+                changed = true;
+            }
             if (BackfillBoardPublicAppsWithoutLock())
             {
                 changed = true;
@@ -17638,6 +17783,30 @@ namespace Rosenvall.DevOps.Api
                 Persist();
             }
             return true;
+        }
+
+        private bool BackfillProviderSyncRuntimeArtifactsWithoutLock()
+        {
+            var changed = false;
+            foreach (var run in _pipelineRuns.Where(run => string.Equals(run.Stage, "ProviderSync", StringComparison.OrdinalIgnoreCase)))
+            {
+                foreach (var artifact in RuntimeArtifactCatalog.ProviderSyncArtifacts(run))
+                {
+                    if (_runtimeArtifacts.Any(existing =>
+                        existing.ApiVersion.Equals(artifact.ApiVersion, StringComparison.OrdinalIgnoreCase) &&
+                        existing.Kind.Equals(artifact.Kind, StringComparison.OrdinalIgnoreCase) &&
+                        existing.Namespace.Equals(artifact.Namespace, StringComparison.Ordinal) &&
+                        existing.Name.Equals(artifact.Name, StringComparison.Ordinal)))
+                    {
+                        continue;
+                    }
+
+                    _runtimeArtifacts.Add(artifact);
+                    changed = true;
+                }
+            }
+
+            return changed;
         }
 
         private bool BackfillBoardHostingWithoutLock()
@@ -17845,7 +18014,8 @@ namespace Rosenvall.DevOps.Api
                 _epicGoalRuns.ToArray(),
                 _actionLedger.ToArray(),
                 _githubManifestCallbackStates.ToArray(),
-                _githubUserAuthorizationCallbackStates.ToArray());
+                _githubUserAuthorizationCallbackStates.ToArray(),
+                _runtimeArtifacts.ToArray());
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
             var jsonBytes = Encoding.UTF8.GetByteCount(json);
             var jsonHash = ComputeSnapshotHash(json);
@@ -17924,7 +18094,7 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
     internal sealed record GitHubManifestCallbackStateRecord(string State, DateTimeOffset CreatedAt);
     internal sealed record GitHubUserAuthorizationCallbackStateRecord(string State, string ActorSubject, long InstallationId, DateTimeOffset CreatedAt);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null, IReadOnlyList<GitHubManifestCallbackStateRecord>? GitHubManifestCallbackStates = null, IReadOnlyList<GitHubUserAuthorizationCallbackStateRecord>? GitHubUserAuthorizationCallbackStates = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null, IReadOnlyList<GitHubManifestCallbackStateRecord>? GitHubManifestCallbackStates = null, IReadOnlyList<GitHubUserAuthorizationCallbackStateRecord>? GitHubUserAuthorizationCallbackStates = null, IReadOnlyList<RuntimeArtifactDto>? RuntimeArtifacts = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null, string? PublicHostname = null, string ImplementationWorkflow = "");
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder, Guid? ParentWorkItemId = null, bool IsBug = false);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);

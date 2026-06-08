@@ -274,6 +274,7 @@ public static class RepositorySourceEndpoints
             }
             store.MarkActionRun(actionStart.Action!.Id, run.Id, "Queued");
 
+            store.RegisterRuntimeArtifacts(RuntimeArtifactCatalog.ProviderSyncArtifacts(run));
             var secretName = RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run);
             var secretWrite = await runtimeSecrets.StoreAsync(
                 secretName,

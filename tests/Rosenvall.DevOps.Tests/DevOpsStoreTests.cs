@@ -248,6 +248,54 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Provider_sync_runtime_artifacts_track_terminal_sensitive_cleanup()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync", repository.Id, null, null, null, null, null))!;
+        var run = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, null, "ProviderSync", "Running", "Syncing repository.", null))!;
+
+        store.RegisterRuntimeArtifacts(RuntimeArtifactCatalog.ProviderSyncArtifacts(run));
+
+        Assert.Empty(store.GetSensitiveRuntimeArtifactsReadyForCleanup());
+
+        store.MarkPipelineRunSucceeded(run.Id, "provider-sync-monitor", "Provider sync completed.");
+        var ready = store.GetSensitiveRuntimeArtifactsReadyForCleanup();
+        var secret = Assert.Single(ready);
+        Assert.True(secret.Sensitive);
+        Assert.Equal("Secret", secret.Kind);
+        Assert.Equal(RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run), secret.Name);
+
+        store.MarkRuntimeArtifactDeleted(secret.Id, "deleted");
+
+        Assert.Empty(store.GetSensitiveRuntimeArtifactsReadyForCleanup());
+    }
+
+    [Fact]
+    public void Provider_sync_cleanup_manifest_uses_registered_runtime_artifacts()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("LocalGit", "demo-app", "http://forgejo/rdo/demo-app.git", "main", null, "rdo", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Provider sync", repository.Id, null, null, null, null, null))!;
+        var run = store.RecordPipelineRun(new RecordPipelineRunRequest(repository.Id, board.Id, null, "ProviderSync", "Running", "Syncing repository.", null))!;
+        var job = new RuntimeArtifactDto(Guid.NewGuid(), "batch/v1", "Job", RepositoryImplementationJobManifestRenderer.Namespace, "registered-provider-sync-job", board.Id, null, run.Id, "ProviderSync", DateTimeOffset.UtcNow, Sensitive: false);
+        var secret = new RuntimeArtifactDto(Guid.NewGuid(), "v1", "Secret", RepositoryImplementationJobManifestRenderer.Namespace, "registered-provider-sync-secret", board.Id, null, run.Id, "ProviderSync", DateTimeOffset.UtcNow, Sensitive: true);
+
+        store.RegisterRuntimeArtifacts([job, secret]);
+
+        var manifest = store.RenderBoardCleanupManifest(board.Id, new ConfigurationBuilder().Build())!;
+
+        Assert.Contains("registered-provider-sync-job", manifest);
+        Assert.Contains("registered-provider-sync-secret", manifest);
+        Assert.DoesNotContain(RepositoryProviderSyncJobManifestRenderer.JobName(run), manifest);
+        Assert.DoesNotContain(RepositoryProviderSyncJobManifestRenderer.TokenSecretName(run), manifest);
+    }
+
+    [Fact]
     public void Deleting_work_item_removes_only_that_cards_runtime_runs()
     {
         using var fixture = DevOpsStoreFixture.Create();
