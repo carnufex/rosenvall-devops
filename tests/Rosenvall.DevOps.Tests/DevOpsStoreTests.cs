@@ -960,7 +960,9 @@ public sealed class DevOpsStoreTests
         Assert.Contains("BoardCleanupActionIdempotencyKey(actorSubject, boardId)", boardEndpoint);
         Assert.Contains("ActionLedgerBlockReasons.CleanupActionKinds", boardEndpoint);
         Assert.Contains("ActionQuotaExceededResult(actionStart)", boardEndpoint);
-        Assert.True(boardEndpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < boardEndpoint.IndexOf("previews.DeleteAsync", StringComparison.Ordinal));
+        Assert.Contains("store.StartBoardCleanupRun(boardId, actor, actionStart.Action!.Id)", boardEndpoint);
+        Assert.Contains("Results.Accepted($\"/api/board-cleanup-runs/{cleanupRun.Id}\", cleanupRun)", boardEndpoint);
+        Assert.DoesNotContain("previews.DeleteAsync", boardEndpoint);
 
         Assert.Contains("ReadCleanupActionQuota(configuration)", workItemEndpoint);
         Assert.Contains("WorkItemCleanupActionIdempotencyKey(actorSubject, workItemId)", workItemEndpoint);
@@ -968,6 +970,29 @@ public sealed class DevOpsStoreTests
         Assert.Contains("ActionQuotaExceededResult(actionStart)", workItemEndpoint);
         Assert.True(workItemEndpoint.IndexOf("store.StartAction", StringComparison.Ordinal) < workItemEndpoint.IndexOf("previews.DeleteAsync", StringComparison.Ordinal));
         Assert.Contains("store.MarkActionRun(actionStart.Action!.Id, cleanupRun.Id, \"Queued\")", workItemEndpoint);
+    }
+
+    [Fact]
+    public void Board_cleanup_runs_persist_status_failure_and_terminal_lines()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var action = store.StartAction("demo", board.Id, null, "board-cleanup", $"board-cleanup:demo:{board.Id:N}");
+        var run = store.StartBoardCleanupRun(board.Id, "Demo", action.Action!.Id)!;
+
+        store.MarkActionRun(action.Action.Id, run.Id, "Queued");
+        store.UpdateBoardCleanupRun(run.Id, "DeletingKubernetes", "Kubernetes", "Deleting Kubernetes resources.");
+        store.UpdateBoardCleanupRun(run.Id, "Failed", "Kubernetes", "Misslyckades att ta bort och köra cleanup, se loggar.", "Forbidden", completed: true);
+
+        var reopened = fixture.Reopen();
+        var persisted = Assert.Single(reopened.GetBoardCleanupRuns(board.Id));
+        Assert.Equal("Failed", persisted.Status);
+        Assert.Equal("Kubernetes", persisted.Phase);
+        Assert.Equal("Forbidden", persisted.FailureReason);
+        Assert.Contains(persisted.TerminalLines ?? [], line => line.Message.Contains("Deleting Kubernetes resources.", StringComparison.Ordinal));
+        Assert.Contains(reopened.GetActionLedger(), entry => entry.Id == action.Action.Id && entry.RunId == run.Id);
     }
 
     [Fact]
@@ -2201,9 +2226,10 @@ public sealed class DevOpsStoreTests
         var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
         var sourceEndpoints = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Features", "Source", "RepositorySourceEndpoints.cs"));
         var publicAppReconciler = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "BoardPublicAppDeploymentReconciler.cs"));
+        var boardCleanupReconciler = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "BoardCleanupRunReconciler.cs"));
 
         Assert.Contains("LocalGit repository created", program);
-        Assert.Contains("LocalGit repository deleted", program);
+        Assert.Contains("LocalGit repository deleted", boardCleanupReconciler);
         Assert.Contains("LocalGit pull request closed", program);
         Assert.Contains("Provider sync target repository created", sourceEndpoints);
         Assert.Contains("Provider sync push queued", sourceEndpoints);
@@ -2211,6 +2237,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RecordLocalGitServiceCredentialAudit", program);
         Assert.Contains("RecordLocalGitServiceCredentialAudit", sourceEndpoints);
         Assert.Contains("RecordLocalGitServiceCredentialAudit", publicAppReconciler);
+        Assert.Contains("RecordLocalGitServiceCredentialAudit", boardCleanupReconciler);
     }
 
     [Fact]

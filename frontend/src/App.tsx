@@ -420,6 +420,21 @@ type RepositoryCleanupRunDto = {
   verificationFailure?: string | null;
 };
 
+type BoardCleanupRunDto = {
+  id: string;
+  boardId: string;
+  boardName: string;
+  status: 'Queued' | 'DeletingKubernetes' | 'DeletingLocalGit' | 'DeletingMetadata' | 'Failed' | string;
+  phase: string;
+  actor: string;
+  failureReason?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+  actionId?: string | null;
+  terminalLines?: PreviewTerminalLineDto[] | null;
+};
+
 type GitOpsApplicationStatusDto = {
   name: string;
   namespace: string;
@@ -1355,10 +1370,9 @@ function App() {
     },
     deleteBoard: async (boardId) => {
       return runAction('Deleting board and cleaning runtime resources', async () => {
-        await api.post<unknown>(`/api/boards/${boardId}/delete-and-clean-up`, {});
-        setSelected({ status: 'closed' });
-        setSelectedBoardId(null);
-        await loadShell();
+        await api.post<BoardCleanupRunDto>(`/api/boards/${boardId}/delete-and-clean-up`, {});
+        addToast('info', 'Board cleanup started. Follow progress in Danger Zone logs.');
+        await loadShell(boardId, { silentBusy: true });
       });
     },
     startAiPlan: async (id) => {
@@ -5894,8 +5908,50 @@ function BoardRepositorySummary({ repositories, onSyncBoard }: { repositories: B
 
 function BoardDangerZone({ board, actions }: { board: Board; actions: BoardActions }) {
   const [confirmText, setConfirmText] = React.useState('');
+  const [cleanupRuns, setCleanupRuns] = React.useState<BoardCleanupRunDto[]>([]);
+  const [logsOpen, setLogsOpen] = React.useState(false);
+  const [loadingLogs, setLoadingLogs] = React.useState(false);
+  const [deletePending, setDeletePending] = React.useState(false);
   const expected = board.name;
   const canDelete = confirmText === expected;
+  const latestRun = cleanupRuns[0] ?? null;
+  const cleanupActive = latestRun ? isBoardCleanupRunActive(latestRun) : false;
+  const cleanupFailed = latestRun?.status === 'Failed';
+
+  const loadCleanupRuns = React.useCallback(async () => {
+    setLoadingLogs(true);
+    try {
+      setCleanupRuns(await api.get<BoardCleanupRunDto[]>(`/api/boards/${board.id}/cleanup-runs`));
+    } catch {
+      setCleanupRuns([]);
+    } finally {
+      setLoadingLogs(false);
+    }
+  }, [board.id]);
+
+  React.useEffect(() => {
+    void loadCleanupRuns();
+  }, [loadCleanupRuns]);
+
+  React.useEffect(() => {
+    if (!cleanupActive && !logsOpen) return undefined;
+    const interval = window.setInterval(() => void loadCleanupRuns(), 5000);
+    return () => window.clearInterval(interval);
+  }, [cleanupActive, loadCleanupRuns, logsOpen]);
+
+  const startCleanup = async () => {
+    if (!canDelete || deletePending) return;
+    if (!confirm(boardDeleteCleanupMessage(board.name))) return;
+    setDeletePending(true);
+    try {
+      await actions.deleteBoard(board.id);
+      setConfirmText('');
+      await loadCleanupRuns();
+    } finally {
+      setDeletePending(false);
+    }
+  };
+
   return (
     <div className="settings-list">
       <div className="settings-row vertical">
@@ -5903,11 +5959,69 @@ function BoardDangerZone({ board, actions }: { board: Board; actions: BoardActio
           <strong>Delete board and clean up</strong>
           <p>Kubernetes preview namespaces, runner jobs, per-run token secrets, pipeline jobs, board-owned environment secrets and board-owned Local Git repositories are deleted. GitHub repositories, branches, pull requests and shared platform credentials are not deleted automatically.</p>
         </div>
+        {cleanupActive && latestRun && (
+          <div className="cleanup-status-card running">
+            <span className="spinner" />
+            <div>
+              <strong>Cleanup running</strong>
+              <p>{boardCleanupRunStatusText(latestRun)}</p>
+            </div>
+            <button className="secondary compact" type="button" onClick={() => setLogsOpen(true)}><SquareTerminal size={14} />View logs</button>
+          </div>
+        )}
+        {cleanupFailed && latestRun && (
+          <div className="cleanup-status-card failed">
+            <div>
+              <strong>Misslyckades att ta bort och köra cleanup, se loggar</strong>
+              <p>{latestRun.failureReason ?? boardCleanupRunStatusText(latestRun)}</p>
+            </div>
+            <button className="secondary compact" type="button" onClick={() => setLogsOpen(true)}><SquareTerminal size={14} />View logs</button>
+          </div>
+        )}
         <label>Type board name to confirm<input value={confirmText} onChange={(event) => setConfirmText(event.target.value)} placeholder={expected} /></label>
-        <button className="danger-button" type="button" disabled={!canDelete} onClick={() => canDelete && confirm(boardDeleteCleanupMessage(board.name)) && void actions.deleteBoard(board.id)}><Trash2 size={16} />Delete board and clean up</button>
+        <div className="settings-inline">
+          <button className="danger-button" type="button" disabled={!canDelete || deletePending || cleanupActive} onClick={() => void startCleanup()}>{deletePending ? <span className="spinner" /> : <Trash2 size={16} />}{cleanupActive ? 'Cleanup running' : 'Delete board and clean up'}</button>
+          <button className="secondary" type="button" disabled={loadingLogs} onClick={() => { setLogsOpen(true); void loadCleanupRuns(); }}><SquareTerminal size={16} />View cleanup logs</button>
+        </div>
       </div>
+      {logsOpen && (
+        <ModalFrame title="Board cleanup logs" onClose={() => setLogsOpen(false)} size="wide">
+          <div className="cleanup-log-modal">
+            {loadingLogs && cleanupRuns.length === 0 ? <div className="modal-loading">Loading cleanup logs...</div> : null}
+            {latestRun ? (
+              <>
+                <div className="settings-row">
+                  <div>
+                    <strong>{latestRun.boardName}</strong>
+                    <p>Status: {latestRun.status}. Phase: {latestRun.phase}. Started: {new Date(latestRun.createdAt).toLocaleString()}.</p>
+                    {latestRun.failureReason && <p className="failure-reason">{latestRun.failureReason}</p>}
+                  </div>
+                  <button className="secondary compact" type="button" disabled={loadingLogs} onClick={() => void loadCleanupRuns()}><RefreshCw size={14} />Refresh</button>
+                </div>
+                <PreviewTerminal lines={latestRun.terminalLines ?? []} active={isBoardCleanupRunActive(latestRun)} title="Board cleanup log" />
+                {latestRun.status === 'Failed' && <p className="provider-status">The board was kept so cleanup can be retried after the failure is fixed.</p>}
+              </>
+            ) : (
+              <div className="empty-state">No board cleanup logs have been recorded yet.</div>
+            )}
+          </div>
+        </ModalFrame>
+      )}
     </div>
   );
+}
+
+function isBoardCleanupRunActive(run: BoardCleanupRunDto) {
+  return ['Queued', 'DeletingKubernetes', 'DeletingLocalGit', 'DeletingMetadata'].includes(run.status);
+}
+
+function boardCleanupRunStatusText(run: BoardCleanupRunDto) {
+  if (run.status === 'Failed') return run.failureReason ?? `Cleanup failed in ${run.phase}.`;
+  if (run.status === 'Queued') return 'Cleanup is queued and waiting for the background worker.';
+  if (run.status === 'DeletingKubernetes') return 'Deleting Kubernetes runtime resources.';
+  if (run.status === 'DeletingLocalGit') return 'Deleting board-owned Local Git repositories.';
+  if (run.status === 'DeletingMetadata') return 'Deleting RDO board metadata.';
+  return `${run.status} - ${run.phase}`;
 }
 
 function BoardAiSettingsForm({ board, actions }: { board: Board; actions: BoardActions }) {

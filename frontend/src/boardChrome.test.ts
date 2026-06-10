@@ -355,6 +355,16 @@ test('delivery mutations no longer send client-supplied audit identity fields', 
   assert.doesNotMatch(appSource, /approvedBy: actor|discardedBy: actor/);
 });
 
+test('board danger zone exposes cleanup run logs after failed cleanup', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /type BoardCleanupRunDto/);
+  assert.match(appSource, /\/api\/boards\/\$\{board\.id\}\/cleanup-runs/);
+  assert.match(appSource, /Misslyckades att ta bort och köra cleanup, se loggar/);
+  assert.match(appSource, /View cleanup logs/);
+  assert.match(appSource, /<PreviewTerminal lines=\{latestRun\.terminalLines \?\? \[\]\}/);
+});
+
 test('preview PR approval is available for generated source when preview namespace is missing', () => {
   const namespaceMissingPreview = {
     status: 'Failed',
