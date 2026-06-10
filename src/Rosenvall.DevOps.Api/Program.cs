@@ -4118,9 +4118,22 @@ namespace Rosenvall.DevOps.Api
             message.Contains("namespaces", StringComparison.OrdinalIgnoreCase) &&
             message.Contains("not found", StringComparison.OrdinalIgnoreCase);
 
-        public static bool IsKubernetesNotFound(string message) =>
-            message.Contains("Error from server (NotFound)", StringComparison.OrdinalIgnoreCase) &&
-            message.Contains("not found", StringComparison.OrdinalIgnoreCase);
+        public static bool IsKubernetesNotFound(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            if (message.Contains("Error from server (NotFound)", StringComparison.OrdinalIgnoreCase) &&
+                message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return message.Contains("resource mapping not found", StringComparison.OrdinalIgnoreCase) &&
+                   message.Contains("no matches for kind", StringComparison.OrdinalIgnoreCase);
+        }
 
         private static ProcessStartInfo BuildStartInfo(string kubectlPath, KubernetesKubeconfigResolution kubeconfig, IReadOnlyList<string> arguments, bool redirectStandardInput)
         {

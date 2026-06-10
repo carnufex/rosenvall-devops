@@ -5421,6 +5421,32 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Preview_delete_treats_missing_resource_mapping_as_success()
+    {
+        var fakeKubectl = CreateFailingDeleteKubectl("error: resource mapping not found for name: \"devops-preview-task-4826-cv-hemsida\" namespace: \"\" from \"STDIN\": no matches for kind \"HTTPRoute\" in version \"gateway.networking.k8s.io/v1\"");
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Preview:KubectlPath"] = fakeKubectl.Path,
+                    ["Preview:KubeconfigPath"] = ""
+                })
+                .Build();
+            var orchestrator = new PreviewEnvironmentOrchestrator(configuration, NullLogger<PreviewEnvironmentOrchestrator>.Instance);
+
+            var result = await orchestrator.DeleteAsync("apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: devops-preview-task-4826-cv-hemsida\n", CancellationToken.None);
+
+            Assert.True(result.Succeeded);
+            Assert.Contains("already absent", result.Message);
+        }
+        finally
+        {
+            fakeKubectl.Directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Preview_delete_still_fails_for_forbidden_kubernetes_errors()
     {
         var fakeKubectl = CreateFailingDeleteKubectl("Error from server (Forbidden): namespaces \"devops-preview-task-4826-cv-hemsida\" is forbidden");
