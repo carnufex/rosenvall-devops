@@ -67,6 +67,7 @@ builder.Services.AddSingleton<PreviewImplementationRunner>();
 builder.Services.AddHostedService<PreviewImplementationRecoveryService>();
 builder.Services.AddHostedService<PreviewHealthMonitor>();
 builder.Services.AddHostedService<ImplementationRunMonitor>();
+builder.Services.AddHostedService<BoardCleanupRunReconciler>();
 builder.Services.AddHostedService<BoardPublicAppDeploymentReconciler>();
 builder.Services.AddHostedService<ProviderSyncRunMonitor>();
 builder.Services.AddHostedService<RuntimeArtifactCleanupReconciler>();
@@ -333,7 +334,7 @@ api.MapGet("/status", async (IConfiguration configuration, DevOpsStore store, Fo
 
 BoardEndpoints.Map(api);
 
-api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, PreviewEnvironmentOrchestrator previews, ForgejoRepositoryClient localGit, IConfiguration configuration, IRealtimeNotifier realtime, CancellationToken cancellationToken) =>
+api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, IConfiguration configuration) =>
 {
     if (!CanMutateBoardRequest(store, boardId, user))
     {
@@ -341,14 +342,14 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, D
     }
 
     var actor = AuditActorFromClaims(user);
-    var manifest = store.RenderBoardCleanupManifest(boardId, configuration);
-    if (manifest is null)
+    if (store.GetBoard(boardId) is null)
     {
         return Results.NotFound();
     }
 
     var actorSubject = EffectiveActorSubject(AuthenticatedSubjectOrNull(user));
-    var actionKey = BoardCleanupActionIdempotencyKey(actorSubject, boardId);
+    var failedCleanupAttempts = store.GetBoardCleanupRuns(boardId).Count(run => string.Equals(run.Status, "Failed", StringComparison.OrdinalIgnoreCase));
+    var actionKey = $"{BoardCleanupActionIdempotencyKey(actorSubject, boardId)}:{failedCleanupAttempts}";
     var quota = ReadCleanupActionQuota(configuration);
     var actionStart = store.StartAction(
         actorSubject,
@@ -366,53 +367,56 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", async (Guid boardId, D
             return ActionQuotaExceededResult(actionStart);
         }
 
-        return Results.Conflict(new
-        {
-            message = "Board cleanup is already running for this board.",
-            operationId = actionStart.Action?.Id,
-            runId = actionStart.Action?.RunId
-        });
+        var activeRun = actionStart.Action?.RunId is { } runId
+            ? store.GetBoardCleanupRuns(boardId).FirstOrDefault(run => run.Id == runId)
+            : store.GetBoardCleanupRuns(boardId).FirstOrDefault(run => run.Status is "Queued" or "DeletingKubernetes" or "DeletingLocalGit" or "DeletingMetadata");
+        return activeRun is not null
+            ? Results.Accepted($"/api/board-cleanup-runs/{activeRun.Id}", activeRun)
+            : Results.Conflict(new
+            {
+                message = "Board cleanup is already running for this board.",
+                operationId = actionStart.Action?.Id,
+                runId = actionStart.Action?.RunId
+            });
     }
 
-    if (!string.IsNullOrWhiteSpace(manifest))
-    {
-        var cleanup = await previews.DeleteAsync(manifest, cancellationToken);
-        if (!cleanup.Succeeded)
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, cleanup.Message);
-            return Results.Problem(cleanup.Message, statusCode: StatusCodes.Status502BadGateway);
-        }
-    }
-
-    var localRepositories = store.GetBoardOwnedLocalGitRepositories(boardId);
-    foreach (var repository in localRepositories)
-    {
-        var deleted = await localGit.DeleteRepositoryAsync(repository, cancellationToken);
-        if (!deleted)
-        {
-            store.MarkActionFailed(actionStart.Action!.Id, $"Local Git repository {repository.Owner}/{repository.Name} could not be deleted.");
-            return Results.Problem($"Local Git repository {repository.Owner}/{repository.Name} could not be deleted. The board was kept so cleanup can be retried. Any Local Git repositories already deleted in this cleanup were removed from RDO metadata.", statusCode: StatusCodes.Status502BadGateway);
-        }
-
-        store.RecordLocalGitServiceCredentialAudit(
-            boardId,
-            repository.Id,
-            null,
-            "LocalGit repository deleted",
-            $"Deleted board-owned LocalGit repository {repository.Owner}/{repository.Name} with the RDO service credential.",
-            actor,
-            repository.WebUrl);
-        store.DeleteRepositoryMetadata([repository.Id]);
-    }
-
-    if (!store.DeleteBoard(boardId, actor))
+    var cleanupRun = store.StartBoardCleanupRun(boardId, actor, actionStart.Action!.Id);
+    if (cleanupRun is null)
     {
         store.MarkActionFailed(actionStart.Action!.Id, "Board was not found.");
         return Results.NotFound();
     }
 
-    await realtime.PublishBoardAsync(boardId, "boardDeleted", boardId);
-    return Results.NoContent();
+    store.MarkActionRun(actionStart.Action!.Id, cleanupRun.Id, "Queued");
+    return Results.Accepted($"/api/board-cleanup-runs/{cleanupRun.Id}", cleanupRun);
+});
+
+api.MapGet("/boards/{boardId:guid}/cleanup-runs", (Guid boardId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    if (!CanViewBoardRequest(store, boardId, user))
+    {
+        return BoardReadForbidden();
+    }
+
+    if (store.GetBoard(boardId) is null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(store.GetBoardCleanupRuns(boardId));
+});
+
+api.MapGet("/board-cleanup-runs/{runId:guid}", (Guid runId, ClaimsPrincipal user, DevOpsStore store) =>
+{
+    var run = store.GetBoardCleanupRun(runId);
+    if (run is null)
+    {
+        return Results.NotFound();
+    }
+
+    return CanViewBoardRequest(store, run.BoardId, user)
+        ? Results.Ok(run)
+        : BoardReadForbidden();
 });
 
 api.MapGet("/boards/{boardId:guid}/gitops/applications", async (Guid boardId, ClaimsPrincipal user, DevOpsStore store, GitOpsStatusReader reader, IConfiguration configuration, CancellationToken cancellationToken) =>
@@ -9358,6 +9362,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<EpicRunDto> _epicRuns = [];
         private readonly List<EpicGoalRunDto> _epicGoalRuns = [];
         private readonly List<RepositoryCleanupRunDto> _repositoryCleanupRuns = [];
+        private readonly List<BoardCleanupRunDto> _boardCleanupRuns = [];
         private readonly List<PullRequestReviewCommentDto> _pullRequestReviewComments = [];
         private readonly List<AiPlanReviewCommentDto> _aiPlanReviewComments = [];
         private readonly List<TimelineEventDto> _timelineEvents = [];
@@ -11205,6 +11210,7 @@ namespace Rosenvall.DevOps.Api
                 _epicRuns.RemoveAll(run => itemIds.Contains(run.RootWorkItemId) || run.Children.Any(child => itemIds.Contains(child.WorkItemId)));
                 _epicGoalRuns.RemoveAll(run => itemIds.Contains(run.RootWorkItemId));
                 _repositoryCleanupRuns.RemoveAll(run => itemIds.Contains(run.WorkItemId));
+                _boardCleanupRuns.RemoveAll(run => run.BoardId == boardId);
                 _pipelineRuns.RemoveAll(run => run.BoardId == boardId || run.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
                 _runtimeArtifacts.RemoveAll(artifact => artifact.BoardId == boardId || artifact.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
                 _actionLedger.RemoveAll(action => action.BoardId == boardId || action.WorkItemId is { } workItemId && itemIds.Contains(workItemId));
@@ -11718,6 +11724,28 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public ActionLedgerDto? MarkActionCompleted(Guid actionId)
+        {
+            lock (_lock)
+            {
+                var index = _actionLedger.FindIndex(action => action.Id == actionId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var updated = _actionLedger[index] with
+                {
+                    Status = "Completed",
+                    CompletedAt = DateTimeOffset.UtcNow,
+                    Failure = null
+                };
+                _actionLedger[index] = updated;
+                Persist();
+                return updated;
+            }
+        }
+
         public IReadOnlyList<ImplementationRunDto> GetImplementationRunsAwaitingStatus()
         {
             lock (_lock)
@@ -12158,6 +12186,153 @@ namespace Rosenvall.DevOps.Api
                     .Where(run => workItemId is null || run.WorkItemId == workItemId)
                     .OrderByDescending(run => run.CreatedAt)
                     .ToArray();
+            }
+        }
+
+        public IReadOnlyList<BoardCleanupRunDto> GetBoardCleanupRuns(Guid boardId)
+        {
+            lock (_lock)
+            {
+                return _boardCleanupRuns
+                    .Where(run => run.BoardId == boardId)
+                    .OrderByDescending(run => run.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public BoardCleanupRunDto? GetBoardCleanupRun(Guid runId)
+        {
+            lock (_lock)
+            {
+                return _boardCleanupRuns.SingleOrDefault(run => run.Id == runId);
+            }
+        }
+
+        public IReadOnlyList<BoardCleanupRunDto> GetBoardCleanupRunsAwaitingExecution()
+        {
+            lock (_lock)
+            {
+                return _boardCleanupRuns
+                    .Where(run => run.Status is "Queued" or "DeletingKubernetes" or "DeletingLocalGit" or "DeletingMetadata")
+                    .OrderBy(run => run.CreatedAt)
+                    .ToArray();
+            }
+        }
+
+        public BoardCleanupRunDto? StartBoardCleanupRun(Guid boardId, string actor, Guid? actionId)
+        {
+            lock (_lock)
+            {
+                var board = _boards.SingleOrDefault(entry => entry.Id == boardId);
+                if (board is null)
+                {
+                    return null;
+                }
+
+                var existing = _boardCleanupRuns
+                    .Where(run => run.BoardId == boardId && run.Status is "Queued" or "DeletingKubernetes" or "DeletingLocalGit" or "DeletingMetadata")
+                    .OrderByDescending(run => run.CreatedAt)
+                    .FirstOrDefault();
+                if (existing is not null)
+                {
+                    return existing;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var run = new BoardCleanupRunDto(
+                    Guid.NewGuid(),
+                    boardId,
+                    board.Name,
+                    "Queued",
+                    "Queued",
+                    NormalizeText(actor, "system"),
+                    null,
+                    now,
+                    now,
+                    null,
+                    actionId,
+                    [
+                        new PreviewTerminalLineDto(now, "system", $"Queued board cleanup for {board.Name}."),
+                        new PreviewTerminalLineDto(now, "system", "Kubernetes resources, board-owned Local Git repositories and board metadata will be cleaned in order.")
+                    ]);
+                _boardCleanupRuns.Add(run);
+                Persist();
+                return run;
+            }
+        }
+
+        public BoardCleanupRunDto? UpdateBoardCleanupRun(Guid runId, string status, string phase, string? message = null, string? failureReason = null, bool completed = false)
+        {
+            lock (_lock)
+            {
+                var index = _boardCleanupRuns.FindIndex(run => run.Id == runId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _boardCleanupRuns[index];
+                var now = DateTimeOffset.UtcNow;
+                var lines = existing.TerminalLines ?? [];
+                if (!string.IsNullOrWhiteSpace(message))
+                {
+                    lines = AppendPreviewTerminalLineTail(lines, "system", message, now, out _);
+                }
+
+                var normalizedStatus = NormalizeText(status, existing.Status);
+                var normalizedPhase = NormalizeText(phase, existing.Phase);
+                var sanitizedFailure = string.IsNullOrWhiteSpace(failureReason)
+                    ? null
+                    : RedactTerminalMessage(failureReason);
+                var updated = existing with
+                {
+                    Status = normalizedStatus,
+                    Phase = normalizedPhase,
+                    FailureReason = sanitizedFailure,
+                    UpdatedAt = now,
+                    CompletedAt = completed ? now : existing.CompletedAt,
+                    TerminalLines = lines
+                };
+                if (string.Equals(existing.Status, updated.Status, StringComparison.Ordinal) &&
+                    string.Equals(existing.Phase, updated.Phase, StringComparison.Ordinal) &&
+                    string.Equals(existing.FailureReason, updated.FailureReason, StringComparison.Ordinal) &&
+                    existing.CompletedAt == updated.CompletedAt &&
+                    TerminalLinesEquivalent(existing.TerminalLines, updated.TerminalLines))
+                {
+                    return existing;
+                }
+
+                _boardCleanupRuns[index] = updated;
+                Persist();
+                return updated;
+            }
+        }
+
+        public BoardCleanupRunDto? AppendBoardCleanupRunLog(Guid runId, string stream, string message)
+        {
+            lock (_lock)
+            {
+                var index = _boardCleanupRuns.FindIndex(run => run.Id == runId);
+                if (index < 0)
+                {
+                    return null;
+                }
+
+                var existing = _boardCleanupRuns[index];
+                var lines = AppendPreviewTerminalLineTail(existing.TerminalLines, stream, message, DateTimeOffset.UtcNow, out var changed);
+                if (!changed)
+                {
+                    return existing;
+                }
+
+                var updated = existing with
+                {
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    TerminalLines = lines
+                };
+                _boardCleanupRuns[index] = updated;
+                Persist();
+                return updated;
             }
         }
 
@@ -16693,6 +16868,7 @@ namespace Rosenvall.DevOps.Api
             _epicGoalRuns.AddRange(snapshot.EpicGoalRuns ?? []);
             _actionLedger.AddRange(snapshot.ActionLedger ?? []);
             _repositoryCleanupRuns.AddRange(snapshot.RepositoryCleanupRuns ?? []);
+            _boardCleanupRuns.AddRange(snapshot.BoardCleanupRuns ?? []);
             _pullRequestReviewComments.AddRange(snapshot.PullRequestReviewComments ?? []);
             _aiPlanReviewComments.AddRange(snapshot.AiPlanReviewComments ?? []);
             _timelineEvents.AddRange(snapshot.TimelineEvents ?? []);
@@ -16951,6 +17127,7 @@ namespace Rosenvall.DevOps.Api
                 _timelineEvents.ToArray(),
                 _implementationRuns.ToArray(),
                 _repositoryCleanupRuns.ToArray(),
+                _boardCleanupRuns.ToArray(),
                 _pullRequestReviewComments.ToArray(),
                 _aiPlanReviewComments.ToArray(),
                 _users.ToArray(),
@@ -17051,7 +17228,7 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
     internal sealed record GitHubManifestCallbackStateRecord(string State, DateTimeOffset CreatedAt);
     internal sealed record GitHubUserAuthorizationCallbackStateRecord(string State, string ActorSubject, long InstallationId, DateTimeOffset CreatedAt);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null, IReadOnlyList<GitHubManifestCallbackStateRecord>? GitHubManifestCallbackStates = null, IReadOnlyList<GitHubUserAuthorizationCallbackStateRecord>? GitHubUserAuthorizationCallbackStates = null, IReadOnlyList<RuntimeArtifactDto>? RuntimeArtifacts = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<BoardCleanupRunDto>? BoardCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null, IReadOnlyList<GitHubManifestCallbackStateRecord>? GitHubManifestCallbackStates = null, IReadOnlyList<GitHubUserAuthorizationCallbackStateRecord>? GitHubUserAuthorizationCallbackStates = null, IReadOnlyList<RuntimeArtifactDto>? RuntimeArtifacts = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null, string? PublicHostname = null, string ImplementationWorkflow = "");
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder, Guid? ParentWorkItemId = null, bool IsBug = false);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);
