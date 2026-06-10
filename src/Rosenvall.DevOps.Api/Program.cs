@@ -6430,14 +6430,32 @@ namespace Rosenvall.DevOps.Api
 
         public async Task<bool> DeleteRepositoryAsync(RepositoryDto repository, CancellationToken cancellationToken)
         {
+            var result = await DeleteRepositoryResultAsync(repository, cancellationToken);
+            return result.Succeeded;
+        }
+
+        public async Task<LocalGitRepositoryMutationResult> DeleteRepositoryResultAsync(RepositoryDto repository, CancellationToken cancellationToken)
+        {
             if (string.IsNullOrWhiteSpace(repository.Owner) || string.IsNullOrWhiteSpace(repository.Name))
             {
-                return false;
+                return new LocalGitRepositoryMutationResult(false, "Local Git repository metadata is missing owner or name.");
             }
 
             using var request = CreateForgejoRequest(HttpMethod.Delete, $"{ApiBaseUrl(configuration)}/repos/{Uri.EscapeDataString(repository.Owner)}/{Uri.EscapeDataString(repository.Name)}");
             using var response = await httpClient.SendAsync(request, cancellationToken);
-            return response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound;
+            if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound)
+            {
+                return new LocalGitRepositoryMutationResult(true, response.StatusCode == HttpStatusCode.NotFound
+                    ? "Local Git repository was already absent."
+                    : "Local Git repository deleted.",
+                    response.StatusCode);
+            }
+
+            var detail = await RepositorySourceFeature.ProviderResponseDetailAsync(response, cancellationToken) ?? "";
+            return new LocalGitRepositoryMutationResult(
+                false,
+                $"Forgejo delete failed with {(int)response.StatusCode} {response.ReasonPhrase}: {TrimError(detail)}",
+                response.StatusCode);
         }
 
         public async Task<RepositorySourceTreeDto?> GetSourceTreeAsync(RepositoryDto repository, string reference, string path, CancellationToken cancellationToken)

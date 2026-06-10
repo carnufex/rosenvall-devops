@@ -4689,6 +4689,37 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Forgejo_delete_repository_result_preserves_provider_failure_detail()
+    {
+        using var httpClient = new HttpClient(new RoutingHttpMessageHandler(request =>
+        {
+            Assert.Equal(HttpMethod.Delete, request.Method);
+            return new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent("""{"message":"You must change your password."}""")
+            };
+        }))
+        {
+            BaseAddress = new Uri("http://forgejo.local")
+        };
+        var forgejo = new ForgejoRepositoryClient(httpClient, new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalGit:ApiBaseUrl"] = "http://forgejo.local/api/v1",
+                ["LocalGit:Username"] = "rdo",
+                ["LocalGit:Password"] = "demo-token"
+            })
+            .Build());
+        var repository = new RepositoryDto(Guid.NewGuid(), "LocalGit", "demo-app", "http://forgejo.local/rdo/demo-app.git", null, "main", DateTimeOffset.UtcNow, "rdo");
+
+        var deleted = await forgejo.DeleteRepositoryResultAsync(repository, CancellationToken.None);
+
+        Assert.False(deleted.Succeeded);
+        Assert.Equal(HttpStatusCode.Forbidden, deleted.StatusCode);
+        Assert.Contains("You must change your password", deleted.Message);
+    }
+
+    [Fact]
     public async Task Forgejo_client_reads_source_tree_and_text_files()
     {
         var requests = new List<(HttpMethod Method, string Path)>();

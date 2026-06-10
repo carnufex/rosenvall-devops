@@ -90,6 +90,7 @@ public sealed record AiProviderSettingsDto(string Provider, string DisplayName, 
 public sealed record PreviewSettingsDto(string Domain, int DefaultTtlDays, string Namespace);
 public sealed record RepositoryHostingSettingsDto(string Provider, string Mode, string ApiBaseUrl, bool CanCreateRepositories, bool LocalGitEnabled = false, bool LocalGitAvailable = false, string? LocalGitMessage = null);
 public sealed record LocalGitReadinessDto(bool Enabled, bool Configured, bool Available, string ApiBaseUrl, string? Message = null, int? StatusCode = null);
+public sealed record LocalGitRepositoryMutationResult(bool Succeeded, string Message, HttpStatusCode? StatusCode = null);
 public sealed record AuthentikSettingsDto(bool Enabled, string Authority, string UsersEndpoint);
 public sealed record MetricsDto(Guid? BoardId, int TokensUsed, int CodeAdded, int CodeDeleted, int PipelineRuns);
 public sealed record AssigneeDto(string Id, string DisplayName, string Email, string Source);

@@ -130,10 +130,11 @@ public sealed class BoardCleanupRunReconciler(
         foreach (var repository in repositories)
         {
             store.AppendBoardCleanupRunLog(run.Id, "system", $"Deleting Local Git repository {repository.Owner}/{repository.Name}.");
-            var deleted = await localGit.DeleteRepositoryAsync(repository, cancellationToken);
-            if (!deleted)
+            var deleted = await localGit.DeleteRepositoryResultAsync(repository, cancellationToken);
+            store.AppendBoardCleanupRunLog(run.Id, deleted.Succeeded ? "system" : "error", deleted.Message);
+            if (!deleted.Succeeded)
             {
-                FailRun(run, "LocalGit", $"Local Git repository {repository.Owner}/{repository.Name} could not be deleted.");
+                FailRun(run, "LocalGit", $"Local Git repository {repository.Owner}/{repository.Name} could not be deleted. {deleted.Message}");
                 return false;
             }
 
@@ -146,7 +147,6 @@ public sealed class BoardCleanupRunReconciler(
                 run.Actor,
                 repository.WebUrl);
             store.DeleteRepositoryMetadata([repository.Id]);
-            store.AppendBoardCleanupRunLog(run.Id, "system", $"Deleted Local Git repository {repository.Owner}/{repository.Name}.");
         }
 
         return true;
