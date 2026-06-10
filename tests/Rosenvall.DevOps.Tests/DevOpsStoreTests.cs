@@ -434,6 +434,50 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public void Preview_promotion_can_start_from_generated_source_when_preview_namespace_is_missing()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.UpdatePreviewHealth(item.Id, PreviewHealthCheckResult.Failed("NamespaceNotFound", "Preview namespace was not found. Retry preview setup to recreate the Kubernetes resources."));
+
+        var run = store.StartPreviewPromotionRun(item.Id, "crille")!;
+
+        Assert.Equal("preview-promotion", run.RunKind);
+        Assert.Equal("Failed", store.GetWorkItemDetail(item.Id)!.Preview!.Status);
+        Assert.Equal("NamespaceNotFound", store.GetWorkItemDetail(item.Id)!.Preview!.FailureReason);
+    }
+
+    [Fact]
+    public void Preview_promotion_still_blocks_other_failed_previews()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var repository = store.CreateRepository(new CreateRepositoryRequest("GitHub", "clock-app", "https://github.com/carnufex/clock-app.git", "main", "https://github.com/carnufex/clock-app", "carnufex", "react-preview"));
+        var board = store.CreateBoard(workspace.Id, new CreateBoardRequest("Clock app", repository.Id, null, null, null, null, null, ImplementationProfile: "react-preview"))!;
+        var item = store.CreateWorkItem(new CreateWorkItemRequest(board.Id, "Feature", "Clock toggle", "Build a web clock.", "Todo", "Medium", null));
+        var aiRun = store.StartAiPlan(item.Id, "codex", "gpt-5.5", "Build preview.")!;
+        store.ApproveAiRun(aiRun.Id, "crille");
+        store.CompletePreviewImplementation(item.Id, [
+            new PreviewSourceFile("app", "src/App.tsx", "export default function App(){return <main>Clock</main>}")
+        ], "codex");
+        store.UpdatePreviewHealth(item.Id, PreviewHealthCheckResult.Failed("Timeout", "Preview did not become healthy within 3 minutes."));
+
+        var error = Assert.Throws<InvalidOperationException>(() => store.StartPreviewPromotionRun(item.Id, "crille"));
+
+        Assert.Equal("A running preview with generated source is required before creating a pull request.", error.Message);
+    }
+
+    [Fact]
     public void Local_git_preview_promotion_uses_forgejo_pr_api_without_codex_or_builds()
     {
         using var fixture = DevOpsStoreFixture.Create();
@@ -5351,6 +5395,58 @@ public sealed class DevOpsStoreTests
     }
 
     [Fact]
+    public async Task Preview_delete_treats_missing_namespace_as_success()
+    {
+        var fakeKubectl = CreateFailingDeleteKubectl("Error from server (NotFound): namespaces \"devops-preview-task-4826-cv-hemsida\" not found");
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Preview:KubectlPath"] = fakeKubectl.Path,
+                    ["Preview:KubeconfigPath"] = ""
+                })
+                .Build();
+            var orchestrator = new PreviewEnvironmentOrchestrator(configuration, NullLogger<PreviewEnvironmentOrchestrator>.Instance);
+
+            var result = await orchestrator.DeleteAsync("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: devops-preview-task-4826-cv-hemsida\n", CancellationToken.None);
+
+            Assert.True(result.Succeeded);
+            Assert.Contains("already absent", result.Message);
+        }
+        finally
+        {
+            fakeKubectl.Directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Preview_delete_still_fails_for_forbidden_kubernetes_errors()
+    {
+        var fakeKubectl = CreateFailingDeleteKubectl("Error from server (Forbidden): namespaces \"devops-preview-task-4826-cv-hemsida\" is forbidden");
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Preview:KubectlPath"] = fakeKubectl.Path,
+                    ["Preview:KubeconfigPath"] = ""
+                })
+                .Build();
+            var orchestrator = new PreviewEnvironmentOrchestrator(configuration, NullLogger<PreviewEnvironmentOrchestrator>.Instance);
+
+            var result = await orchestrator.DeleteAsync("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: devops-preview-task-4826-cv-hemsida\n", CancellationToken.None);
+
+            Assert.False(result.Succeeded);
+            Assert.Contains("forbidden", result.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            fakeKubectl.Directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void Kubernetes_kubeconfig_resolver_uses_in_cluster_auth_for_empty_path()
     {
         var result = KubernetesKubeconfigResolver.Resolve("", ["C:\\does-not-need-to-exist"]);
@@ -8449,6 +8545,35 @@ if %errorlevel%==0 (
 )
 more > nul
 exit /b 0
+""");
+        return new FakeKubectl(directory, windowsScriptPath, argumentsPath);
+    }
+
+    private static FakeKubectl CreateFailingDeleteKubectl(string message)
+    {
+        var directory = Directory.CreateTempSubdirectory("fake-delete-kubectl-");
+        var argumentsPath = Path.Combine(directory.FullName, "arguments.txt");
+        if (!OperatingSystem.IsWindows())
+        {
+            var scriptPath = Path.Combine(directory.FullName, "kubectl");
+            File.WriteAllText(scriptPath, $$"""
+#!/usr/bin/env sh
+printf '%s\n' "$*" > '{{argumentsPath.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}'
+cat >/dev/null
+printf '%s\n' '{{message.Replace("'", "'\"'\"'", StringComparison.Ordinal)}}' >&2
+exit 1
+""");
+            File.SetUnixFileMode(scriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return new FakeKubectl(directory, scriptPath, argumentsPath);
+        }
+
+        var windowsScriptPath = Path.Combine(directory.FullName, "kubectl.cmd");
+        File.WriteAllText(windowsScriptPath, $$"""
+@echo off
+echo %* > "{{argumentsPath}}"
+more > nul
+echo {{message}} 1>&2
+exit /b 1
 """);
         return new FakeKubectl(directory, windowsScriptPath, argumentsPath);
     }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildShellBoardSelection, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePreviewForPrActionLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildPreviewLifecycleSteps, buildShellBoardSelection, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePreviewForPr, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, dedupeGeneratedActivityComments, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStatusMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByAnchor, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, timelineLaneForKind, unresolvedAiPlanReviewCommentCount, unresolvedReviewCommentCount, unresolvedReviewItemCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle } from './boardChrome.ts';
 import { renderInlineMarkdown } from './markdownInline.ts';
 
 test('sample board is displayed as demo and has no repository link', () => {
@@ -353,6 +353,19 @@ test('delivery mutations no longer send client-supplied audit identity fields', 
   assert.match(appSource, /\/cleanup-runs\/adopt`, \{ pullRequestUrl \}/);
   assert.doesNotMatch(appSource, /\{ actor \}/);
   assert.doesNotMatch(appSource, /approvedBy: actor|discardedBy: actor/);
+});
+
+test('preview PR approval is available for generated source when preview namespace is missing', () => {
+  const namespaceMissingPreview = {
+    status: 'Failed',
+    failureReason: 'NamespaceNotFound',
+    sourceFiles: [{ key: 'app', path: 'src/App.tsx', content: 'export default function App(){ return null; }' }]
+  };
+  const failedApplyPreview = { ...namespaceMissingPreview, failureReason: 'ApplyFailed' };
+
+  assert.equal(canApprovePreviewForPr(namespaceMissingPreview), true);
+  assert.equal(approvePreviewForPrActionLabel(namespaceMissingPreview), 'Create PR from generated source');
+  assert.equal(canApprovePreviewForPr(failedApplyPreview), false);
 });
 
 test('oidc auth tokens use session storage instead of persistent local storage', () => {

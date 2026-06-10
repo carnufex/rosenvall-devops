@@ -252,6 +252,7 @@ export type PreviewStepDisplay = PreviewLifecycleStep & {
 export type PreviewStepSource = {
   status?: string | null;
   failureReason?: string | null;
+  sourceFiles?: readonly unknown[] | null;
   terminalLines?: PreviewTerminalLineChrome[] | null;
   stepLogs?: PreviewStepLogChrome[] | null;
 };
@@ -428,6 +429,18 @@ export function pullRequestDisplayLabel(development: DevelopmentChrome): string 
 
 export function approvePullRequestActionLabel(development: DevelopmentChrome): string {
   return isLocalGitDevelopmentRecord(development) ? 'Merge local PR and deploy app' : 'Approve PR';
+}
+
+export function canApprovePreviewForPr(preview: PreviewStepSource | null | undefined): boolean {
+  if ((preview?.sourceFiles?.length ?? 0) === 0) return false;
+  if (preview?.status === 'Running') return true;
+  return preview?.status === 'Failed' && preview.failureReason === 'NamespaceNotFound';
+}
+
+export function approvePreviewForPrActionLabel(preview: PreviewStepSource | null | undefined): string {
+  return preview?.status === 'Failed' && preview.failureReason === 'NamespaceNotFound'
+    ? 'Create PR from generated source'
+    : 'Approve preview and create PR';
 }
 
 export function isReviewCommentResolved(comment: ReviewCommentStateChrome): boolean {

@@ -3770,7 +3770,10 @@ namespace Rosenvall.DevOps.Api
 
         public async Task<PreviewCleanupResult> DeleteAsync(string manifest, CancellationToken cancellationToken)
         {
-            return await RunKubectlAsync(["delete", "-f", "-", "--ignore-not-found=true"], manifest, cancellationToken);
+            var result = await RunKubectlAsync(["delete", "-f", "-", "--ignore-not-found=true"], manifest, cancellationToken);
+            return !result.Succeeded && IsKubernetesNotFound(result.Message)
+                ? PreviewCleanupResult.Ok("Preview Kubernetes resources were already absent.")
+                : result;
         }
 
         public async Task<PreviewHealthCheckResult> CheckHealthAsync(PreviewDto preview, CancellationToken cancellationToken)
@@ -4113,6 +4116,10 @@ namespace Rosenvall.DevOps.Api
         public static bool IsMissingPreviewNamespace(string message) =>
             message.Contains("Error from server (NotFound)", StringComparison.OrdinalIgnoreCase) &&
             message.Contains("namespaces", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("not found", StringComparison.OrdinalIgnoreCase);
+
+        public static bool IsKubernetesNotFound(string message) =>
+            message.Contains("Error from server (NotFound)", StringComparison.OrdinalIgnoreCase) &&
             message.Contains("not found", StringComparison.OrdinalIgnoreCase);
 
         private static ProcessStartInfo BuildStartInfo(string kubectlPath, KubernetesKubeconfigResolution kubeconfig, IReadOnlyList<string> arguments, bool redirectStandardInput)
@@ -11907,7 +11914,7 @@ namespace Rosenvall.DevOps.Api
 
                 var preview = _previews.SingleOrDefault(entry => entry.WorkItemId == workItemId);
                 if (preview is null ||
-                    !string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase) ||
+                    !CanCreatePullRequestFromPreview(preview) ||
                     preview.SourceFiles is not { Count: > 0 })
                 {
                     throw new InvalidOperationException("A running preview with generated source is required before creating a pull request.");
@@ -12005,6 +12012,11 @@ namespace Rosenvall.DevOps.Api
                 return runDto;
             }
         }
+
+        private static bool CanCreatePullRequestFromPreview(PreviewDto preview) =>
+            string.Equals(preview.Status, "Running", StringComparison.OrdinalIgnoreCase) ||
+            (string.Equals(preview.Status, "Failed", StringComparison.OrdinalIgnoreCase) &&
+             string.Equals(preview.FailureReason, "NamespaceNotFound", StringComparison.OrdinalIgnoreCase));
 
         public ImplementationRunDto? StartPullRequestReviewFixRun(Guid workItemId, StartPullRequestReviewFixRequest request, string? actorOverride = null)
         {

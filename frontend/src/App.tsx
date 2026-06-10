@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { createApiClient, isApiError, type AuthSession } from './apiClient';
-import { apiUnavailableBannerMessage, applicationUrlLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildShellBoardSelection, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
+import { apiUnavailableBannerMessage, applicationUrlLabel, approvePreviewForPrActionLabel, approvePullRequestActionLabel, boardDeleteCleanupMessage, boardNavigationItems, boardPublicAppStatusLabel, boardPublicAppUrl, boardRepositoryManagementCopy, boardRepositoryUrl, boardSyncLabel, buildCloneCommand, buildLocalPullRequestApprovalState, buildOverviewDeliverySummary, buildShellBoardSelection, buildTimelineFlow, canApproveAiPlanWithComments, canApprovePreviewForPr as canApprovePreviewForPrPreviewState, canApprovePullRequestWithComments, canCreateRepositoryInInstallation, canSyncBoardToProvider, committedSourceRef, containedWheelScrollTop, defaultPreviewStepKey, filterTimelineFlowRows, githubUserAuthorizationResultFromUrl, isActiveEpicGoalStatus, isLocalGitDevelopmentRecord, isPreviewTerminalLive, localGitProviderState, nextWorkItemTabKey, parseUnifiedDiffForContinuousReview, planReviewCommentCountsByRun, previewDisplayMessage, previewStepLogsForDisplay, publicApplicationUrls, pullRequestDiffLimitMessage, pullRequestDisplayLabel, repositoryCreatePermissionMessage, repositorySourceAvailability, reviewCommentCountsByFile, safeMarkdownHref, shouldRenderPlanReferenceActivity, splitAiPlanReviewBlocks, unresolvedReviewCommentCount, workItemAutosaveStatusLabel, workItemMetadataSummary, workItemModalTabs, workItemModalTitle, type AiPlanReviewBlock, type ContinuousDiffLine, type ContinuousDiffSection, type TimelineLane, type WorkItemAutosaveStatus, type WorkItemTabKey, type WorkItemTabRun } from './boardChrome';
 import { buildCodeLineRenderModel, codeHighlightLimitMessage, highlightCodeLines, plainHighlightedLines, splitCodeLines, type CodeLineKind, type CodeLineRenderModel, type HighlightedLine } from './codeHighlight';
 import { implementationActionState, isImplementationRunPendingStatus, repositoryRunPresentation, workflowForRepositoryProfile, type ImplementationWorkflow } from './implementationRetry';
 import { renderInlineMarkdown } from './markdownInline';
@@ -3239,8 +3239,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
   const cleanupReady = activeRepositoryCleanupRun?.status === 'PullRequestReady' || activeRepositoryCleanupRun?.status === 'Merged';
   const hasRepositoryPr = !!detail.item.pullRequestUrl || (detail.implementationRuns ?? []).some((run) => !!run.pullRequestUrl);
   const canApprovePreviewForPr = selectedWorkflow === 'preview-then-pr' &&
-    detail.preview?.status === 'Running' &&
-    (detail.preview.sourceFiles?.length ?? 0) > 0 &&
+    canApprovePreviewForPrPreviewState(detail.preview) &&
     !detail.development?.pullRequestUrl &&
     !isImplementationRunPendingStatus(activeImplementationRun?.status);
   const cleanupActionLabel = cleanupPending
@@ -4444,6 +4443,7 @@ function PreviewPanel({ preview, busy, busyLabel, onRetry, canApproveForPr = fal
   const retryLabel = stopped ? 'Recreate preview' : failedDuringSourceGeneration ? 'Retry preview implementation' : 'Retry preview setup';
   const steps = React.useMemo(() => previewStepLogsForDisplay(preview), [preview]);
   const approvingForPr = busy && busyLabel === 'Creating pull request from approved preview';
+  const approveLabel = approvePreviewForPrActionLabel(preview);
   const preferredStepKey = React.useMemo(() => defaultPreviewStepKey(steps), [steps]);
   const [selectedStepKey, setSelectedStepKey] = React.useState(preferredStepKey);
   React.useEffect(() => {
@@ -4461,8 +4461,8 @@ function PreviewPanel({ preview, busy, busyLabel, onRetry, canApproveForPr = fal
       {running
         ? <SafeExternalLink className="demo-link" href={preview.url}>Open demo environment <ExternalLink size={16} /></SafeExternalLink>
         : <button className="demo-link disabled" disabled>{waiting && <span className="spinner" />}{actionLabel}</button>}
-      {running && canApproveForPr && onApproveForPr && (
-        <button className="primary-action side-action" disabled={busy} onClick={() => void onApproveForPr()}>{approvingForPr ? <span className="spinner" /> : <GitPullRequest size={16} />}{approvingForPr ? 'Creating pull request...' : 'Approve preview and create PR'}</button>
+      {canApproveForPr && onApproveForPr && (
+        <button className="primary-action side-action" disabled={busy} onClick={() => void onApproveForPr()}>{approvingForPr ? <span className="spinner" /> : <GitPullRequest size={16} />}{approvingForPr ? 'Creating pull request...' : approveLabel}</button>
       )}
       {approvingForPr && <p className="namespace-note">Job accepted, waiting for Kubernetes runner to create the pull request...</p>}
       <ol className="preview-stepper" aria-label="Preview lifecycle">
