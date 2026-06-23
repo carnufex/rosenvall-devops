@@ -16,9 +16,24 @@
   --amber: #f59e0b;
   --danger: #f87171;
   --focus: #67e8f9;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  /* Type stacks (these were referenced across the app but never defined) */
+  --font: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --display: Geist, Inter, ui-sans-serif, system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  /* Elevation scale — consistent shadows instead of ad-hoc values */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.34);
+  --shadow-lg: 0 18px 38px rgba(0, 0, 0, 0.4);
+  --shadow-xl: 0 28px 64px rgba(0, 0, 0, 0.52);
+  /* Motion tokens — one rhythm for the whole app */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 130ms;
+  --dur: 180ms;
+  font-family: var(--font);
   background: var(--bg);
   color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 * { box-sizing: border-box; }
@@ -700,3 +715,227 @@ pre { background: #090a0b; border: 1px solid var(--line); color: #99f6e4; paddin
   .modal-backdrop { padding: 12px; place-items: start center; }
   .modal { max-height: calc(100vh - 24px); }
 }
+
+/* ============================================================================
+   Modernization layer — appended last so it refines the system above without
+   touching application markup. Focus: accessibility, readable code, and a
+   single, calm motion rhythm. Grouped so any part is easy to review or revert.
+   ========================================================================== */
+
+/* 1. Code surfaces actually render monospace now that --mono is defined ------ */
+code, pre, .terminal-line, .terminal-body, .diff-line, .source-code,
+.copy-row code, .log-run-meta code { font-family: var(--mono); }
+
+/* 2. Keyboard accessibility — one visible, consistent focus ring everywhere.
+      Mouse users keep clean hover states; only keyboard nav shows the ring. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+button:focus-visible,
+.nav-item:focus-visible,
+.card:focus-visible,
+.link-button:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: none; /* these already show a focus border + ring below */
+}
+
+/* 3. Calmer, unified motion on the interactive primitives. Color/shadow only
+      (never layout) so nothing jitters or shifts neighbouring content. */
+.nav-item, .icon-button, .secondary, .primary-action, .danger-button,
+.card, .metric, .toast, .source-entry, .log-run-list button,
+.diff-files button, .timeline-flow-node, .team-select, .work-item-tabs button {
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+/* 4. Tactile press feedback — subtle, restores on release (skill: scale-feedback) */
+.primary-action:active:not(:disabled),
+.secondary:active:not(:disabled),
+.danger-button:active:not(:disabled),
+.icon-button:active:not(:disabled) { transform: scale(0.97); }
+
+/* 5. Cards lift on hover via shadow (no transform → no neighbour shift) ------- */
+.card:hover { box-shadow: var(--shadow-md); }
+.metric:hover { border-color: var(--line-strong); }
+
+/* 6. Refined elevation on floating surfaces ---------------------------------- */
+.modal { box-shadow: var(--shadow-xl); }
+.user-menu-popover, .work-item-metadata-dialog { box-shadow: var(--shadow-lg); }
+.toast { box-shadow: var(--shadow-md); }
+.drawer { box-shadow: var(--shadow-xl); }
+
+/* 7. Sidebar active item reads more clearly ---------------------------------- */
+.nav-item.active { box-shadow: inset 3px 0 0 var(--secondary), var(--shadow-sm); }
+
+/* 8. Primary CTA gains a touch of depth so the one action per screen pops ----- */
+.primary-action:not(:disabled) { box-shadow: var(--shadow-sm); }
+
+/* 9. Slim, theme-aware scrollbars so dense scroll regions feel intentional ---- */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+
+/* 10. Text selection on-brand ------------------------------------------------ */
+::selection { background: rgba(45, 212, 191, 0.28); color: var(--text); }
+
+/* 11. Headings use the display face explicitly (Geist now loads) ------------- */
+h1, h2, .brand-name { font-family: var(--display); }
+h1 { letter-spacing: -0.01em; }
+
+/* 12. Smooth in-page scrolling for anchored navigation ----------------------- */
+html { scroll-behavior: smooth; }
+
+/* 13. Respect reduced-motion — disable non-essential animation & smooth scroll */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================================
+   Elevation layer 2 — depth, atmosphere and an AI-forward identity.
+   Subtle by design: gradients are barely-there top-light, never decorative
+   noise (skill: trend-emphasis). Everything keys off the existing tokens.
+   ========================================================================== */
+
+/* Ambient depth — a faint brand glow anchors the workspace without tinting it */
+.app-shell {
+  background:
+    radial-gradient(1200px 620px at 78% -8%, rgba(45, 212, 191, 0.06), transparent 58%),
+    radial-gradient(900px 520px at 8% 4%, rgba(103, 232, 249, 0.04), transparent 55%),
+    var(--bg-low);
+}
+
+/* Sidebar reads as a distinct rail with a soft inner edge */
+.sidebar {
+  background:
+    linear-gradient(180deg, rgba(45, 212, 191, 0.04), transparent 220px),
+    #0f1011;
+}
+.brand-mark {
+  background:
+    linear-gradient(180deg, var(--surface-top), var(--surface-high));
+  box-shadow: 0 0 18px rgba(45, 212, 191, 0.12), var(--shadow-sm);
+}
+
+/* Top-light on raised surfaces gives cards real dimensionality */
+.metric, .panel, .column, .card, .comment, .ai-comment,
+.cleanup-status-card, .connected, .settings-row, .team-card {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.022), transparent 96px);
+}
+
+/* Glass top bar that floats over scrolled content */
+.topbar {
+  background: linear-gradient(180deg, rgba(15, 16, 17, 0.86), rgba(12, 13, 14, 0.72));
+  backdrop-filter: blur(14px) saturate(1.2);
+}
+.search:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.12);
+  color: var(--text);
+}
+
+/* Primary CTA: premium monochrome with a hint of lift */
+.primary-action {
+  background: linear-gradient(180deg, #ffffff, #e9e8e6);
+  border-color: #ffffff;
+}
+.primary-action:not(:disabled):hover { background: linear-gradient(180deg, #ffffff, #dddbd8); }
+
+/* Board: columns become legible lanes, empty ones invite a first card --------- */
+.board { gap: 16px; }
+.column {
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 120px),
+    #101113;
+}
+.column-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: linear-gradient(180deg, #121315, rgba(18, 19, 21, 0.88));
+  backdrop-filter: blur(6px);
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+.ai-column .column-head { background: linear-gradient(180deg, rgba(245, 158, 11, 0.12), rgba(18, 19, 21, 0.88)); }
+.card-stack:empty {
+  margin: 10px;
+  min-height: 96px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.card-stack:empty::after {
+  content: "Drop a card here";
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.7;
+}
+.column.over .card-stack:empty {
+  border-color: var(--focus);
+  background: rgba(103, 232, 249, 0.06);
+}
+
+/* Cards: clearer hierarchy and a crisp key chip ------------------------------ */
+.card { border-radius: 10px; }
+.card h3 { margin: 10px 0 0; font-size: 14px; line-height: 20px; color: var(--text); }
+.card-row code {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--surface-high);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 6px;
+  letter-spacing: 0.02em;
+}
+
+/* AI is the product's spine — give AI surfaces a consistent, recognisable glow */
+.ai-card { box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.14); }
+.ai-card:hover { box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.24), var(--shadow-md); }
+.ai-state { font-weight: 700; }
+.inline-progress, .implementation-banner { box-shadow: inset 0 0 22px rgba(245, 158, 11, 0.06); }
+
+/* Metric cards: the headline number earns its size ---------------------------- */
+.metric { border-radius: 12px; }
+.metric strong { letter-spacing: -0.02em; font-weight: 800; }
+.metric:hover { box-shadow: var(--shadow-md); }
+
+/* Status pills: a touch more presence at a glance ---------------------------- */
+.state-good, .state-warn, .state-bad, .state-muted,
+.type, .preview-chip { font-weight: 800; letter-spacing: 0.01em; }
+
+/* Modals float higher with a soft scrim so focus is unmistakable ------------- */
+.modal-backdrop { background: rgba(4, 5, 6, 0.66); backdrop-filter: blur(3px); }
+
+/* Toasts slide in with intent (and stay still under reduced-motion) ---------- */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.toast { animation: toast-in var(--dur) var(--ease); }

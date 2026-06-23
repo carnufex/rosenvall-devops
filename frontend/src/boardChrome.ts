@@ -729,8 +729,12 @@ export function pullRequestDiffLimitMessage(diff: PullRequestDiffLimitChrome): s
   return [providerMessage, loaded, limit].filter(Boolean).join(' ');
 }
 
-export function boardDeleteCleanupMessage(boardName: string): string {
-  return `Delete ${boardName}, clean Kubernetes runtime resources, and delete board-owned Local Git repositories? GitHub repositories and PRs will remain.`;
+export function boardDeleteCleanupMessage(boardName: string, deleteSourceRepositories = false): string {
+  if (deleteSourceRepositories) {
+    return `Delete ${boardName}, clean Kubernetes runtime resources, and delete board-owned Local Git source repositories? GitHub repositories and PRs will remain.`;
+  }
+
+  return `Delete ${boardName} and clean Kubernetes runtime resources? Source repositories will be kept; GitHub repositories and PRs will remain.`;
 }
 
 export function localGitProviderState(repositories: RepositoryHostingChrome): { visible: boolean; available: boolean; message: string } {

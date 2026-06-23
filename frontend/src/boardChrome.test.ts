@@ -341,7 +341,7 @@ test('normal work item comments no longer send client-supplied identity fields',
 test('delivery mutations no longer send client-supplied audit identity fields', () => {
   const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
 
-  assert.match(appSource, /\/delete-and-clean-up`, \{\}/);
+  assert.match(appSource, /\/delete-and-clean-up`, \{ deleteSourceRepositories:/);
   assert.match(appSource, /\/preview\/start`, \{\}/);
   assert.match(appSource, /\/preview\/stop`, \{\}/);
   assert.match(appSource, /\/preview\/approve-for-pr`, \{\}/);
@@ -480,11 +480,35 @@ test('local pull request approval state blocks merged closed and commented prs',
   assert.match(commented.message, /Resolve 2 review comments/);
 });
 
-test('board delete confirmation includes board-owned local git cleanup but excludes github deletion', () => {
+test('board delete confirmation keeps source repositories by default', () => {
   const message = boardDeleteCleanupMessage('Demo app');
 
-  assert.match(message, /board-owned Local Git repositories/);
+  assert.match(message, /Source repositories will be kept/);
+  assert.match(message, /clean Kubernetes runtime resources/);
+});
+
+test('board delete confirmation can explicitly include local git source deletion', () => {
+  const message = boardDeleteCleanupMessage('Demo app', true);
+
+  assert.match(message, /delete board-owned Local Git source repositories/);
   assert.match(message, /GitHub repositories and PRs will remain/);
+});
+
+test('board danger zone requires explicit local git source deletion opt-in', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /deleteSourceRepositories/);
+  assert.match(appSource, /Ta bort boardens LocalGit-källkod också/);
+  assert.match(appSource, /Local Git and GitHub source repositories are kept unless source deletion is explicitly selected/);
+});
+
+test('settings exposes admin-only local git repository management', () => {
+  const appSource = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /LocalGitAdminPanel/);
+  assert.match(appSource, /\/api\/admin\/local-git\/repositories/);
+  assert.match(appSource, /\/api\/admin\/local-git\/repositories\/delete/);
+  assert.match(appSource, /localGitAdminAvailable/);
 });
 
 test('local git provider state stays visible when forgejo is unavailable', () => {

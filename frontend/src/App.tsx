@@ -1368,9 +1368,9 @@ function App() {
         await refreshAfterChange(id);
       });
     },
-    deleteBoard: async (boardId) => {
+    deleteBoard: async (boardId, deleteSource = false) => {
       return runAction('Deleting board and cleaning runtime resources', async () => {
-        await api.post<BoardCleanupRunDto>(`/api/boards/${boardId}/delete-and-clean-up`, {});
+        await api.post<BoardCleanupRunDto>(`/api/boards/${boardId}/delete-and-clean-up`, { deleteSourceRepositories: deleteSource });
         addToast('info', 'Board cleanup started. Follow progress in Danger Zone logs.');
         await loadShell(boardId, { silentBusy: true });
       });
@@ -1493,6 +1493,12 @@ function App() {
       return runAction('Deleting board secret', async () => {
         await api.delete(`/api/boards/${boardId}/secrets/${secretId}`);
         await refreshAfterChange(selected.status === 'open' ? selected.detail.item.id : undefined);
+      });
+    },
+    listLocalGitAdminRepositories: () => api.get<LocalGitAdminRepositoryDto[]>('/api/admin/local-git/repositories'),
+    deleteLocalGitAdminRepository: async (owner, name) => {
+      return runAction('Deleting Local Git repository', async () => {
+        await api.post('/api/admin/local-git/repositories/delete', { owner, name });
       });
     },
     updateBoardGitOpsSettings: async (boardId, settings) => {
@@ -1993,7 +1999,7 @@ type BoardActions = {
   autosaveCard(id: string, form: WorkItemForm): Promise<boolean>;
   updateCardHierarchy(id: string, parentWorkItemId: string | null): Promise<boolean>;
   deleteCard(id: string): Promise<boolean>;
-  deleteBoard(boardId: string): Promise<boolean>;
+  deleteBoard(boardId: string, deleteSourceRepositories?: boolean): Promise<boolean>;
   startAiPlan(id: string): Promise<boolean>;
   startEpicRun(workItemId: string): Promise<boolean>;
   startEpicGoal(workItemId: string): Promise<boolean>;
@@ -2008,6 +2014,8 @@ type BoardActions = {
   adoptCleanupPullRequest(workItemId: string, pullRequestUrl: string): Promise<boolean>;
   createBoardSecret(boardId: string, key: string, value: string, repositoryId?: string | null): Promise<boolean>;
   deleteBoardSecret(boardId: string, secretId: string): Promise<boolean>;
+  listLocalGitAdminRepositories(): Promise<LocalGitAdminRepositoryDto[]>;
+  deleteLocalGitAdminRepository(owner: string, name: string): Promise<boolean>;
   updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<boolean>;
   updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<boolean>;
   updateBoardHosting(boardId: string, settings: { publicHostname?: string | null; implementationWorkflow?: string | null }): Promise<boolean>;
@@ -3168,7 +3176,7 @@ function WorkItemCard({ item, actions }: { item: WorkItemSummary; actions: Board
         <code>{item.key}</code>
       </div>
       <h3>{item.title}</h3>
-      {(item.parentKey || item.childCount) && (
+      {(item.parentKey || (item.childCount ?? 0) > 0) && (
         <div className="hierarchy-chip">
           {item.parentKey ? <span>{item.parentKey}</span> : <span>Root</span>}
           {(item.childCount ?? 0) > 0 && <strong>{item.doneChildCount ?? 0}/{item.childCount} done</strong>}
@@ -3571,6 +3579,7 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
               onApproveDiff={async () => {
                 const approved = await actions.approvePullRequest(detail.item.id);
                 if (approved) {
+                  const approver = actor;
                   setPullRequestDiffState((current) => current.status === 'loaded'
                     ? {
                         ...current,
@@ -3578,12 +3587,12 @@ function WorkItemModal({ detail, aiRuns, busy, busyLabel, board, aiProvider, aiM
                           ...current.diff,
                           state: 'closed',
                           pullRequestApprovedAt: new Date().toISOString(),
-                          pullRequestApprovedBy: actor,
+                          pullRequestApprovedBy: approver,
                           pullRequestMergedAt: current.diff.pullRequestMergedAt ?? new Date().toISOString(),
                           pullRequestFailure: null,
                           canApprove: false,
                           approvalStatus: 'merged',
-                          approvalMessage: `Merged and deployed by ${actor}.`
+                          approvalMessage: `Merged and deployed by ${approver}.`
                         }
                       }
                     : current);
@@ -5580,6 +5589,103 @@ function TeamsView({ teams, boards, me, actions }: {
   );
 }
 
+type LocalGitAdminRepositoryDto = {
+  owner: string;
+  name: string;
+  fullName: string;
+  htmlUrl?: string | null;
+  updatedAt?: string | null;
+  empty?: boolean;
+};
+
+function formatRepositoryTimestamp(value?: string | null): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toLocaleString();
+}
+
+function LocalGitAdminPanel({ actions }: { actions: BoardActions }) {
+  const [repositories, setRepositories] = React.useState<LocalGitAdminRepositoryDto[] | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = React.useState<string | null>(null);
+  const [busyKey, setBusyKey] = React.useState<string | null>(null);
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setRepositories(await actions.listLocalGitAdminRepositories());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load Local Git repositories.');
+      setRepositories([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [actions]);
+
+  React.useEffect(() => { void load(); }, [load]);
+
+  const removeRepository = async (repo: LocalGitAdminRepositoryDto) => {
+    const key = `${repo.owner}/${repo.name}`;
+    setBusyKey(key);
+    const removed = await actions.deleteLocalGitAdminRepository(repo.owner, repo.name);
+    setBusyKey(null);
+    setPendingDelete(null);
+    if (removed) {
+      setRepositories((current) => (current ?? []).filter((entry) => `${entry.owner}/${entry.name}` !== key));
+    }
+  };
+
+  return (
+    <section className="panel form-panel">
+      <div className="panel-heading-row">
+        <div>
+          <strong>Local Git repositories</strong>
+          <p>Admin-only. Manually remove orphaned Forgejo repositories that board cleanup could not delete.</p>
+        </div>
+        <button className="secondary compact inline" onClick={() => void load()} disabled={loading} type="button">
+          <RefreshCw size={14} />Refresh
+        </button>
+      </div>
+      {error && <p className="inline-error">{error}</p>}
+      {loading && repositories === null
+        ? <p className="empty-state"><span className="spinner" /> Loading repositories…</p>
+        : repositories && repositories.length > 0
+          ? (
+            <div className="settings-list">
+              {repositories.map((repo) => {
+                const key = `${repo.owner}/${repo.name}`;
+                const confirming = pendingDelete === key;
+                const busy = busyKey === key;
+                const updated = formatRepositoryTimestamp(repo.updatedAt);
+                return (
+                  <div className="settings-row" key={key}>
+                    <div>
+                      <strong>{repo.fullName}</strong>
+                      <p>{repo.empty ? 'Empty repository' : 'Has commits'}{updated ? ` · updated ${updated}` : ''}</p>
+                    </div>
+                    <div className="repository-settings-actions">
+                      {repo.htmlUrl && <a className="link-button" href={repo.htmlUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} />Open</a>}
+                      {confirming
+                        ? (
+                          <>
+                            <button className="danger-button compact" onClick={() => void removeRepository(repo)} disabled={busy} type="button">{busy ? <span className="spinner" /> : <Trash2 size={14} />}Confirm delete</button>
+                            <button className="secondary compact inline" onClick={() => setPendingDelete(null)} disabled={busy} type="button">Cancel</button>
+                          </>
+                        )
+                        : <button className="danger-button compact" onClick={() => setPendingDelete(key)} type="button"><Trash2 size={14} />Delete</button>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
+          : <p className="empty-state">No Local Git repositories found.</p>}
+    </section>
+  );
+}
+
 function SettingsView({ scope, settings, apiStatus, board, me, repositories, boardSecrets, githubIntegrations, selectedProvider, selectedModel, selectedReasoning, actions, onProviderChange, onModelChange, onReasoningChange, onSyncBoard, onBack }: {
   scope: 'global' | 'board' | 'ai' | 'environment';
   settings: SettingsDto;
@@ -5613,6 +5719,7 @@ function SettingsView({ scope, settings, apiStatus, board, me, repositories, boa
   const gitHubConnected = settings.gitHub.connected || githubIntegrations.length > 0;
   const gitHubAccount = latestGitHubIntegration ? `${latestGitHubIntegration.accountLogin} (${latestGitHubIntegration.accountType})` : settings.gitHub.account;
   const gitHubTarget = latestGitHubIntegration ? `${latestGitHubIntegration.repositoriesCount} repositories granted` : settings.gitHub.targetRepository;
+  const localGitAdminAvailable = settings.repositories.localGitAvailable ?? false;
 
   async function saveSecret(event: React.FormEvent) {
     event.preventDefault();
@@ -5685,6 +5792,10 @@ function SettingsView({ scope, settings, apiStatus, board, me, repositories, boa
           <p className={activeProvider.status === 'Ready' ? 'provider-status ready' : 'provider-status'}>{activeProvider.displayName} status: {activeProvider.status === 'LoginRequired' ? 'Login required on server' : activeProvider.status}.</p>
           <label>Auto review pull requests<input value={settings.ai.autoReviewPullRequests ? 'Enabled' : 'Disabled'} readOnly /></label>
         </section>
+        {localGitAdminAvailable && <>
+          <SectionTitle icon={<GitBranch size={22} />} title="Local Git administration" />
+          <LocalGitAdminPanel actions={actions} />
+        </>}
         </>}
         {scope === 'board' && <>
         <SectionTitle icon={<ExternalLink size={22} />} title="Hosting workflow" />
@@ -5912,6 +6023,7 @@ function BoardDangerZone({ board, actions }: { board: Board; actions: BoardActio
   const [logsOpen, setLogsOpen] = React.useState(false);
   const [loadingLogs, setLoadingLogs] = React.useState(false);
   const [deletePending, setDeletePending] = React.useState(false);
+  const [deleteSourceRepositories, setDeleteSourceRepositories] = React.useState(false);
   const expected = board.name;
   const canDelete = confirmText === expected;
   const latestRun = cleanupRuns[0] ?? null;
@@ -5941,10 +6053,10 @@ function BoardDangerZone({ board, actions }: { board: Board; actions: BoardActio
 
   const startCleanup = async () => {
     if (!canDelete || deletePending) return;
-    if (!confirm(boardDeleteCleanupMessage(board.name))) return;
+    if (!confirm(boardDeleteCleanupMessage(board.name, deleteSourceRepositories))) return;
     setDeletePending(true);
     try {
-      await actions.deleteBoard(board.id);
+      await actions.deleteBoard(board.id, deleteSourceRepositories);
       setConfirmText('');
       await loadCleanupRuns();
     } finally {
@@ -5978,6 +6090,11 @@ function BoardDangerZone({ board, actions }: { board: Board; actions: BoardActio
             <button className="secondary compact" type="button" onClick={() => setLogsOpen(true)}><SquareTerminal size={14} />View logs</button>
           </div>
         )}
+        <label className="checkbox-row">
+          <input type="checkbox" checked={deleteSourceRepositories} onChange={(event) => setDeleteSourceRepositories(event.target.checked)} />
+          Ta bort boardens LocalGit-källkod också
+        </label>
+        <p className="provider-status">Local Git and GitHub source repositories are kept unless source deletion is explicitly selected. Only board-owned Local Git repositories are removed when you opt in; GitHub repositories and PRs always remain.</p>
         <label>Type board name to confirm<input value={confirmText} onChange={(event) => setConfirmText(event.target.value)} placeholder={expected} /></label>
         <div className="settings-inline">
           <button className="danger-button" type="button" disabled={!canDelete || deletePending || cleanupActive} onClick={() => void startCleanup()}>{deletePending ? <span className="spinner" /> : <Trash2 size={16} />}{cleanupActive ? 'Cleanup running' : 'Delete board and clean up'}</button>

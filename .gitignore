@@ -18,3 +18,5 @@ devops-state.db-wal
 .env
 .env.*
 !.env.example
+
+.playwright-mcp/

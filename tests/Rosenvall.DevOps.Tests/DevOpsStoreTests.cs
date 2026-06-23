@@ -960,7 +960,7 @@ public sealed class DevOpsStoreTests
         Assert.Contains("BoardCleanupActionIdempotencyKey(actorSubject, boardId)", boardEndpoint);
         Assert.Contains("ActionLedgerBlockReasons.CleanupActionKinds", boardEndpoint);
         Assert.Contains("ActionQuotaExceededResult(actionStart)", boardEndpoint);
-        Assert.Contains("store.StartBoardCleanupRun(boardId, actor, actionStart.Action!.Id)", boardEndpoint);
+        Assert.Contains("store.StartBoardCleanupRun(boardId, actor, actionStart.Action!.Id, request.DeleteSourceRepositories)", boardEndpoint);
         Assert.Contains("Results.Accepted($\"/api/board-cleanup-runs/{cleanupRun.Id}\", cleanupRun)", boardEndpoint);
         Assert.DoesNotContain("previews.DeleteAsync", boardEndpoint);
 
@@ -980,7 +980,7 @@ public sealed class DevOpsStoreTests
         var workspace = store.GetWorkspaces().First();
         var board = store.GetBoards(workspace.Id).First();
         var action = store.StartAction("demo", board.Id, null, "board-cleanup", $"board-cleanup:demo:{board.Id:N}");
-        var run = store.StartBoardCleanupRun(board.Id, "Demo", action.Action!.Id)!;
+        var run = store.StartBoardCleanupRun(board.Id, "Demo", action.Action!.Id, deleteSourceRepositories: false)!;
 
         store.MarkActionRun(action.Action.Id, run.Id, "Queued");
         store.UpdateBoardCleanupRun(run.Id, "DeletingKubernetes", "Kubernetes", "Deleting Kubernetes resources.");
@@ -991,8 +991,39 @@ public sealed class DevOpsStoreTests
         Assert.Equal("Failed", persisted.Status);
         Assert.Equal("Kubernetes", persisted.Phase);
         Assert.Equal("Forbidden", persisted.FailureReason);
+        Assert.False(persisted.DeleteSourceRepositories);
         Assert.Contains(persisted.TerminalLines ?? [], line => line.Message.Contains("Deleting Kubernetes resources.", StringComparison.Ordinal));
         Assert.Contains(reopened.GetActionLedger(), entry => entry.Id == action.Action.Id && entry.RunId == run.Id);
+    }
+
+    [Fact]
+    public void Board_cleanup_run_defaults_to_keep_local_git_source_repositories()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var action = store.StartAction("demo", board.Id, null, "board-cleanup", $"board-cleanup:demo:{board.Id:N}");
+
+        var run = store.StartBoardCleanupRun(board.Id, "Demo", action.Action!.Id, deleteSourceRepositories: false)!;
+
+        Assert.False(run.DeleteSourceRepositories);
+        Assert.Contains(run.TerminalLines ?? [], line => line.Message.Contains("Local Git source repositories will be kept", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Board_cleanup_run_can_opt_into_local_git_source_deletion()
+    {
+        using var fixture = DevOpsStoreFixture.Create();
+        var store = fixture.Store;
+        var workspace = store.GetWorkspaces().First();
+        var board = store.GetBoards(workspace.Id).First();
+        var action = store.StartAction("demo", board.Id, null, "board-cleanup", $"board-cleanup:demo:{board.Id:N}");
+
+        var run = store.StartBoardCleanupRun(board.Id, "Demo", action.Action!.Id, deleteSourceRepositories: true)!;
+
+        Assert.True(run.DeleteSourceRepositories);
+        Assert.Contains(run.TerminalLines ?? [], line => line.Message.Contains("board-owned Local Git repositories", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -2238,6 +2269,33 @@ public sealed class DevOpsStoreTests
         Assert.Contains("RecordLocalGitServiceCredentialAudit", sourceEndpoints);
         Assert.Contains("RecordLocalGitServiceCredentialAudit", publicAppReconciler);
         Assert.Contains("RecordLocalGitServiceCredentialAudit", boardCleanupReconciler);
+    }
+
+    [Fact]
+    public void Board_cleanup_reconciler_keeps_local_git_source_repositories_unless_opted_in()
+    {
+        var root = FindRepositoryRoot();
+        var reconciler = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Runtime", "Monitors", "BoardCleanupRunReconciler.cs"));
+
+        Assert.Contains("!run.DeleteSourceRepositories", reconciler);
+        Assert.Contains("Local Git source repositories were kept.", reconciler);
+        Assert.True(
+            reconciler.IndexOf("Local Git source repositories were kept.", StringComparison.Ordinal) <
+            reconciler.IndexOf("DeleteBoardMetadataAsync", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void LocalGit_admin_endpoints_are_admin_only_and_support_manual_delete()
+    {
+        var root = FindRepositoryRoot();
+        var program = File.ReadAllText(Path.Combine(root, "src", "Rosenvall.DevOps.Api", "Program.cs"));
+
+        Assert.Contains("api.MapGet(\"/admin/local-git/repositories\"", program);
+        Assert.Contains("api.MapPost(\"/admin/local-git/repositories/delete\"", program);
+        Assert.Contains("CanManageLocalGitAdminRequest(store, user)", program);
+        Assert.Contains("DeleteLocalGitAdminRepositoryRequest", program);
+        Assert.Contains("ListRepositoriesAsync", program);
+        Assert.Contains("DeleteRepositoryResultAsync(request.Owner, request.Name", program);
     }
 
     [Fact]

@@ -332,6 +332,35 @@ api.MapGet("/status", async (IConfiguration configuration, DevOpsStore store, Fo
         await localGit.CheckReadinessAsync(cancellationToken),
         store.GetDemoSandboxPolicyStatus())));
 
+api.MapGet("/admin/local-git/repositories", async (ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, CancellationToken cancellationToken) =>
+{
+    if (!CanManageLocalGitAdminRequest(store, user))
+    {
+        return Results.Problem("Local Git administration is restricted to platform admins.", statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var repositories = await localGit.ListRepositoriesAsync(cancellationToken);
+    return Results.Ok(repositories);
+});
+
+api.MapPost("/admin/local-git/repositories/delete", async (DeleteLocalGitAdminRepositoryRequest request, ClaimsPrincipal user, DevOpsStore store, ForgejoRepositoryClient localGit, CancellationToken cancellationToken) =>
+{
+    if (!CanManageLocalGitAdminRequest(store, user))
+    {
+        return Results.Problem("Local Git administration is restricted to platform admins.", statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    if (string.IsNullOrWhiteSpace(request.Owner) || string.IsNullOrWhiteSpace(request.Name))
+    {
+        return Results.Problem("Repository owner and name are required.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var result = await localGit.DeleteRepositoryResultAsync(request.Owner, request.Name, cancellationToken);
+    return result.Succeeded
+        ? Results.Ok(result)
+        : Results.Problem(result.Message, statusCode: StatusCodes.Status502BadGateway);
+});
+
 BoardEndpoints.Map(api);
 
 api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, IConfiguration configuration) =>
@@ -380,7 +409,7 @@ api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", (Guid boardId, DeleteA
             });
     }
 
-    var cleanupRun = store.StartBoardCleanupRun(boardId, actor, actionStart.Action!.Id);
+    var cleanupRun = store.StartBoardCleanupRun(boardId, actor, actionStart.Action!.Id, request.DeleteSourceRepositories);
     if (cleanupRun is null)
     {
         store.MarkActionFailed(actionStart.Action!.Id, "Board was not found.");
@@ -2128,6 +2157,9 @@ static bool CanViewWorkItemRequest(DevOpsStore store, Guid workItemId, ClaimsPri
 
 static bool CanViewImplementationRunRequest(DevOpsStore store, Guid implementationRunId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanViewImplementationRun(implementationRunId, UserIdentityFromClaims(user).Subject);
+
+static bool CanManageLocalGitAdminRequest(DevOpsStore store, ClaimsPrincipal user) =>
+    user.Identity?.IsAuthenticated != true || store.CanManageLocalGitAdministration(UserIdentityFromClaims(user).Subject);
 
 static bool CanViewPipelineRunRequest(DevOpsStore store, Guid pipelineRunId, ClaimsPrincipal user) =>
     user.Identity?.IsAuthenticated != true || store.CanViewPipelineRun(pipelineRunId, UserIdentityFromClaims(user).Subject);
@@ -6434,14 +6466,24 @@ namespace Rosenvall.DevOps.Api
             return result.Succeeded;
         }
 
-        public async Task<LocalGitRepositoryMutationResult> DeleteRepositoryResultAsync(RepositoryDto repository, CancellationToken cancellationToken)
+        public Task<LocalGitRepositoryMutationResult> DeleteRepositoryResultAsync(RepositoryDto repository, CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(repository.Owner) || string.IsNullOrWhiteSpace(repository.Name))
             {
-                return new LocalGitRepositoryMutationResult(false, "Local Git repository metadata is missing owner or name.");
+                return Task.FromResult(new LocalGitRepositoryMutationResult(false, "Local Git repository metadata is missing owner or name."));
             }
 
-            using var request = CreateForgejoRequest(HttpMethod.Delete, $"{ApiBaseUrl(configuration)}/repos/{Uri.EscapeDataString(repository.Owner)}/{Uri.EscapeDataString(repository.Name)}");
+            return DeleteRepositoryResultAsync(repository.Owner!, repository.Name, cancellationToken);
+        }
+
+        public async Task<LocalGitRepositoryMutationResult> DeleteRepositoryResultAsync(string owner, string name, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(name))
+            {
+                return new LocalGitRepositoryMutationResult(false, "Local Git repository owner or name is missing.");
+            }
+
+            using var request = CreateForgejoRequest(HttpMethod.Delete, $"{ApiBaseUrl(configuration)}/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(name)}");
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound)
             {
@@ -6457,6 +6499,59 @@ namespace Rosenvall.DevOps.Api
                 $"Forgejo delete failed with {(int)response.StatusCode} {response.ReasonPhrase}: {TrimError(detail)}",
                 response.StatusCode);
         }
+
+        public async Task<IReadOnlyList<LocalGitAdminRepositoryDto>> ListRepositoriesAsync(CancellationToken cancellationToken)
+        {
+            var owner = Owner;
+            var url = $"{ApiBaseUrl(configuration)}/repos/search?limit=50&sort=updated&order=desc";
+            if (!string.IsNullOrWhiteSpace(owner))
+            {
+                url += $"&q={Uri.EscapeDataString(owner)}";
+            }
+
+            using var request = CreateForgejoRequest(HttpMethod.Get, url);
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new RepositorySourceProviderException(
+                    "LocalGit",
+                    response.StatusCode,
+                    await RepositorySourceFeature.ProviderResponseDetailAsync(response, cancellationToken));
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var root = document.RootElement;
+            var entries = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array
+                ? data
+                : root;
+            if (entries.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return entries.EnumerateArray()
+                .Select(repo =>
+                {
+                    var repoOwner = repo.TryGetProperty("owner", out var ownerElement) && ownerElement.ValueKind == JsonValueKind.Object
+                        ? FirstNonEmpty(GetString(ownerElement, "login"), GetString(ownerElement, "username"), owner)
+                        : owner;
+                    var name = GetString(repo, "name");
+                    var empty = repo.TryGetProperty("empty", out var emptyElement) && emptyElement.ValueKind == JsonValueKind.True;
+                    return new LocalGitAdminRepositoryDto(
+                        NormalizeText(repoOwner, owner),
+                        NormalizeText(name, "unknown"),
+                        NormalizeText(FirstNonEmpty(GetString(repo, "full_name"), $"{repoOwner}/{name}"), "unknown"),
+                        EmptyToNull(GetString(repo, "html_url")),
+                        EmptyToNull(GetString(repo, "updated_at")),
+                        empty);
+                })
+                .Where(repo => !string.IsNullOrWhiteSpace(repo.Name) && repo.Name != "unknown")
+                .OrderBy(repo => repo.FullName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static string? EmptyToNull(string value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
         public async Task<RepositorySourceTreeDto?> GetSourceTreeAsync(RepositoryDto repository, string reference, string path, CancellationToken cancellationToken)
         {
@@ -9811,6 +9906,21 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        public bool CanManageLocalGitAdministration(string actorSubject)
+        {
+            lock (_lock)
+            {
+                var user = _users.SingleOrDefault(entry => entry.Subject.Equals(actorSubject, StringComparison.OrdinalIgnoreCase));
+                if (user is null)
+                {
+                    return !HasAnyTeamOrAccess();
+                }
+
+                return _teams.Any(team => team.Members.Any(member =>
+                    member.UserId == user.Id && NormalizeRole(member.Role) is "Owner" or "Admin"));
+            }
+        }
+
         public bool CanMutateBoard(Guid boardId, string actorSubject)
         {
             lock (_lock)
@@ -12237,7 +12347,7 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
-        public BoardCleanupRunDto? StartBoardCleanupRun(Guid boardId, string actor, Guid? actionId)
+        public BoardCleanupRunDto? StartBoardCleanupRun(Guid boardId, string actor, Guid? actionId, bool deleteSourceRepositories = false)
         {
             lock (_lock)
             {
@@ -12257,6 +12367,9 @@ namespace Rosenvall.DevOps.Api
                 }
 
                 var now = DateTimeOffset.UtcNow;
+                var sourcePlanLine = deleteSourceRepositories
+                    ? "Kubernetes resources, board-owned Local Git repositories and board metadata will be cleaned in order."
+                    : "Kubernetes resources and board metadata will be cleaned in order. Local Git source repositories will be kept.";
                 var run = new BoardCleanupRunDto(
                     Guid.NewGuid(),
                     boardId,
@@ -12271,8 +12384,9 @@ namespace Rosenvall.DevOps.Api
                     actionId,
                     [
                         new PreviewTerminalLineDto(now, "system", $"Queued board cleanup for {board.Name}."),
-                        new PreviewTerminalLineDto(now, "system", "Kubernetes resources, board-owned Local Git repositories and board metadata will be cleaned in order.")
-                    ]);
+                        new PreviewTerminalLineDto(now, "system", sourcePlanLine)
+                    ],
+                    deleteSourceRepositories);
                 _boardCleanupRuns.Add(run);
                 Persist();
                 return run;

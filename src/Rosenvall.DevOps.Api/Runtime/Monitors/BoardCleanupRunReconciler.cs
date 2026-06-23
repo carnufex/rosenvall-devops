@@ -55,7 +55,11 @@ public sealed class BoardCleanupRunReconciler(
                 return;
             }
 
-            if (!await DeleteLocalGitRepositoriesAsync(run, cancellationToken))
+            if (!run.DeleteSourceRepositories)
+            {
+                store.AppendBoardCleanupRunLog(run.Id, "system", "Local Git source repositories were kept.");
+            }
+            else if (!await DeleteLocalGitRepositoriesAsync(run, cancellationToken))
             {
                 return;
             }

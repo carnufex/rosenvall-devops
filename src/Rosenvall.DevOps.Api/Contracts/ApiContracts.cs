@@ -63,7 +63,7 @@ public sealed record EpicRunChildDto(Guid WorkItemId, string WorkItemKey, string
 public sealed record EpicRunDto(Guid Id, Guid RootWorkItemId, string RootWorkItemKey, string RootWorkItemTitle, string Status, string Actor, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<EpicRunChildDto> Children, string? Summary = null, string? FailureReason = null);
 public sealed record EpicGoalRunDto(Guid Id, Guid RootWorkItemId, Guid? EpicRunId, string Status, string Actor, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string? Summary = null, string? FailureReason = null);
 public sealed record RepositoryCleanupRunDto(Guid Id, Guid RepositoryId, Guid WorkItemId, Guid SourceImplementationRunId, string WorkItemKey, string WorkItemTitle, string Status, string Branch, string SourcePullRequestUrl, string? CleanupPullRequestUrl, string? CommitSha, string? FailureReason, string? SourcePullRequestState, string? SourcePullRequestDiff, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, string? JobName = null, string? PodName = null, string? LastCondition = null, string? LastEventSummary = null, bool Adopted = false, DateTimeOffset? MergedAt = null, DateTimeOffset? VerifiedAt = null, string? VerificationFailure = null);
-public sealed record BoardCleanupRunDto(Guid Id, Guid BoardId, string BoardName, string Status, string Phase, string Actor, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt = null, Guid? ActionId = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null);
+public sealed record BoardCleanupRunDto(Guid Id, Guid BoardId, string BoardName, string Status, string Phase, string Actor, string? FailureReason, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt = null, Guid? ActionId = null, IReadOnlyList<PreviewTerminalLineDto>? TerminalLines = null, bool DeleteSourceRepositories = false);
 public sealed record ApiStatusDto(string AuthMode, ApiResourceDiagnosticsDto Resources, CorsDiagnosticsDto Cors, ReleaseDiagnosticsDto Release, LocalGitReadinessDto? LocalGit = null, DemoSandboxPolicyDto? DemoSandboxPolicy = null);
 public sealed record ApiResourceDiagnosticsDto(long? ProcessRssBytes, long? MemoryCurrentBytes, long? MemoryLimitBytes, long? MemoryAvailableBytes, bool IsMemoryPressured, string Status, string? Message, long? SnapshotJsonBytes = null, long SnapshotPersistWriteCount = 0, long SnapshotPersistSkipCount = 0, DateTimeOffset? LastSnapshotPersistedAt = null);
 public sealed record CorsDiagnosticsDto(IReadOnlyList<string> AllowedOrigins, bool AllowCredentials, string Status, string Message);
@@ -91,6 +91,8 @@ public sealed record PreviewSettingsDto(string Domain, int DefaultTtlDays, strin
 public sealed record RepositoryHostingSettingsDto(string Provider, string Mode, string ApiBaseUrl, bool CanCreateRepositories, bool LocalGitEnabled = false, bool LocalGitAvailable = false, string? LocalGitMessage = null);
 public sealed record LocalGitReadinessDto(bool Enabled, bool Configured, bool Available, string ApiBaseUrl, string? Message = null, int? StatusCode = null);
 public sealed record LocalGitRepositoryMutationResult(bool Succeeded, string Message, HttpStatusCode? StatusCode = null);
+public sealed record LocalGitAdminRepositoryDto(string Owner, string Name, string FullName, string? HtmlUrl, string? UpdatedAt, bool Empty);
+public sealed record DeleteLocalGitAdminRepositoryRequest(string Owner, string Name);
 public sealed record AuthentikSettingsDto(bool Enabled, string Authority, string UsersEndpoint);
 public sealed record MetricsDto(Guid? BoardId, int TokensUsed, int CodeAdded, int CodeDeleted, int PipelineRuns);
 public sealed record AssigneeDto(string Id, string DisplayName, string Email, string Source);
@@ -193,7 +195,7 @@ public sealed record ApproveAiRunRequest(string? ReasoningEffort = null)
 public sealed record DiscardAiRunRequest();
 public sealed record ApprovePullRequestRequest();
 public sealed record PreviewActionRequest();
-public sealed record DeleteAndCleanupRequest();
+public sealed record DeleteAndCleanupRequest(bool DeleteSourceRepositories = false);
 public sealed record AdoptCleanupPullRequestRequest(string? PullRequestUrl = null, Guid? SourceImplementationRunId = null)
 {
     public AdoptCleanupPullRequestRequest(string? actor, string? pullRequestUrl, Guid? sourceImplementationRunId)
