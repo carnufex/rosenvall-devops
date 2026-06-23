@@ -26,6 +26,7 @@ builder.Services.AddHttpClient<GitHubRepositoryClient>();
 builder.Services.AddHttpClient<ForgejoRepositoryClient>();
 builder.Services.AddTransient<IAiPlanProvider>(services => services.GetRequiredService<OllamaPlanProvider>());
 builder.Services.AddSingleton<IAiPlanProvider, CodexCliPlanProvider>();
+builder.Services.AddSingleton<IAiPlanProvider, ClaudeCliPlanProvider>();
 builder.Services.AddSingleton<AiPlanProviderRouter>();
 builder.Services.AddSingleton<CodexCliPreviewSourceProvider>();
 builder.Services.AddSingleton<KubernetesPreviewSourceProvider>();
@@ -8480,6 +8481,177 @@ namespace Rosenvall.DevOps.Api
               """;
     }
 
+    public sealed class ClaudeCliPlanProvider(IConfiguration configuration, ILogger<ClaudeCliPlanProvider> logger) : IAiPlanProvider
+    {
+        public string ProviderName => "claude";
+
+        public Task<string> GeneratePlanAsync(string model, WorkItemDetailDto context, CancellationToken cancellationToken) =>
+            GeneratePlanAsync(model, null, context, cancellationToken);
+
+        public async Task<string> GeneratePlanAsync(string model, string? reasoningEffort, WorkItemDetailDto context, CancellationToken cancellationToken)
+        {
+            var claudePath = CodexExecutableResolver.Resolve(configuration["Ai:Claude:Path"] ?? "claude");
+            var timeout = TimeSpan.FromSeconds(configuration.GetValue("Ai:Claude:RequestTimeoutSeconds", configuration.GetValue("Ai:RequestTimeoutSeconds", 120)));
+            try
+            {
+                using var process = new Process
+                {
+                    StartInfo = BuildStartInfo(claudePath, model),
+                    EnableRaisingEvents = true
+                };
+
+                var started = process.Start();
+                if (!started)
+                {
+                    throw new AiPlanProviderUnavailableException("Claude provider could not start; no plan was created.");
+                }
+
+                var stdOut = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var stdErr = process.StandardError.ReadToEndAsync(cancellationToken);
+                try
+                {
+                    await process.StandardInput.WriteAsync(BuildPrompt(context).AsMemory(), cancellationToken);
+                    process.StandardInput.Close();
+                }
+                catch (IOException ex)
+                {
+                    logger.LogDebug(ex, "Claude provider closed stdin before the prompt was fully written.");
+                }
+                catch (InvalidOperationException ex)
+                {
+                    logger.LogDebug(ex, "Claude provider stdin was unavailable before the prompt was written.");
+                }
+
+                using var timeoutCancellation = new CancellationTokenSource(timeout);
+                using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
+                try
+                {
+                    await process.WaitForExitAsync(linkedCancellation.Token);
+                }
+                catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    TryKill(process);
+                    throw new AiPlanProviderUnavailableException($"Claude provider timed out after {timeout.TotalSeconds:0} seconds; no plan was created.");
+                }
+
+                var plan = (await stdOut).Trim();
+                var error = await stdErr;
+                if (process.ExitCode != 0)
+                {
+                    var detail = FirstUsefulLine(error, plan);
+                    logger.LogWarning("Claude provider failed with exit code {ExitCode}: {Detail}", process.ExitCode, detail);
+                    throw new AiPlanProviderUnavailableException($"Claude provider is not logged in on the server or failed to run: {detail} No plan was created.");
+                }
+
+                if (string.IsNullOrWhiteSpace(plan))
+                {
+                    throw new AiPlanProviderUnavailableException("Claude provider returned an empty plan; no plan was created.");
+                }
+
+                return plan;
+            }
+            catch (Exception ex) when (ex is not AiPlanProviderUnavailableException && (ex is System.ComponentModel.Win32Exception or InvalidOperationException))
+            {
+                throw new AiPlanProviderUnavailableException($"Claude provider is unavailable at '{claudePath}': {ex.Message} No plan was created.");
+            }
+        }
+
+        private ProcessStartInfo BuildStartInfo(string claudePath, string model)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = claudePath
+            };
+            startInfo.RedirectStandardInput = true;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardInputEncoding = Encoding.UTF8;
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+
+            // Headless print mode: read the prompt from stdin and print the final
+            // assistant message as plain text. Planning is read-only, so no tools
+            // or permission prompts are involved.
+            startInfo.ArgumentList.Add("--print");
+            startInfo.ArgumentList.Add("--output-format");
+            startInfo.ArgumentList.Add("text");
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                startInfo.ArgumentList.Add("--model");
+                startInfo.ArgumentList.Add(model.Trim());
+            }
+
+            // Server-side auth, mirroring how the Codex provider uses CODEX_HOME.
+            var claudeHome = configuration["Ai:Claude:Home"];
+            if (!string.IsNullOrWhiteSpace(claudeHome))
+            {
+                startInfo.Environment["CLAUDE_CONFIG_DIR"] = claudeHome.Trim();
+            }
+
+            var apiKey = configuration["Ai:Claude:ApiKey"];
+            if (!string.IsNullOrWhiteSpace(apiKey))
+            {
+                startInfo.Environment["ANTHROPIC_API_KEY"] = apiKey.Trim();
+            }
+
+            return startInfo;
+        }
+
+        private static void TryKill(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // Best-effort timeout cleanup.
+            }
+        }
+
+        private static string FirstUsefulLine(string error, string output)
+        {
+            var line = (error + "\n" + output)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault();
+            return string.IsNullOrWhiteSpace(line) ? "unknown Claude CLI error." : line;
+        }
+
+        private static string BuildPrompt(WorkItemDetailDto context) =>
+            $$"""
+              You are Rosenvall DevOps AI. Produce a concise implementation plan for this work item.
+
+              Work item: {{context.Item.Key}} {{context.Item.Title}}
+              Type: {{context.Item.Type}}
+              Status: {{context.Item.Status}}
+              Priority: {{context.Item.Priority}}
+              Description: {{context.Description}}
+              Work item discussion:
+              {{PromptContextRenderer.RenderWorkItemDiscussion(context)}}
+
+              Unresolved plan review comments:
+              {{PromptContextRenderer.RenderUnresolvedAiPlanReviewComments(context)}}
+
+              Board and repository context:
+              {{PromptContextRenderer.RenderPlanningContext(context)}}
+
+              Required output:
+              - A concrete plan.
+              - Include tests.
+              - For repository or GitOps boards, first apply board instructions, GitOps settings, repository profile signals, and enabled repo skill drafts to resolve path, namespace, routing, and validation conventions.
+              - Return blocking questions only for facts that cannot be answered by that context, such as user preference, destructive intent, or missing business requirements.
+              - For react-preview boards, target a Vite React TypeScript preview app with Tailwind CSS and shadcn-style components.
+              - React previews should be containerized and exposed through the existing Kubernetes preview route.
+              - Preserve every concrete visual/content requirement from the title, description, and comments.
+              - If colors, language, exact text, layout, or behavior are specified, repeat them explicitly in the plan.
+              """;
+    }
+
     public static class CodexCliArguments
     {
         public static void AddReasoningEffort(ProcessStartInfo startInfo, string? reasoningEffort)
@@ -14163,6 +14335,20 @@ namespace Rosenvall.DevOps.Api
                 ? configuredCodexHome
                 : Environment.GetEnvironmentVariable("CODEX_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
             var codexStatus = ResolveCodexStatus(codexPath, codexHome);
+            var claudeActiveModel = NormalizeText(configuration["Ai:Claude:Model"], "claude-opus-4-8");
+            var claudeModels = new[] { claudeActiveModel }
+                .Concat(["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-fable-5"])
+                .Concat(configuration.GetSection("Ai:Claude:AvailableModels").Get<string[]>() ?? [])
+                .Where(model => !string.IsNullOrWhiteSpace(model))
+                .Select(model => model.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var claudePath = configuration["Ai:Claude:Path"] ?? "claude";
+            var configuredClaudeHome = configuration["Ai:Claude:Home"];
+            var claudeHome = !string.IsNullOrWhiteSpace(configuredClaudeHome)
+                ? configuredClaudeHome
+                : Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
+            var claudeStatus = ResolveClaudeStatus(claudePath, claudeHome, configuration["Ai:Claude:ApiKey"]);
             var providers = new[]
             {
                 new AiProviderSettingsDto(
@@ -14182,7 +14368,16 @@ namespace Rosenvall.DevOps.Api
                     codexActiveModel,
                     codexModels,
                     codexReasoningEfforts,
-                    codexReasoningEffort)
+                    codexReasoningEffort),
+                new AiProviderSettingsDto(
+                    "claude",
+                    "Claude",
+                    claudeStatus,
+                    claudePath,
+                    claudeActiveModel,
+                    claudeModels,
+                    [],
+                    null)
             };
 
             var githubIntegration = _githubIntegrations
@@ -14258,6 +14453,29 @@ namespace Rosenvall.DevOps.Api
 
             var authPath = Path.Combine(codexHome, "auth.json");
             return File.Exists(authPath) ? "Ready" : "LoginRequired";
+        }
+
+        private static string ResolveClaudeStatus(string claudePath, string? claudeHome, string? apiKey)
+        {
+            if (Path.IsPathRooted(claudePath) && !File.Exists(claudePath))
+            {
+                return "Unavailable";
+            }
+
+            if (!string.IsNullOrWhiteSpace(apiKey) || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")))
+            {
+                return "Ready";
+            }
+
+            if (string.IsNullOrWhiteSpace(claudeHome))
+            {
+                return "LoginRequired";
+            }
+
+            // Claude Code stores its OAuth credentials under the config dir.
+            var hasCredentials = File.Exists(Path.Combine(claudeHome, ".credentials.json")) ||
+                File.Exists(Path.Combine(claudeHome, "credentials.json"));
+            return hasCredentials ? "Ready" : "LoginRequired";
         }
 
         public string? RenderPreviewManifest(Guid workItemId)
