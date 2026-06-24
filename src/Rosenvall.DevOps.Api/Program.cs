@@ -362,6 +362,22 @@ api.MapPost("/admin/local-git/repositories/delete", async (DeleteLocalGitAdminRe
         : Results.Problem(result.Message, statusCode: StatusCodes.Status502BadGateway);
 });
 
+api.MapPut("/settings/ai-provider", (UpdateDefaultAiProviderRequest request, ClaimsPrincipal user, DevOpsStore store, IConfiguration configuration) =>
+{
+    if (!CanManageLocalGitAdminRequest(store, user))
+    {
+        return Results.Problem("Changing the default AI provider is restricted to platform admins.", statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var settings = store.GetSettings(configuration);
+    if (!settings.Ai.AvailableProviders.Any(provider => string.Equals(provider.Provider, request.Provider, StringComparison.OrdinalIgnoreCase)))
+    {
+        return Results.Problem($"Unknown AI provider '{request.Provider}'.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    return Results.Ok(new DefaultAiProviderDto(store.SetDefaultAiProvider(request.Provider)));
+});
+
 BoardEndpoints.Map(api);
 
 api.MapPost("/boards/{boardId:guid}/delete-and-clean-up", (Guid boardId, DeleteAndCleanupRequest request, ClaimsPrincipal user, DevOpsStore store, IConfiguration configuration) =>
@@ -8897,6 +8913,7 @@ namespace Rosenvall.DevOps.Api
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(PreviewSourcePromptBuilder.BuildImplementationPrompt(run, context)));
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
             var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
+            var agentCommand = CodexKubernetesRunner.BuildAgentCommand(run.Provider, sandboxMode, null, chdirWorkspace: true);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -9023,6 +9040,12 @@ namespace Rosenvall.DevOps.Api
                                  value: "{{Escape(model)}}"
                                - name: CODEX_REASONING_EFFORT
                                  value: "{{Escape(CodexCliArguments.NormalizeReasoningEffort(reasoningEffort) ?? "high")}}"
+                               - name: CLAUDE_CODE_OAUTH_TOKEN
+                                 valueFrom:
+                                   secretKeyRef:
+                                     name: rosenvall-devops-claude
+                                     key: token
+                                     optional: true
                                - name: ROSENVALL_PREVIEW_SEED_B64
                                  value: "{{seed}}"
                                - name: ROSENVALL_PREVIEW_PROMPT_B64
@@ -9061,7 +9084,7 @@ namespace Rosenvall.DevOps.Api
                                  printf '%s' "$ROSENVALL_PREVIEW_PROMPT_B64" | base64 -d > "$workspace/prompt.md"
                                  echo "RDO_STEP=Implementing"
                                  cat > "$workspace/codex-command.sh" <<'RDO_CODEX_COMMAND'
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" -C "$workspace" - < "$workspace/prompt.md"
+                                 {{agentCommand}}
                                  RDO_CODEX_COMMAND
                                  rdo_run_codex_without_repository_credentials "$workspace" "$workspace/codex-command.sh"
                                  echo "RDO_STEP=Collecting"
@@ -9674,6 +9697,7 @@ namespace Rosenvall.DevOps.Api
         private readonly List<AiSessionDto> _aiSessions = [];
         private readonly List<BoardGitOpsSettingsDto> _boardGitOpsSettings = [];
         private readonly List<BoardAiContextDto> _boardAiContexts = [];
+        private string? _defaultAiProvider;
         private readonly List<BoardPublicAppDto> _boardPublicApps = [];
         private readonly List<ActionLedgerDto> _actionLedger = [];
         private readonly List<RuntimeArtifactDto> _runtimeArtifacts = [];
@@ -9899,6 +9923,26 @@ namespace Rosenvall.DevOps.Api
                     DemoSandboxAccessPolicy.DemoUserEmail,
                     DemoSandboxAccessPolicy.DemoWorkspaceName,
                     message);
+            }
+        }
+
+        public string GetDefaultAiProvider(IConfiguration configuration)
+        {
+            lock (_lock)
+            {
+                return string.IsNullOrWhiteSpace(_defaultAiProvider)
+                    ? (configuration["Ai:DefaultProvider"] ?? "ollama")
+                    : _defaultAiProvider;
+            }
+        }
+
+        public string SetDefaultAiProvider(string provider)
+        {
+            lock (_lock)
+            {
+                _defaultAiProvider = string.IsNullOrWhiteSpace(provider) ? null : provider.Trim().ToLowerInvariant();
+                Persist();
+                return _defaultAiProvider ?? "ollama";
             }
         }
 
@@ -14426,7 +14470,7 @@ namespace Rosenvall.DevOps.Api
             return new(
                 new GitHubSettingsDto(githubAccount, githubTarget, "GitHub App installation permissions", githubConnected, githubAppConfigured, githubInstallUrl, githubAppConfigured),
                 new AiSettingsDto(
-                    configuration["Ai:DefaultProvider"] ?? "ollama",
+                    string.IsNullOrWhiteSpace(_defaultAiProvider) ? (configuration["Ai:DefaultProvider"] ?? "ollama") : _defaultAiProvider,
                     configuration["Ai:OllamaEndpoint"] ?? configuration["Ai:Ollama:Endpoint"] ?? "http://localhost:11434/api",
                     activeModel,
                     availableModels,
@@ -17255,6 +17299,7 @@ namespace Rosenvall.DevOps.Api
             _boardGitOpsSettings.AddRange(snapshot.BoardGitOpsSettings ?? []);
             _boardAiContexts.AddRange(snapshot.BoardAiContexts ?? []);
             _runtimeArtifacts.AddRange(snapshot.RuntimeArtifacts ?? []);
+            _defaultAiProvider = snapshot.DefaultAiProvider;
             _nextTaskNumber = Math.Max(snapshot.NextTaskNumber, NextTaskNumberFromItems());
             var changed = BackfillBoardHostingWithoutLock();
             if (BackfillProviderSyncRuntimeArtifactsWithoutLock())
@@ -17507,7 +17552,8 @@ namespace Rosenvall.DevOps.Api
                 _actionLedger.ToArray(),
                 _githubManifestCallbackStates.ToArray(),
                 _githubUserAuthorizationCallbackStates.ToArray(),
-                _runtimeArtifacts.ToArray());
+                _runtimeArtifacts.ToArray(),
+                _defaultAiProvider);
             var json = JsonSerializer.Serialize(snapshot, SnapshotJsonOptions);
             var jsonBytes = Encoding.UTF8.GetByteCount(json);
             var jsonHash = ComputeSnapshotHash(json);
@@ -17586,7 +17632,7 @@ namespace Rosenvall.DevOps.Api
     internal sealed record BoardRepositoryProfileRecord(Guid BoardId, Guid RepositoryId, RepositoryProfileDto Profile);
     internal sealed record GitHubManifestCallbackStateRecord(string State, DateTimeOffset CreatedAt);
     internal sealed record GitHubUserAuthorizationCallbackStateRecord(string State, string ActorSubject, long InstallationId, DateTimeOffset CreatedAt);
-    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<BoardCleanupRunDto>? BoardCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null, IReadOnlyList<GitHubManifestCallbackStateRecord>? GitHubManifestCallbackStates = null, IReadOnlyList<GitHubUserAuthorizationCallbackStateRecord>? GitHubUserAuthorizationCallbackStates = null, IReadOnlyList<RuntimeArtifactDto>? RuntimeArtifacts = null);
+    internal sealed record DevOpsSnapshot(IReadOnlyList<WorkspaceDto> Workspaces, IReadOnlyList<BoardSnapshot> Boards, IReadOnlyList<WorkItemSnapshot> Items, IReadOnlyList<CommentDto> Comments, IReadOnlyList<AiRunSnapshot> AiRuns, IReadOnlyList<PreviewDto> Previews, IReadOnlyList<DevelopmentSnapshot> Development, int NextTaskNumber = 0, IReadOnlyList<PreviewEventDto>? PreviewEvents = null, IReadOnlyList<RepositoryDto>? Repositories = null, IReadOnlyList<PipelineRunDto>? PipelineRuns = null, IReadOnlyList<TimelineEventDto>? TimelineEvents = null, IReadOnlyList<ImplementationRunDto>? ImplementationRuns = null, IReadOnlyList<RepositoryCleanupRunDto>? RepositoryCleanupRuns = null, IReadOnlyList<BoardCleanupRunDto>? BoardCleanupRuns = null, IReadOnlyList<PullRequestReviewCommentDto>? PullRequestReviewComments = null, IReadOnlyList<AiPlanReviewCommentDto>? AiPlanReviewComments = null, IReadOnlyList<UserDto>? Users = null, IReadOnlyList<TeamDto>? Teams = null, IReadOnlyList<BoardAccessDtoRecord>? BoardAccess = null, IReadOnlyList<BoardTeamAccessRecord>? BoardTeamAccess = null, IReadOnlyList<BoardRepositoryLinkRecord>? BoardRepositoryLinks = null, IReadOnlyList<GitHubIntegrationDto>? GitHubIntegrations = null, IReadOnlyList<GitHubRepositoryCreationPolicyDto>? GitHubRepositoryCreationPolicies = null, IReadOnlyList<BoardSecretDto>? BoardSecrets = null, IReadOnlyList<AiSessionDto>? AiSessions = null, IReadOnlyList<BoardGitOpsSettingsDto>? BoardGitOpsSettings = null, IReadOnlyList<BoardAiContextDto>? BoardAiContexts = null, IReadOnlyList<BoardRepositoryProfileRecord>? BoardRepositoryProfiles = null, IReadOnlyList<GitHubUserAuthorizationDto>? GitHubUserAuthorizations = null, IReadOnlyList<BoardPublicAppDto>? BoardPublicApps = null, IReadOnlyList<EpicRunDto>? EpicRuns = null, IReadOnlyList<EpicGoalRunDto>? EpicGoalRuns = null, IReadOnlyList<ActionLedgerDto>? ActionLedger = null, IReadOnlyList<GitHubManifestCallbackStateRecord>? GitHubManifestCallbackStates = null, IReadOnlyList<GitHubUserAuthorizationCallbackStateRecord>? GitHubUserAuthorizationCallbackStates = null, IReadOnlyList<RuntimeArtifactDto>? RuntimeArtifacts = null, string? DefaultAiProvider = null);
     internal sealed record BoardSnapshot(Guid Id, Guid WorkspaceId, string Name, IReadOnlyList<string> Columns, Guid? RepositoryId = null, string? PublicHostname = null, string ImplementationWorkflow = "");
     internal sealed record WorkItemSnapshot(Guid Id, Guid BoardId, string Key, string Type, string Title, string Description, string Status, string Priority, string? Assignee, string? AiStatus, string? PullRequestUrl, int SortOrder, Guid? ParentWorkItemId = null, bool IsBug = false);
     internal sealed record AiRunSnapshot(Guid Id, Guid WorkItemId, string Provider, string Model, AiRunStatus Status, string? Plan, string? ApprovedBy, int SequenceNumber = 0, DateTimeOffset? CreatedAt = null, string? ReasoningEffort = null);

@@ -370,7 +370,7 @@ public static class AiPlanningEndpoints
             }
 
             await realtime.PublishAsync("aiRunChanged", result);
-            var preview = store.BeginPreviewImplementation(result.WorkItemId, "codex");
+            var preview = store.BeginPreviewImplementation(result.WorkItemId, result.Provider);
             if (preview is null)
             {
                 store.MarkActionFailed(actionStart.Action!.Id, "Work item was not found.");

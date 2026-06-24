@@ -1501,6 +1501,12 @@ function App() {
         await api.post('/api/admin/local-git/repositories/delete', { owner, name });
       });
     },
+    setDefaultAiProvider: async (provider) => {
+      return runAction('Updating default AI provider', async () => {
+        await api.put('/api/settings/ai-provider', { provider });
+        await loadShell(undefined, { silentBusy: true });
+      });
+    },
     updateBoardGitOpsSettings: async (boardId, settings) => {
       return runAction('Saving GitOps settings', async () => {
         await api.put<BoardGitOpsSettingsDto>(`/api/boards/${boardId}/gitops-settings`, settings);
@@ -2016,6 +2022,7 @@ type BoardActions = {
   deleteBoardSecret(boardId: string, secretId: string): Promise<boolean>;
   listLocalGitAdminRepositories(): Promise<LocalGitAdminRepositoryDto[]>;
   deleteLocalGitAdminRepository(owner: string, name: string): Promise<boolean>;
+  setDefaultAiProvider(provider: string): Promise<boolean>;
   updateBoardGitOpsSettings(boardId: string, settings: BoardGitOpsSettingsDto): Promise<boolean>;
   updateBoardAiContext(boardId: string, context: BoardAiContextDto): Promise<boolean>;
   updateBoardHosting(boardId: string, settings: { publicHostname?: string | null; implementationWorkflow?: string | null }): Promise<boolean>;
@@ -5785,7 +5792,8 @@ function SettingsView({ scope, settings, apiStatus, board, me, repositories, boa
         </section>
         <SectionTitle icon={<Bot size={22} />} title="AI engine" amber />
         <section className="panel form-panel ai-settings">
-          <label>Provider<select value={activeProvider.provider} onChange={(event) => onProviderChange(event.target.value)}>{settings.ai.availableProviders.map((provider) => <option value={provider.provider} key={provider.provider} disabled={provider.status === 'Unavailable'}>{provider.displayName} - {provider.status}</option>)}</select></label>
+          <label>Default AI provider<select value={activeProvider.provider} onChange={(event) => { onProviderChange(event.target.value); void actions.setDefaultAiProvider(event.target.value); }}>{settings.ai.availableProviders.map((provider) => <option value={provider.provider} key={provider.provider} disabled={provider.status === 'Unavailable'}>{provider.displayName} - {provider.status}</option>)}</select></label>
+          <p className="provider-status">Platform default for planning, implementation and previews. Switch between Codex and Claude here to change what runs everything; boards follow this unless individually overridden.</p>
           <label>Planning model<select value={activeModel} onChange={(event) => onModelChange(event.target.value)}>{modelOptions.map((model) => <option value={model} key={model}>{model}</option>)}</select></label>
           {reasoningOptions.length > 0 && <label>Reasoning effort<select value={activeReasoning ?? ''} onChange={(event) => onReasoningChange(event.target.value)}>{reasoningOptions.map((effort) => <option value={effort} key={effort}>{effort}</option>)}</select></label>}
           <label>Adapter endpoint<input value={activeProvider.endpoint} readOnly /></label>

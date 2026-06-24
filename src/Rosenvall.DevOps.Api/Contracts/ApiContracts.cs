@@ -92,6 +92,8 @@ public sealed record RepositoryHostingSettingsDto(string Provider, string Mode, 
 public sealed record LocalGitReadinessDto(bool Enabled, bool Configured, bool Available, string ApiBaseUrl, string? Message = null, int? StatusCode = null);
 public sealed record LocalGitRepositoryMutationResult(bool Succeeded, string Message, HttpStatusCode? StatusCode = null);
 public sealed record LocalGitAdminRepositoryDto(string Owner, string Name, string FullName, string? HtmlUrl, string? UpdatedAt, bool Empty);
+public sealed record UpdateDefaultAiProviderRequest(string Provider);
+public sealed record DefaultAiProviderDto(string Provider);
 public sealed record DeleteLocalGitAdminRepositoryRequest(string Owner, string Name);
 public sealed record AuthentikSettingsDto(bool Enabled, string Authority, string UsersEndpoint);
 public sealed record MetricsDto(Guid? BoardId, int TokensUsed, int CodeAdded, int CodeDeleted, int PipelineRuns);
