@@ -87,4 +87,27 @@ public static class CodexKubernetesRunner
 
         return DefaultSandboxMode;
     }
+
+    // Builds the in-job agent command for the implementation runner. Codex and Claude
+    // share the same job: clone repo, write prompt.md, run this command (which edits the
+    // working tree), then test/commit/push. The command reads the prompt on stdin and
+    // uses the CODEX_MODEL / ROSENVALL_CODEX_SESSION_ID env the manifest already sets.
+    public static string BuildAgentCommand(string? provider, string? sandboxMode, string? providerSessionId)
+    {
+        var hasSession = !string.IsNullOrWhiteSpace(providerSessionId);
+        if (string.Equals(provider?.Trim(), "claude", StringComparison.OrdinalIgnoreCase))
+        {
+            // The job runs as a non-root user in an isolated pod, so
+            // --dangerously-skip-permissions is the analogue of Codex's
+            // approval_policy=never + sandbox: full autonomy, no human approval.
+            return hasSession
+                ? "claude --print --dangerously-skip-permissions --resume \"$ROSENVALL_CODEX_SESSION_ID\" --model \"$CODEX_MODEL\" < \"$workspace/prompt.md\""
+                : "claude --print --dangerously-skip-permissions --model \"$CODEX_MODEL\" < \"$workspace/prompt.md\"";
+        }
+
+        var codexSandbox = NormalizeSandboxMode(sandboxMode);
+        return hasSession
+            ? $"codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\""
+            : $"codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\"";
+    }
 }

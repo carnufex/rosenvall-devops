@@ -17,7 +17,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git jq nodejs npm \
     && curl -fsSLo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.31.1/bin/linux/amd64/kubectl \
     && chmod 0755 /usr/local/bin/kubectl \
-    && npm install -g @openai/codex@0.137.0 \
+    && npm install -g @openai/codex@0.137.0 @anthropic-ai/claude-code@2.1.187 \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /app/data /app/codex-home /tmp \

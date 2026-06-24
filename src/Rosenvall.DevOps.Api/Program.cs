@@ -2256,9 +2256,7 @@ namespace Rosenvall.DevOps.Api
                     "                secretKeyRef:",
                     $"                  name: {githubSecretName}",
                     "                  key: token");
-            var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
-                ? $"codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
-                : $"codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
+            var codexCommand = CodexKubernetesRunner.BuildAgentCommand(aiRun.Provider, sandboxMode, aiSession?.ProviderSessionId);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -2383,6 +2381,12 @@ namespace Rosenvall.DevOps.Api
                                  value: "{{allowedPaths}}"
                                - name: ROSENVALL_CODEX_SESSION_ID
                                  value: "{{Escape(aiSession?.ProviderSessionId)}}"
+                               - name: CLAUDE_CODE_OAUTH_TOKEN
+                                 valueFrom:
+                                   secretKeyRef:
+                                     name: rosenvall-devops-claude
+                                     key: token
+                                     optional: true
                    {{secretEnv}}
                              command:
                                - sh
@@ -3007,9 +3011,7 @@ namespace Rosenvall.DevOps.Api
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
             var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
             var prompt = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPrompt(run, repository, aiRun, context, comments)));
-            var codexCommand = string.IsNullOrWhiteSpace(aiSession?.ProviderSessionId)
-                ? $"codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" - < \"$workspace/prompt.md\""
-                : $"codex exec resume --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {codexSandbox} -c \"approval_policy=\\\"never\\\"\" -m \"$CODEX_MODEL\" -c \"model_reasoning_effort=$CODEX_REASONING_EFFORT\" \"$ROSENVALL_CODEX_SESSION_ID\" - < \"$workspace/prompt.md\"";
+            var codexCommand = CodexKubernetesRunner.BuildAgentCommand(aiRun.Provider, sandboxMode, aiSession?.ProviderSessionId);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -3129,6 +3131,12 @@ namespace Rosenvall.DevOps.Api
                                  value: "{{prompt}}"
                                - name: ROSENVALL_CODEX_SESSION_ID
                                  value: "{{Escape(aiSession?.ProviderSessionId)}}"
+                               - name: CLAUDE_CODE_OAUTH_TOKEN
+                                 valueFrom:
+                                   secretKeyRef:
+                                     name: rosenvall-devops-claude
+                                     key: token
+                                     optional: true
                              command:
                                - sh
                                - -lc

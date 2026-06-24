@@ -49,6 +49,16 @@ spec:
               value: /app/codex-home
             - name: CODEX_HOME
               value: /app/codex-home
+            - name: Ai__Claude__Path
+              value: claude
+            - name: Ai__Claude__Model
+              value: claude-opus-4-8
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rosenvall-devops-claude
+                  key: token
+                  optional: true
             - name: Ai__Codex__ImplementationBypassSandbox
               value: "false"
             - name: Ai__Codex__Model
