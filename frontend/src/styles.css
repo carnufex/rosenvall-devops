@@ -939,3 +939,62 @@ html { scroll-behavior: smooth; }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .toast { animation: toast-in var(--dur) var(--ease); }
+
+/* ============================================================================
+   Timeline — make the Flow graph legible. A legend decodes the node language
+   (icon = type, colour = status) and the rail reads oldest → newest.
+   ========================================================================== */
+.timeline-flow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f1011;
+}
+.tfl-group { display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tfl-group em {
+  font-style: normal;
+  font-weight: 800;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.tfl-item { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-strong); font-size: 12px; font-weight: 600; }
+.tfl-item svg { color: var(--muted); }
+.tfl-divider { width: 1px; height: 20px; background: var(--line); }
+.tfl-dot { width: 11px; height: 11px; border-radius: 999px; border: 2px solid var(--line-strong); background: transparent; flex: 0 0 auto; }
+.tfl-dot.flow-good { border-color: var(--secondary); background: rgba(45, 212, 191, 0.25); }
+.tfl-dot.flow-warn { border-color: #f59e0b; background: rgba(245, 158, 11, 0.25); }
+.tfl-dot.flow-bad { border-color: #f87171; background: rgba(248, 113, 113, 0.3); }
+.tfl-dot.flow-muted { border-color: var(--muted); background: rgba(161, 161, 170, 0.2); }
+
+/* Nodes: clearer hover/selection so the click-to-jump affordance is obvious */
+.timeline-flow-node {
+  transition: transform var(--dur-fast) var(--ease), border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease), box-shadow var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.timeline-flow-node:hover { transform: scale(1.12); }
+.timeline-flow-node.selected { box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.25); }
+
+/* A subtle "newest" cap on each rail so direction is unmistakable */
+.timeline-flow-rail-inner::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-top: 1px solid var(--line-strong);
+  border-right: 1px solid var(--line-strong);
+  transform: translateY(-50%) rotate(45deg);
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+/* Selected event row in the log reads clearly when jumped to */
+.timeline-row { transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease); scroll-margin-top: 80px; }

@@ -2975,7 +2975,7 @@ function TimelineView({ board, timeline }: {
               <p>{entry.message}</p>
               {entry.url && <SafeExternalLink href={entry.url}>{entry.url}</SafeExternalLink>}
             </div>
-            <time>{relativeTime(entry.createdAt)}</time>
+            <time dateTime={entry.createdAt} title={new Date(entry.createdAt).toLocaleString()}>{relativeTime(entry.createdAt)}</time>
           </article>
         ))}
       </section>
@@ -3062,12 +3062,30 @@ function TimelineFlowGraph({ events, selectedEventId, onSelect }: {
       <div className="timeline-flow-toolbar">
         <div>
           <strong>Flow</strong>
-          <span>{visibleRows.length} of {rows.length} tasks</span>
+          <span>{visibleRows.length} of {rows.length} tasks · oldest → newest · click a node to jump to it</span>
         </div>
         <label className="timeline-flow-search">
           <Search size={15} />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search topic or task id..." />
         </label>
+      </div>
+      <div className="timeline-flow-legend" aria-label="Legend: each dot is an event, shaped by type and coloured by status">
+        <span className="tfl-group">
+          <em>Type</em>
+          <span className="tfl-item"><PanelLeft size={13} />Card</span>
+          <span className="tfl-item"><GitPullRequest size={13} />PR / commit</span>
+          <span className="tfl-item"><ExternalLink size={13} />Preview</span>
+          <span className="tfl-item"><Activity size={13} />Pipeline</span>
+          <span className="tfl-item"><Trash2 size={13} />Cleanup</span>
+        </span>
+        <span className="tfl-divider" aria-hidden="true" />
+        <span className="tfl-group">
+          <em>Status</em>
+          <span className="tfl-item"><span className="tfl-dot flow-good" aria-hidden="true" />Done</span>
+          <span className="tfl-item"><span className="tfl-dot flow-warn" aria-hidden="true" />In progress</span>
+          <span className="tfl-item"><span className="tfl-dot flow-bad" aria-hidden="true" />Failed</span>
+          <span className="tfl-item"><span className="tfl-dot flow-muted" aria-hidden="true" />Stopped</span>
+        </span>
       </div>
       <div className="timeline-flow-scroll">
         <div className="timeline-flow-body" ref={bodyRef}>
@@ -7476,7 +7494,15 @@ function relativeTime(value: string) {
   const minutes = Math.max(0, Math.round(diff / 60000));
   if (minutes < 1) return 'Just now';
   if (minutes < 60) return `${minutes}m ago`;
-  return `${Math.round(minutes / 60)}h ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 14) return `${days}d ago`;
+  const weeks = Math.round(days / 7);
+  if (weeks < 9) return `${weeks}w ago`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.round(days / 365)}y ago`;
 }
 
 function relativeDays(value: string) {
