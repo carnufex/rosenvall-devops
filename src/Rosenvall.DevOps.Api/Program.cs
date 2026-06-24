@@ -9953,6 +9953,19 @@ namespace Rosenvall.DevOps.Api
             }
         }
 
+        // Effective provider for a board: its per-board override, else the global default,
+        // else the configured fallback. Used by paths that have no AiRun to inherit from.
+        private string ResolveBoardAiProviderWithoutLock(Guid boardId, IConfiguration configuration)
+        {
+            var boardProvider = _boardAiContexts.SingleOrDefault(context => context.BoardId == boardId)?.Provider;
+            if (!string.IsNullOrWhiteSpace(boardProvider))
+            {
+                return boardProvider!.Trim().ToLowerInvariant();
+            }
+
+            return string.IsNullOrWhiteSpace(_defaultAiProvider) ? (configuration["Ai:DefaultProvider"] ?? "ollama") : _defaultAiProvider;
+        }
+
         public UserAccessProfileDto GetUserAccessProfile(string actorSubject)
         {
             lock (_lock)
@@ -13330,7 +13343,7 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                var provider = string.IsNullOrWhiteSpace(_defaultAiProvider) ? (configuration["Ai:DefaultProvider"] ?? "ollama") : _defaultAiProvider;
+                var provider = ResolveBoardAiProviderWithoutLock(_items.SingleOrDefault(item => item.Id == run.WorkItemId)?.BoardId ?? Guid.Empty, configuration);
                 var useClaude = string.Equals(provider, "claude", StringComparison.OrdinalIgnoreCase);
                 var model = useClaude
                     ? (configuration["Ai:Claude:Model"] ?? "claude-opus-4-8")
@@ -16907,7 +16920,8 @@ namespace Rosenvall.DevOps.Api
                 string.IsNullOrWhiteSpace(request?.Instructions) ? "" : request.Instructions.Trim(),
                 NormalizeSkills(request?.EnabledSkills),
                 request?.AskWhenUncertain ?? defaultAskWhenUncertain,
-                string.IsNullOrWhiteSpace(request?.AgentInstructions) ? "" : request.AgentInstructions.Trim());
+                string.IsNullOrWhiteSpace(request?.AgentInstructions) ? "" : request.AgentInstructions.Trim(),
+                string.IsNullOrWhiteSpace(request?.Provider) ? null : request.Provider.Trim().ToLowerInvariant());
 
         private static IReadOnlyList<string> NormalizePaths(IEnumerable<string>? paths) =>
             (paths ?? [])

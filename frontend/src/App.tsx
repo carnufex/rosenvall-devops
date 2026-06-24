@@ -128,6 +128,7 @@ type BoardAiContextDto = {
   enabledSkills: string[];
   askWhenUncertain: boolean;
   agentInstructions?: string | null;
+  provider?: string | null;
 };
 
 type RepositoryDto = {
@@ -1378,11 +1379,12 @@ function App() {
     startAiPlan: async (id) => {
       return runAction('Generating AI plan', async () => {
         if (shell.status !== 'ready') return;
-        const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
+        const planProvider = shell.board.aiContext?.provider || selectedAiProvider;
+        const provider = resolveActiveAiProvider(shell.settings, planProvider);
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: provider.provider,
-          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
-          reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
+          model: resolveActiveAiModel(shell.settings, planProvider, selectedAiModel),
+          reasoningEffort: resolveActiveAiReasoning(shell.settings, planProvider, selectedAiReasoning)
         }, { timeoutMs: AI_PLAN_TIMEOUT_MS });
         await refreshAfterChange(id);
       });
@@ -1408,13 +1410,14 @@ function App() {
     reviseAiPlan: async (workItemId, aiRunId, message) => {
       return runAction('Revising AI plan', async () => {
         if (shell.status !== 'ready') return;
-        const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
+        const planProvider = shell.board.aiContext?.provider || selectedAiProvider;
+        const provider = resolveActiveAiProvider(shell.settings, planProvider);
         await api.post<AiRun>(`/api/work-items/${workItemId}/ai-plan/revise`, {
           aiRunId,
           message,
           provider: provider.provider,
-          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
-          reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
+          model: resolveActiveAiModel(shell.settings, planProvider, selectedAiModel),
+          reasoningEffort: resolveActiveAiReasoning(shell.settings, planProvider, selectedAiReasoning)
         }, { timeoutMs: AI_PLAN_TIMEOUT_MS });
         await refreshAfterChange(workItemId);
       });
@@ -1641,12 +1644,13 @@ function App() {
     addCommentAndAskAi: async (id, body) => {
       return runAction('Posting comment and asking AI', async () => {
         if (shell.status !== 'ready') return;
-        const provider = resolveActiveAiProvider(shell.settings, selectedAiProvider);
+        const planProvider = shell.board.aiContext?.provider || selectedAiProvider;
+        const provider = resolveActiveAiProvider(shell.settings, planProvider);
         await api.post<CommentDto>(`/api/work-items/${id}/comments`, { body });
         await api.post<AiRun>(`/api/work-items/${id}/ai-plan`, {
           provider: provider.provider,
-          model: resolveActiveAiModel(shell.settings, selectedAiProvider, selectedAiModel),
-          reasoningEffort: resolveActiveAiReasoning(shell.settings, selectedAiProvider, selectedAiReasoning)
+          model: resolveActiveAiModel(shell.settings, planProvider, selectedAiModel),
+          reasoningEffort: resolveActiveAiReasoning(shell.settings, planProvider, selectedAiReasoning)
         }, { timeoutMs: AI_PLAN_TIMEOUT_MS });
         await refreshAfterChange(id);
       });
@@ -6156,6 +6160,7 @@ function BoardAiSettingsForm({ board, actions }: { board: Board; actions: BoardA
   const [askWhenUncertain, setAskWhenUncertain] = React.useState(initial.askWhenUncertain);
   const [skills, setSkills] = React.useState<string[]>(initial.enabledSkills);
   const [newSkill, setNewSkill] = React.useState('');
+  const [provider, setProvider] = React.useState(initial.provider ?? '');
 
   React.useEffect(() => {
     const next = board.aiContext ?? defaultAiContext(board.id);
@@ -6164,6 +6169,7 @@ function BoardAiSettingsForm({ board, actions }: { board: Board; actions: BoardA
     setAskWhenUncertain(next.askWhenUncertain);
     setSkills(next.enabledSkills);
     setNewSkill('');
+    setProvider(next.provider ?? '');
   }, [board.id, board.aiContext]);
 
   const addSkill = () => {
@@ -6181,12 +6187,14 @@ function BoardAiSettingsForm({ board, actions }: { board: Board; actions: BoardA
         instructions,
         enabledSkills: skills,
         askWhenUncertain,
-        agentInstructions
+        agentInstructions,
+        provider: provider || null
       });
     }}>
       <div className="form-grid two">
         <label>Board instructions<textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Operating rules and board-specific conventions." /></label>
         <label>Agent instructions<textarea value={agentInstructions} onChange={(event) => setAgentInstructions(event.target.value)} placeholder="AGENTS-style guidance used in planning and implementation context." /></label>
+        <label>AI provider override<select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="">Inherit platform default</option><option value="codex">Codex</option><option value="claude">Claude</option><option value="ollama">Ollama</option></select></label>
         <label className="checkbox-row"><input type="checkbox" checked={askWhenUncertain} onChange={(event) => setAskWhenUncertain(event.target.checked)} /><span>Ask when uncertain</span></label>
       </div>
       <div className="skill-editor">
@@ -7398,7 +7406,8 @@ function defaultAiContext(boardId: string): BoardAiContextDto {
     instructions: '',
     enabledSkills: [],
     askWhenUncertain: true,
-    agentInstructions: ''
+    agentInstructions: '',
+    provider: null
   };
 }
 
