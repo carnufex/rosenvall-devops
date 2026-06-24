@@ -14538,7 +14538,11 @@ namespace Rosenvall.DevOps.Api
                 return "Unavailable";
             }
 
-            if (!string.IsNullOrWhiteSpace(apiKey) || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")))
+            // Headless server auth: an API key or a long-lived OAuth token
+            // (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`) is all the CLI needs.
+            if (!string.IsNullOrWhiteSpace(apiKey)
+                || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY"))
+                || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CLAUDE_CODE_OAUTH_TOKEN")))
             {
                 return "Ready";
             }
@@ -14548,7 +14552,7 @@ namespace Rosenvall.DevOps.Api
                 return "LoginRequired";
             }
 
-            // Claude Code stores its OAuth credentials under the config dir.
+            // Otherwise Claude Code stores its OAuth credentials under the config dir.
             var hasCredentials = File.Exists(Path.Combine(claudeHome, ".credentials.json")) ||
                 File.Exists(Path.Combine(claudeHome, "credentials.json"));
             return hasCredentials ? "Ready" : "LoginRequired";
