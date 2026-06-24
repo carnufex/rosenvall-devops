@@ -3311,7 +3311,7 @@ namespace Rosenvall.DevOps.Api
             ["rosenvall.devops/repository-cleanup-run"] = run.Id.ToString()
         };
 
-        public static string Render(RepositoryCleanupRunDto run, RepositoryDto repository, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName, string? sandboxMode = null, string? runnerImage = null)
+        public static string Render(RepositoryCleanupRunDto run, RepositoryDto repository, WorkItemDetailDto context, string model, string? reasoningEffort, string githubSecretName, string? sandboxMode = null, string? runnerImage = null, string? provider = null)
         {
             var jobName = JobName(run, context);
             var ownerRepo = string.IsNullOrWhiteSpace(repository.Owner) ? repository.Name : $"{repository.Owner}/{repository.Name}";
@@ -3320,6 +3320,7 @@ namespace Rosenvall.DevOps.Api
             var allowedPaths = Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join('\n', context.BoardContext?.GitOpsSettings?.AllowedPaths ?? [])));
             var codexSandbox = CodexKubernetesRunner.NormalizeSandboxMode(sandboxMode);
             var image = CodexKubernetesRunner.NormalizeRunnerImage(runnerImage);
+            var agentCommand = CodexKubernetesRunner.BuildAgentCommand(provider, sandboxMode, null);
             return $$"""
                    apiVersion: batch/v1
                    kind: Job
@@ -3433,6 +3434,12 @@ namespace Rosenvall.DevOps.Api
                                  value: "{{Escape(context.Item.Title)}}"
                                - name: ROSENVALL_SOURCE_PULL_REQUEST_URL
                                  value: "{{Escape(run.SourcePullRequestUrl)}}"
+                               - name: CLAUDE_CODE_OAUTH_TOKEN
+                                 valueFrom:
+                                   secretKeyRef:
+                                     name: rosenvall-devops-claude
+                                     key: token
+                                     optional: true
                                - name: ROSENVALL_CLEANUP_PROMPT_B64
                                  value: "{{prompt}}"
                                - name: ROSENVALL_SOURCE_PR_DIFF_B64
@@ -3462,7 +3469,7 @@ namespace Rosenvall.DevOps.Api
                                  github_token_for_runner="$GITHUB_TOKEN"
                                  unset GITHUB_TOKEN
                                  cat > "$workspace/codex-command.sh" <<'RDO_CODEX_COMMAND'
-                                 codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox {{codexSandbox}} -c "approval_policy=\"never\"" -m "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" - < "$workspace/prompt.md"
+                                 {{agentCommand}}
                                  RDO_CODEX_COMMAND
                                  rdo_run_codex_without_repository_credentials "$workspace" "$workspace/codex-command.sh"
                                  GITHUB_TOKEN="$github_token_for_runner"
@@ -13323,13 +13330,17 @@ namespace Rosenvall.DevOps.Api
                     return null;
                 }
 
-                var model = configuration["Ai:Codex:Model"] ?? "gpt-5.5";
+                var provider = string.IsNullOrWhiteSpace(_defaultAiProvider) ? (configuration["Ai:DefaultProvider"] ?? "ollama") : _defaultAiProvider;
+                var useClaude = string.Equals(provider, "claude", StringComparison.OrdinalIgnoreCase);
+                var model = useClaude
+                    ? (configuration["Ai:Claude:Model"] ?? "claude-opus-4-8")
+                    : (configuration["Ai:Codex:Model"] ?? "gpt-5.5");
                 var reasoningEffort = configuration["Ai:Codex:ReasoningEffort"] ?? "high";
                 var runnerImage = CodexKubernetesRunner.RunnerImage(configuration);
                 var secret = string.IsNullOrWhiteSpace(githubSecretName)
                     ? configuration["GitHub:TokenSecretName"] ?? "rosenvall-devops-github"
                     : githubSecretName.Trim();
-                return RepositoryCleanupJobManifestRenderer.Render(run, repository, context, model, reasoningEffort, secret, CodexKubernetesRunner.SandboxMode(configuration), runnerImage);
+                return RepositoryCleanupJobManifestRenderer.Render(run, repository, context, model, reasoningEffort, secret, CodexKubernetesRunner.SandboxMode(configuration), runnerImage, provider);
             }
         }
 
