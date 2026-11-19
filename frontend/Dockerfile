@@ -22,6 +22,6 @@ RUN npm ci
 COPY frontend ./
 RUN npm run build
 
-FROM nginxinc/nginx-unprivileged:1.29-alpine
+FROM ghcr.io/nginx/nginx-unprivileged:1.31.9-alpine@sha256:60214a103e6f38e953ff957f34b1f2e97a9db801ab2df3821da955d0fe6cadd6
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /src/dist /usr/share/nginx/html
